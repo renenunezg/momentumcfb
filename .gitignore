@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+poetry.lock
+
+# Virtualenv
+.env
+.env.*  # in case you use `.env.local`, `.env.prod`, etc.
+venv/
+env/
+
+# Node
+node_modules/
+.next/
+*.log
+
+# OS
+.DS_Store
