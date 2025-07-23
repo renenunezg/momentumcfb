@@ -1,131 +1,106 @@
-import os, itertools, pandas as pd
-import numpy as np
+#!/usr/bin/env python
 import math
-from tqdm import tqdm
+import sys
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
-load_dotenv()  # pulls SUPABASE_URL & SUPABASE_SERVICE_ROLE_KEY from backend/.env
+
+# ────────────────────────────────────────────────────────────
+# Season constant: update each year
+# ────────────────────────────────────────────────────────────
+SEASON = 2024  # <- update each year
+
+# ────────────────────────────────────────────────────────────
+# set up backend path & env vars
+# ────────────────────────────────────────────────────────────
+BACKEND_ROOT = Path(__file__).resolve().parent.parent
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.append(str(BACKEND_ROOT))
+
+load_dotenv(BACKEND_ROOT / ".env")
+
+from utils.supabase_client import supabase  # noqa: E402
+import os
 import requests
-import datetime
-CFBD_API_KEY = os.getenv("CFBD_API_KEY")
-from supabase import create_client
 
-YEARS = [2024]  
-BATCH = 1000  # Supabase insert limit
+# Set API key and headers
+API_KEY = os.getenv("CFBD_API_KEY")
+headers = {"Authorization": f"Bearer {API_KEY}"}
 
-supabase = create_client(
-    os.getenv("SUPABASE_URL"),
-    os.getenv("SUPABASE_SERVICE_ROLE_KEY")     # service-role key bypasses RLS
+# Fetch PBP data for SEASON across all weeks
+url = "https://api.collegefootballdata.com/plays"
+pbp_list = []
+for w in range(1, 15):
+    resp = requests.get(url, params={"year": SEASON, "week": w}, headers=headers, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    # tag each play with season & week so they persist in the DB
+    for play in data:
+        play["season"] = SEASON
+        play["week"] = w
+    print(f"Week {w}: fetched {len(data)} plays")
+    pbp_list.extend(data)
+print(f"Total plays fetched: {len(pbp_list)}")
+
+pbp = pd.DataFrame(pbp_list)
+# convert CamelCase keys to snake_case to match table schema
+pbp.columns = (
+    pbp.columns
+       .str.replace(r"([a-z0-9])([A-Z])", r"\1_\2", regex=True)
+       .str.lower()
 )
+# ensure both season and week columns exist
+if "season" not in pbp.columns:
+    pbp["season"] = SEASON
+if "week" not in pbp.columns:
+    raise RuntimeError("week column missing after rename step")
 
-def chunks(it, n):
-    it = iter(it)
-    while (c := list(itertools.islice(it, n))):
-        yield c
+# convert NaN to None for JSON
+pbp = pbp.where(pd.notnull(pbp), None)
 
-BASE_URL = "https://api.collegefootballdata.com/plays"
+# manually fix any remaining column mismatches
+pbp = pbp.rename(columns={
+    "id": "play_id",
+    "yardline": "yard_line",
+    "wallclock": "wall_clock"
+})
 
-# --------------------------------------------------
-# Build a dict {year: [weeks_to_fetch]} so we can pull
-# full prior seasons and only the latest finished week
-weeks_map = {}
+print(f"DataFrame created with {len(pbp)} rows and columns: {list(pbp.columns)}")
 
-today = datetime.date.today()
 
-for yr in YEARS:
-    if yr < today.year:
-        # Finished season – fetch every regular‑season week (1‑15)
-        weeks_map[yr] = list(range(1, 16))
-    else:
-        # Current season – only the most‑recent completed week
-        cal_resp = requests.get(
-            "https://api.collegefootballdata.com/calendar",
-            params={"year": yr, "seasonType": "regular"},
-            headers={"Authorization": f"Bearer {CFBD_API_KEY}"}
-        )
-        cal = cal_resp.json()
-        completed_weeks = [
-            w["week"]
-            for w in cal
-            if w.get("lastGameStart")
-            and datetime.date.fromisoformat(w["lastGameStart"][:10]) < today
-        ]
-        if not completed_weeks:
-            print(f"No finished weeks yet for {yr} – nothing to pull.")
-            continue
-        weeks_map[yr] = [max(completed_weeks)]
+# ensure no NaN or infinite values remain
+pbp = pbp.astype(object)
+pbp = pbp.where(pd.notnull(pbp), None)
+pbp = pbp.replace({np.inf: None, -np.inf: None})
 
-for yr, weeks_to_fetch in weeks_map.items():
-    for wk in weeks_to_fetch:
-        params = {
-            "year": yr,
-            "week": wk,
-            "seasonType": "both",   # include bowls later if needed
-        }
-        try:
-            resp = requests.get(
-                BASE_URL,
-                params=params,
-                headers={"Authorization": f"Bearer {CFBD_API_KEY}"}
-            )
-            resp.raise_for_status()
-            import time
-            time.sleep(0.25)
-        except Exception as e:
-            print(f"⚠️  {yr}-W{wk} API error ({e}); skipping.")
-            continue
 
-        try:
-            plays = resp.json()
-        except ValueError:
-            print(f"⚠️  {yr}-W{wk} non‑JSON response; skipping.")
-            continue
+# convert integer-like columns to pandas nullable Int64 (drops .0)
+import pandas as pd  # ensure available
+int_cols = [
+    "game_id", "drive_number", "play_number",
+    "offense_score", "defense_score", "period",
+    "offense_timeouts", "defense_timeouts",
+    "yards_to_goal", "down", "distance", "yards_gained"
+]
+for col in int_cols:
+    if col in pbp.columns:
+        pbp[col] = pd.to_numeric(pbp[col], errors='coerce').astype("Int64")
+print("Post-cast dtypes:", pbp[int_cols].dtypes.to_dict())
 
-        if not plays:
-            continue
+records = pbp.to_dict("records")
+print(f"Upserting {len(records)} records to cfb_pbp")
 
-        df = pd.DataFrame(plays)
-
-        # --- harmonize column names ---
-        rename_map = {
-            "id": "play_id",
-            "gameId": "game_id",
-            "playType": "play_type",
-            "ppa": "epa",
-            "PPA": "epa",
-            "EPA": "epa",
-        }
-        df = df.rename(columns=rename_map)
-
-        # Add season / week if API omits them
-        if "season" not in df.columns:
-            df["season"] = yr
-        if "week" not in df.columns:
-            df["week"] = wk
-
-        wanted = [
-            "season", "week", "game_id", "play_id",
-            "offense", "defense",
-            "down", "distance", "epa", "play_type"
-        ]
-        missing = [c for c in wanted if c not in df.columns]
-        if missing:
-            print(f"⚠️  Missing cols {missing} on {yr}-W{wk}; skipping chunk.")
-            continue
-
-        # Slice wanted columns then scrub impossible numbers
-        slim = (
-            df[wanted]
-            .replace({np.nan: None, np.inf: None, -np.inf: None})
-            .astype(object)
-        )
-
-        # Build batch records after cleaning to avoid np.nan sneaking through
-        records_iter = chunks(slim.to_dict('records'), BATCH)
-
-        for batch in tqdm(records_iter, desc=f"Uploading {yr}-W{wk}"):
-            supabase.table("cfb_pbp").upsert(
-                batch,
-                on_conflict="game_id,play_id"
-            ).execute()
-
-print("✅ Finished back-fill")
+# batch upsert to avoid huge payloads
+batch_size = 1000
+total = len(records)
+print(f"Total records to upsert: {total}")
+for start in range(0, total, batch_size):
+    end = min(start + batch_size, total)
+    batch = records[start:end]
+    print(f"Upserting records {start}–{end-1}")
+    supabase.table("cfb_pbp") \
+        .upsert(batch, on_conflict="game_id,play_id") \
+        .execute()
+print("✅ Loaded and upserted PBP for 2024 W1–W14")
