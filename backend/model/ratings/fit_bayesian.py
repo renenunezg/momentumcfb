@@ -1,139 +1,147 @@
-#!/usr/bin/env python
-# ─── path / env bootstrap ─────────────────────────────────────────────
-from pathlib import Path
+from __future__ import annotations
+"""
+Fit a Bayesian point-spread ratings model and upsert into `power_ratings`.
+
+Uses `game_spreads` for final scores.
+
+Schema refs
+-----------
+game_spreads(game_id, season, week, home_team, away_team,
+             home_points, away_points, …)
+
+power_ratings(team, rating, rating_delta, model_name,
+              season, week, last_updated, …)
+
+Run:
+    cd backend
+    poetry run python model/ratings/fit_bayesian.py
+"""
+
 import sys
-from dotenv import load_dotenv
-import os
-import requests
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import pymc as pm
-from sklearn.linear_model import LinearRegression
-from datetime import datetime, timezone
+from dotenv import load_dotenv
 
-BACKEND_ROOT = Path(__file__).resolve().parent.parent
+# ────────────────────────────────────────────────────────────
+# set up backend path & env vars
+# ────────────────────────────────────────────────────────────
+BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.append(str(BACKEND_ROOT))
+
 load_dotenv(BACKEND_ROOT / ".env")
+
 from utils.supabase_client import supabase  # noqa: E402
-# ──────────────────────────────────────────────────────────────────────
 
-YEAR = 2024
 
-def fetch_epa_stats() -> pd.DataFrame:
-    """Fetch play-by-play EPA and compute net EPA/play per team."""
-    headers = {"Authorization": f"Bearer {os.getenv('CFBD_API_KEY')}"}
-    rows = []
-    for wk in range(1, 15):
-        resp = requests.get(
-            "https://api.collegefootballdata.com/plays",
-            params={"year": YEAR, "week": wk},
-            headers=headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        rows.extend(resp.json())
-    pbp = pd.DataFrame(rows)
-    pbp["off_epa_pp"] = pbp["offense"].apply(lambda d: d["overall"])
-    pbp["def_epa_pp"] = pbp["defense"].apply(lambda d: d["overall"])
-    stats = (
-        pbp.groupby("team", as_index=False)[["off_epa_pp", "def_epa_pp"]]
-           .mean()
-    )
-    stats["net_epa_pp"] = stats["off_epa_pp"] - stats["def_epa_pp"]
-    return stats[["team", "net_epa_pp"]]
-
-def fetch_games() -> pd.DataFrame:
-    """Fetch schedule and final scores."""
-    headers = {"Authorization": f"Bearer {os.getenv('CFBD_API_KEY')}"}
-    resp = requests.get(
-        "https://api.collegefootballdata.com/games",
-        params={"year": YEAR, "seasonType": "regular"},
-        headers=headers,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    g = pd.DataFrame(resp.json())
-    return g[["id", "home_team", "away_team", "home_points", "away_points"]].rename(
-        columns={"id": "game_id"}
+# ────────────────────────────────────────────────────────────
+# data helpers
+# ────────────────────────────────────────────────────────────
+def fetch_finished_games() -> pd.DataFrame:
+    """Return finished-game rows with score differential."""
+    q = supabase.table("game_spreads").select(
+        "game_id, home_team, away_team, home_points, away_points"
     )
 
-def build_game_df(epa_stats: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
-    """Join EPA stats to games, compute epa_diff and actual margin."""
-    df = games.merge(
-        epa_stats.rename(columns={"team": "home_team", "net_epa_pp": "home_net_epa_pp"}),
-        on="home_team",
-        how="left",
-    ).merge(
-        epa_stats.rename(columns={"team": "away_team", "net_epa_pp": "away_net_epa_pp"}),
-        on="away_team",
-        how="left",
-    )
-    df = df.dropna(subset=["home_net_epa_pp", "away_net_epa_pp"])
-    df["epa_diff"] = df["home_net_epa_pp"] - df["away_net_epa_pp"]
-    df["spread_result"] = df["home_points"] - df["away_points"]
-    return df[["game_id", "home_team", "away_team", "epa_diff", "spread_result"]]
+    rows = q.execute().data
+    if not rows:
+        raise RuntimeError("No finished games in `game_spreads`.")
 
-def fit_bayes(df: pd.DataFrame) -> pd.DataFrame:
-    """Fit hierarchical Bayesian model on EPA diff."""
-    teams = pd.unique(df[["home_team", "away_team"]].values.ravel("K"))
+    df = pd.DataFrame(rows)
+    mask = df["home_points"].notna() & df["away_points"].notna()
+    df = df.loc[mask].copy()
+
+    df["score_diff"] = df["home_points"] - df["away_points"]  # + = home wins
+    return df
+
+
+# ────────────────────────────────────────────────────────────
+# Bayesian model
+# ────────────────────────────────────────────────────────────
+def fit_bayesian(df: pd.DataFrame):
+    home_arr = df["home_team"].unique()
+    away_arr = df["away_team"].unique()
+    teams = pd.Index(sorted(set(home_arr).union(away_arr)))
     idx = {t: i for i, t in enumerate(teams)}
-    h = df["home_team"].map(idx).to_numpy()
-    a = df["away_team"].map(idx).to_numpy()
-    y = df["epa_diff"].to_numpy()
+    n = len(teams)
 
-    with pm.Model() as model:
-        σ_team = pm.HalfNormal("σ_team", sigma=1.0)
-        σ_obs = pm.HalfNormal("σ_obs", sigma=1.0)
-        rating = pm.Normal("rating", mu=0.0, sigma=σ_team, shape=len(teams))
-        mu = rating[h] - rating[a]
-        pm.Normal("obs", mu=mu, sigma=σ_obs, observed=y)
-        trace = pm.sample(draws=1000, tune=1000, target_accept=0.9, progressbar=False)
+    home_i = df["home_team"].map(idx).to_numpy()
+    away_i = df["away_team"].map(idx).to_numpy()
+    y = df["score_diff"].to_numpy()
 
-    # Posterior mean rating per team
-    stacked = trace.posterior["rating"].stack(samples=("chain", "draw"))
-    mean_rating = stacked.mean("samples").values
-    return pd.DataFrame({"team": teams, "raw_rating": mean_rating})
+    with pm.Model() as m:
+        raw = pm.Normal("raw_ratings", mu=0, sigma=10, shape=n)
+        ratings = raw - pm.math.mean(raw)             # sum-to-zero constraint
+        hfa = pm.Normal("hfa", mu=2.0, sigma=3.0)
+        sigma = pm.HalfNormal("sigma", sigma=5.0)
 
-def main():
-    # Fetch data
-    epa_stats = fetch_epa_stats()
-    games = fetch_games()
-    game_df = build_game_df(epa_stats, games)
+        mu = ratings[home_i] - ratings[away_i] + hfa
+        pm.Normal("obs", mu=mu, sigma=sigma, observed=y)
 
-    # Fit model
-    bayes_df = fit_bayes(game_df)
+        trace = pm.sample(2000, tune=1000, target_accept=0.9, random_seed=42)
 
-    # Calibrate to point spreads
-    coef = LinearRegression().fit(
-        game_df[["epa_diff"]], game_df["spread_result"]
-    ).coef_[0]
-    bayes_df["rating"] = (bayes_df["raw_rating"] * coef).round(2)
-    bayes_df["rating"] -= bayes_df["rating"].mean()
+    return teams, trace
 
-    # Expand to all FBS teams
-    headers = {"Authorization": f"Bearer {os.getenv('CFBD_API_KEY')}"}
-    teams_data = requests.get(
-        "https://api.collegefootballdata.com/teams/fbs",
-        headers=headers,
-        timeout=30,
-    ).json()
-    all_teams = [t["school"] for t in teams_data]
-    final = (
-        pd.DataFrame({"team": all_teams})
-        .merge(bayes_df[["team", "rating"]], on="team", how="left")
-        .fillna({"rating": 0})
-    )
 
-    # Prepare payload
-    final["rating_delta"] = 0
-    final["last_updated"] = datetime.now(timezone.utc).isoformat()
-    payload = final[["team", "rating", "rating_delta", "last_updated"]].to_dict(
-        "records"
-    )
+# ────────────────────────────────────────────────────────────
+# write to Supabase
+# ────────────────────────────────────────────────────────────
+def upsert_power_ratings(
+    teams: pd.Index,
+    trace,
+    season: int | None,
+    week: int | None,
+) -> None:
+    mean_r = trace.posterior["raw_ratings"].stack(s=("chain", "draw")).mean("s")
+    centered = mean_r - mean_r.mean()
 
-    # Upsert to Supabase
-    supabase.table("power_ratings").upsert(payload, on_conflict="team").execute()
-    print("✅ Bayesian power ratings updated")
+    # fetch conference info from existing EPA stats
+    conf_rows = supabase.table("epa_stats").select("team,conference").execute().data
+    conf_map = {
+        row["team"].lower(): row.get("conference")
+        for row in conf_rows
+        if row.get("conference")
+    }
 
+    # fetch previous Bayesian ratings for delta
+    old_rows = supabase.table("power_ratings")\
+        .select("team,rating")\
+        .execute().data
+    old_map = {row["team"]: row["rating"] for row in old_rows} if old_rows else {}
+
+    ts = datetime.utcnow().isoformat(timespec="seconds")
+    recs = []
+    for t, r in zip(teams, centered.values):
+        old = old_map.get(t)
+        recs.append({
+            "team": t,
+            "conference": conf_map.get(t.lower()),
+            "rating": round(float(r), 2),
+            "rating_delta": round(float(r) - float(old), 2) if old is not None else None,
+            "model_name": "bayesian",
+            "season": season,
+            "week": week,
+            "last_updated": ts,
+        })
+
+    supabase.table("power_ratings").upsert(
+        recs,
+        on_conflict="team"
+    ).execute()
+    print(f"✅  Upserted {len(recs)} rows.")
+
+
+# ────────────────────────────────────────────────────────────
+# main
+# ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    df = fetch_finished_games()
+    print(f"Loaded {len(df):,} games.")
+
+    teams, trace = fit_bayesian(df)
+
+    upsert_power_ratings(teams, trace, season=None, week=None)

@@ -1,79 +1,96 @@
 #!/usr/bin/env python
-# ─── path / env bootstrap ─────────────────────────────────────────────
-from pathlib import Path, sys
+"""
+Fit a linear least-squares point-spread ratings model and upsert into power_ratings.
+"""
+
+import sys
+from pathlib import Path
 from dotenv import load_dotenv
 
-BACKEND_ROOT = Path(__file__).resolve().parent.parent
+# ────────────────────────────────────────────────────────────
+# set up backend path & env vars
+# ────────────────────────────────────────────────────────────
+BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.append(str(BACKEND_ROOT))
 load_dotenv(BACKEND_ROOT / ".env")
-from utils.supabase_client import supabase  # noqa: E402
-# ──────────────────────────────────────────────────────────────────────
 
+from utils.supabase_client import supabase  # noqa: E402
+
+import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
 from datetime import datetime, timezone
 
+# ────────────────────────────────────────────────────────────
+# data fetching
+# ────────────────────────────────────────────────────────────
+def fetch_game_data() -> pd.DataFrame:
+    """Fetch finished games and score differentials."""
+    rows = supabase.table("game_spreads").select(
+        "home_team,away_team,home_points,away_points"
+    ).execute().data
+    if not rows:
+        raise RuntimeError("No games in game_spreads")
+    df = pd.DataFrame(rows)
+    df = df[df["home_points"].notna() & df["away_points"].notna()].copy()
+    return df
 
-def build_stats() -> pd.DataFrame:
-    epa = supabase.table("team_game_epa").select("team,net_epa").execute().data
-    if not epa:
-        raise RuntimeError("team_game_epa empty.")
-    return (
-        pd.DataFrame(epa)
-        .groupby("team", as_index=False)["net_epa"]
-        .mean()
-        .rename(columns={"team": "team_id", "net_epa": "net"})
-    )
+# ────────────────────────────────────────────────────────────
+# model fitting
+# ────────────────────────────────────────────────────────────
+def fit_ratings(df: pd.DataFrame):
+    """Compute team ratings via least-squares."""
+    teams = sorted(set(df["home_team"]) | set(df["away_team"]))
+    idx = {t: i for i, t in enumerate(teams)}
+    m = len(df)
+    n = len(teams)
 
+    X = np.zeros((m, n))
+    y = (df["home_points"] - df["away_points"]).to_numpy()
 
-def sos_adjust(stats: pd.DataFrame) -> pd.DataFrame:
-    sched = supabase.table("schedule").select("home_team,away_team").execute().data
-    if not sched:
-        stats["adj"] = stats.net
-        return stats
+    for i, row in df.iterrows():
+        X[i, idx[row["home_team"]]] = 1
+        X[i, idx[row["away_team"]]] = -1
 
-    sched = pd.DataFrame(sched)
-    opp = (
-        sched.melt(value_name="team_id")[["team_id"]]
-        .merge(stats, on="team_id")
-        .groupby("team_id", as_index=False)["net"]
-        .mean()
-        .rename(columns={"net": "sos"})
-    )
-    stats = stats.merge(opp, on="team_id", how="left").fillna({"sos": 0})
-    stats["adj"] = stats.net - stats.sos
-    return stats
+    # solve least squares: X @ ratings ≈ y
+    ratings, *_ = np.linalg.lstsq(X, y, rcond=None)
+    # center ratings to zero mean
+    ratings = ratings - ratings.mean()
+    return teams, ratings
 
-
-def calibrate_k(stats: pd.DataFrame) -> float:
-    sched = supabase.table("schedule").select("*").execute().data
-    if not sched or "home_points" not in sched[0]:
-        return 1.0
-    sched = pd.DataFrame(sched)
-    g = (
-        sched.merge(stats[["team_id", "adj"]], left_on="home_team", right_on="team_id")
-        .rename(columns={"adj": "h"})
-        .merge(stats[["team_id", "adj"]], left_on="away_team", right_on="team_id")
-        .rename(columns={"adj": "a"})
-    )
-    g["diff"] = g.h - g.a
-    g["margin"] = g.home_points - g.away_points
-    return LinearRegression().fit(g[["diff"]], g["margin"]).coef_[0]
-
-
-def main():
-    stats = sos_adjust(build_stats())
-    k = calibrate_k(stats)
-    stats["rating"] = stats.adj * k - stats.adj.mean()
-    out = stats[["team_id", "rating"]]
-    out["model"] = "linear"
-    out["updated_at"] = datetime.now(timezone.utc).isoformat()
-    supabase.table("team_ratings").upsert(
-        out.to_dict("records"), on_conflict="team_id,model"
+# ────────────────────────────────────────────────────────────
+# write to Supabase
+# ────────────────────────────────────────────────────────────
+def upsert_power_ratings(teams, ratings):
+    """Upsert ratings into power_ratings."""
+    ts = datetime.now(timezone.utc).isoformat()
+    # fetch previous ratings for computing delta
+    old_rows = supabase.table("power_ratings")\
+        .select("team,rating")\
+        .execute().data
+    old_map = {row["team"]: row["rating"] for row in old_rows} if old_rows else {}
+    recs = []
+    for team, r in zip(teams, ratings):
+        old = old_map.get(team)
+        recs.append({
+            "team": team,
+            "rating": round(float(r), 2),
+            "rating_delta": round(float(r) - float(old), 2) if old is not None else None,
+            "model_name": "linear",
+            "season": None,
+            "week": None,
+            "last_updated": ts,
+        })
+    supabase.table("power_ratings").upsert(
+        recs,
+        on_conflict="team"
     ).execute()
-    print("✅ Linear ratings upserted")
+    print(f"✅ Upserted {len(recs)} linear ratings")
 
-
+# ────────────────────────────────────────────────────────────
+# main
+# ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    df = fetch_game_data()
+    teams, ratings = fit_ratings(df)
+    upsert_power_ratings(teams, ratings)
