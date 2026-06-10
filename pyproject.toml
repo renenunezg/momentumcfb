@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "momentumcfb"
+version = "0.2.0"
+description = "College football power ratings"
+authors = ["Rene Nunez <renenunezgalaviz@gmail.com>"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+pandas = "^2.3"
+pyarrow = "^17.0"
+requests = "^2.32"
+python-dotenv = "^1.1"
+pymc = "^5.16"
+arviz = "^0.19"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+markers = ["slow: long model fits"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
