@@ -47,11 +47,12 @@ def load_season_inputs(season: int, variant: str):
 
     talent_df = store.read_talent(season)
     team_col = "school" if "school" in talent_df.columns else "team"
-    talent = talent_df.set_index(team_col)["talent"].astype(float)
+    # CFBD ships duplicate rows in some seasons (2023 talent)
+    talent = talent_df.drop_duplicates(team_col).set_index(team_col)["talent"].astype(float)
 
     ret_df = store.read_returning(season)
     pct_col = "percent_ppa" if "percent_ppa" in ret_df.columns else "percent_p_p_a"
-    returning = ret_df.set_index("team")[pct_col].astype(float)
+    returning = ret_df.drop_duplicates("team").set_index("team")[pct_col].astype(float)
     return games, talent, returning
 
 
