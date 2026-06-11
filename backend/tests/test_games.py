@@ -23,18 +23,18 @@ def test_flatten_lines_takes_median_spread():
 def make_inputs():
     games = pd.DataFrame(
         {
-            "id": [10, 11],
-            "season": [2024, 2024],
-            "week": [1, 1],
-            "season_type": ["regular", "regular"],
-            "completed": [True, True],
-            "neutral_site": [False, True],
-            "home_team": ["A", "C"],
-            "away_team": ["B", "Tiny State"],
-            "home_classification": ["fbs", "fbs"],
-            "away_classification": ["fbs", "fcs"],
-            "home_points": [28, 35],
-            "away_points": [21, 3],
+            "id": [10, 11, 12],
+            "season": [2024, 2024, 2024],
+            "week": [1, 1, 1],
+            "season_type": ["regular", "regular", "regular"],
+            "completed": [True, True, True],
+            "neutral_site": [False, True, False],
+            "home_team": ["A", "C", "Tiny State"],
+            "away_team": ["B", "Tiny State", "Little Tech"],
+            "home_classification": ["fbs", "fbs", "fcs"],
+            "away_classification": ["fbs", "fcs", "fcs"],
+            "home_points": [28, 35, 24],
+            "away_points": [21, 3, 17],
         }
     )
     lines = pd.DataFrame(
@@ -65,3 +65,5 @@ def test_build_games_joins_and_pools_fcs():
     assert g11.away_team == "FCS"
     assert pd.isna(g11.closing_spread)
     assert g11.epa_margin == 25.0
+
+    assert 12 not in out.game_id.values

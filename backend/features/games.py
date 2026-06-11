@@ -61,6 +61,7 @@ def build_games(
     for side in ("home", "away"):
         fcs = g[f"{side}_classification"].str.lower() != "fbs"
         g.loc[fcs, f"{side}_team"] = FCS_LABEL
+    g = g[(g["home_team"] != FCS_LABEL) | (g["away_team"] != FCS_LABEL)]
 
     max_reg = g.loc[g["season_type"] == "regular", "week"].max()
     g["week_index"] = np.where(
