@@ -22,7 +22,7 @@ def parse_args(argv=None):
     bt = sub.add_parser("backtest", help="walk forward backtest vs closing lines")
     bt.add_argument("--seasons", type=int, nargs="+", default=SEASONS)
     bt.add_argument("--variant", choices=["all", "filtered"], default="filtered")
-    bt.add_argument("--method", choices=["advi", "nuts"], default="advi")
+    bt.add_argument("--method", choices=["advi", "nuts"], default="nuts")
 
     return p.parse_args(argv)
 

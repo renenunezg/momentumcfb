@@ -7,7 +7,7 @@ from backend.model.priors import fit_prior_weights, preseason_prior
 from backend.model.state_space import build_model, extract_ratings, fit, predict_margin
 
 
-def pymc_fitter(method: str = "advi", seed: int = 42):
+def pymc_fitter(method: str = "nuts", seed: int = 42):
     def _fitter(train, prior, n_states, test):
         model = build_model(train, prior, n_states)
         idata = fit(model, method=method, seed=seed)
@@ -67,7 +67,7 @@ def build_season_prior(season, teams, talent, returning, history):
     return preseason_prior(teams, talent, returning, prev_final=prev_final, weights=weights)
 
 
-def run_backtest(seasons, variant="filtered", method="advi", seed=42) -> pd.DataFrame:
+def run_backtest(seasons, variant="filtered", method="nuts", seed=42) -> pd.DataFrame:
     fitter = pymc_fitter(method=method, seed=seed)
     history: dict[int, dict] = {}
     predictions = []
