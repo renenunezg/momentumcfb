@@ -107,7 +107,22 @@ The Odds API (existing account/key; free 500 credits/month, MLB model uses under
 - Schema validation on CFBD responses with clear failure messages (CFBD schema drift was a known risk in the original PRD)
 - Idempotent ETL: re-runs overwrite partitions, never duplicate
 
-## 9. Phases
+## 9. Backtest results (2026-06-12)
+
+Walk-forward backtest, NUTS fits (ADVI was rejected: posterior nets drifted 3.7 points on average from NUTS on the 2024 validation fit). 3,819 predicted games across 2021-2025.
+
+| Variant | MAE | ATS at 2+ | ATS at 3+ | ATS at 4+ |
+|---|---|---|---|---|
+| Garbage-time filtered | 13.40 | 50.0% (2,965) | 49.8% (2,549) | 49.4% (2,158) |
+| Unfiltered | 13.82 | 50.1% (3,099) | 49.6% (2,724) | 49.7% (2,380) |
+
+Per-season at the 3+ threshold (filtered): 2021 51.2%, 2022 47.6%, 2023 49.8%, 2024 48.9%, 2025 51.3%. Calibration is flat to inverted: the 6+ edge bucket covers at 48.8%, meaning large disagreements with the closer are evidence the market knows something, not that we do. Splits are symmetric (home picks 50.0%, away picks 49.6%) and the early-season weeks driven by preseason priors are worse (48.6%) than midseason (50.4%).
+
+Verdict: the 53% bar at the 3+ edge threshold is not met. The model reproduces market-consensus strength estimates (MAE 13.4 vs a closer baseline near 12.5-13) but has no exploitable edge over closing lines in this form. Filtered EPA beats unfiltered on MAE and is the variant to keep. Phase 2 (automation, live odds, site) stays on hold per the success criteria.
+
+What to try next, in rough order of expected value: evaluate against opening lines instead of closers (the bar a weekly model realistically needs to clear), shrink predictions toward the market line and look for residual value pockets, tune the innovation scale and prior strength on 2019-2020 holdout, test situational features the market may price slowly (rest days, travel, QB changes), and check conference and total-size splits for localized edges.
+
+## 10. Phases
 
 | Phase | Deliverable |
 |---|---|
