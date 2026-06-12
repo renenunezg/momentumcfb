@@ -122,6 +122,8 @@ Verdict: the 53% bar at the 3+ edge threshold is not met. The model reproduces m
 
 Against opening lines instead of closers the picture improves: 51.4% at the 3+ threshold (2,429 decided picks), every calibration bucket above 50%, and 2023/2025 above 53%. Still short of the 52.4% breakeven on median openers. The decisive result is closing line value: on 3+ edge picks at the opener, the close moves toward the model's side 59.3% of the time (61.0% at 4+ edges, flats excluded). The model identifies real information that the market prices in between open and close. The shortfall is execution (median opener, single number) rather than absence of signal.
 
+Executed at the best available opener instead of the median (CFBD carries about 2 books of openers per game), the same picks go 52.9% at the 3+ threshold and 53.4% at 2+, clearing the 52.4% breakeven, with 2023-2025 at 54.2%, 53.5% and 55.5%. Caveats: 2021-2022 opener coverage is thin and those seasons sit at or below water, and the simulation assumes the best opener was gettable. Taken with the CLV result, the conclusion is that the edge is real but lives in execution at open with line shopping, which is what phase 2 automates via The Odds API.
+
 What to try next, in rough order of expected value: evaluate against opening lines instead of closers (the bar a weekly model realistically needs to clear), shrink predictions toward the market line and look for residual value pockets, tune the innovation scale and prior strength on 2019-2020 holdout, test situational features the market may price slowly (rest days, travel, QB changes), and check conference and total-size splits for localized edges.
 
 ## 10. Phases
