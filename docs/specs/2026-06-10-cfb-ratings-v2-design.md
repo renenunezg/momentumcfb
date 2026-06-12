@@ -120,6 +120,8 @@ Per-season at the 3+ threshold (filtered): 2021 51.2%, 2022 47.6%, 2023 49.8%, 2
 
 Verdict: the 53% bar at the 3+ edge threshold is not met. The model reproduces market-consensus strength estimates (MAE 13.4 vs a closer baseline near 12.5-13) but has no exploitable edge over closing lines in this form. Filtered EPA beats unfiltered on MAE and is the variant to keep. Phase 2 (automation, live odds, site) stays on hold per the success criteria.
 
+Against opening lines instead of closers the picture improves: 51.4% at the 3+ threshold (2,429 decided picks), every calibration bucket above 50%, and 2023/2025 above 53%. Still short of the 52.4% breakeven on median openers. The decisive result is closing line value: on 3+ edge picks at the opener, the close moves toward the model's side 59.3% of the time (61.0% at 4+ edges, flats excluded). The model identifies real information that the market prices in between open and close. The shortfall is execution (median opener, single number) rather than absence of signal.
+
 What to try next, in rough order of expected value: evaluate against opening lines instead of closers (the bar a weekly model realistically needs to clear), shrink predictions toward the market line and look for residual value pockets, tune the innovation scale and prior strength on 2019-2020 holdout, test situational features the market may price slowly (rest days, travel, QB changes), and check conference and total-size splits for localized edges.
 
 ## 10. Phases
