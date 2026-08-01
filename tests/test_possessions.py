@@ -1,0 +1,235 @@
+import pandas as pd
+from pandas.testing import assert_frame_equal
+
+from backend.features.possessions import (
+    build_possessions,
+    build_team_games,
+    classify_plays,
+)
+
+
+def test_raw_plays_build_deterministic_possession_and_team_game_features():
+    common = {
+        "game_id": 1,
+        "season": 2026,
+        "week": 1,
+        "season_type": "regular",
+        "home": "A",
+        "away": "B",
+    }
+    rows = [
+        {
+            **common,
+            "id": 1,
+            "drive_id": "merged-drive",
+            "drive_number": 1,
+            "play_number": 1,
+            "period": 1,
+            "clock": {"minutes": 15, "seconds": 0},
+            "offense": "B",
+            "defense": "A",
+            "offense_score": 0,
+            "defense_score": 0,
+            "down": 1,
+            "distance": 10,
+            "yards_gained": 0,
+            "yards_to_goal": 65,
+            "scoring": False,
+            "play_type": "Kickoff",
+            "play_text": "B kickoff to A",
+            "ppa": None,
+        },
+        {
+            **common,
+            "id": 2,
+            "drive_id": "merged-drive",
+            "drive_number": 1,
+            "play_number": 2,
+            "period": 1,
+            "clock": {"minutes": 14, "seconds": 40},
+            "offense": "A",
+            "defense": "B",
+            "offense_score": 0,
+            "defense_score": 0,
+            "down": 1,
+            "distance": 10,
+            "yards_gained": 6,
+            "yards_to_goal": 75,
+            "scoring": False,
+            "play_type": "Rush",
+            "play_text": "A rushes for 6 yards",
+            "ppa": 0.5,
+        },
+        {
+            **common,
+            "id": 3,
+            "drive_id": "merged-drive",
+            "drive_number": 1,
+            "play_number": 3,
+            "period": 1,
+            "clock": {"minutes": 0, "seconds": 0},
+            "offense": "A",
+            "defense": "B",
+            "offense_score": 0,
+            "defense_score": 0,
+            "down": 0,
+            "distance": 0,
+            "yards_gained": 0,
+            "yards_to_goal": 69,
+            "scoring": False,
+            "play_type": "End Period",
+            "play_text": "End of first quarter",
+            "ppa": -5.0,
+        },
+        {
+            **common,
+            "id": 4,
+            "drive_id": "merged-drive",
+            "drive_number": 1,
+            "play_number": 4,
+            "period": 2,
+            "clock": {"minutes": 14, "seconds": 50},
+            "offense": "A",
+            "defense": "B",
+            "offense_score": 7,
+            "defense_score": 0,
+            "down": 1,
+            "distance": 10,
+            "yards_gained": 20,
+            "yards_to_goal": 20,
+            "scoring": True,
+            "play_type": "Passing Touchdown",
+            "play_text": "A passes for a touchdown",
+            "ppa": 3.0,
+        },
+        {
+            **common,
+            "id": 5,
+            "drive_id": "merged-drive",
+            "drive_number": 1,
+            "play_number": 5,
+            "period": 2,
+            "clock": {"minutes": 14, "seconds": 50},
+            "offense": "A",
+            "defense": "B",
+            "offense_score": 7,
+            "defense_score": 0,
+            "down": 1,
+            "distance": 10,
+            "yards_gained": 0,
+            "yards_to_goal": 65,
+            "scoring": False,
+            "play_type": "Kickoff",
+            "play_text": "A kickoff to B",
+            "ppa": None,
+        },
+        {
+            **common,
+            "id": 6,
+            "drive_id": "merged-drive",
+            "drive_number": 1,
+            "play_number": 6,
+            "period": 2,
+            "clock": {"minutes": 14, "seconds": 30},
+            "offense": "B",
+            "defense": "A",
+            "offense_score": 0,
+            "defense_score": 7,
+            "down": 1,
+            "distance": 10,
+            "yards_gained": 2,
+            "yards_to_goal": 75,
+            "scoring": False,
+            "play_type": "Rush",
+            "play_text": "B rushes for 2 yards",
+            "ppa": -0.2,
+        },
+        {
+            **common,
+            "id": 7,
+            "drive_id": "merged-drive",
+            "drive_number": 1,
+            "play_number": 7,
+            "period": 2,
+            "clock": {"minutes": 13, "seconds": 50},
+            "offense": "B",
+            "defense": "A",
+            "offense_score": 0,
+            "defense_score": 7,
+            "down": 4,
+            "distance": 8,
+            "yards_gained": 0,
+            "yards_to_goal": 73,
+            "scoring": False,
+            "play_type": "Punt",
+            "play_text": "B punts to A",
+            "ppa": None,
+        },
+        {
+            **common,
+            "id": 8,
+            "drive_id": "final-drive",
+            "drive_number": 2,
+            "play_number": 1,
+            "period": 4,
+            "clock": {"minutes": 1, "seconds": 10},
+            "offense": "A",
+            "defense": "B",
+            "offense_score": 7,
+            "defense_score": 0,
+            "down": 1,
+            "distance": 10,
+            "yards_gained": 5,
+            "yards_to_goal": 60,
+            "scoring": False,
+            "play_type": "Rush",
+            "play_text": "A rushes for 5 yards",
+            "ppa": 0.1,
+        },
+        {
+            **common,
+            "id": 9,
+            "drive_id": "final-drive",
+            "drive_number": 2,
+            "play_number": 2,
+            "period": 4,
+            "clock": {"minutes": 0, "seconds": 30},
+            "offense": "A",
+            "defense": "B",
+            "offense_score": 7,
+            "defense_score": 0,
+            "down": 2,
+            "distance": 5,
+            "yards_gained": -1,
+            "yards_to_goal": 55,
+            "scoring": False,
+            "play_type": "Rush",
+            "play_text": "A kneels for a loss of 1 yard",
+            "ppa": -1.0,
+        },
+    ]
+    raw = pd.DataFrame(rows).sample(frac=1, random_state=7).reset_index(drop=True)
+
+    classified = classify_plays(raw)
+    possessions = build_possessions(raw)
+    rebuilt = build_possessions(raw)
+    team_games = build_team_games(possessions)
+
+    assert_frame_equal(possessions, rebuilt)
+    assert classified.loc[classified["id"].eq(3), "play_category"].item() == "administrative"
+    assert classified.loc[classified["id"].eq(9), "play_category"].item() == "clock_management"
+    assert possessions["possession_id"].is_unique
+    assert len(possessions) == 3
+    assert possessions["competitive_plays"].sum() == 4
+    assert abs(possessions["epa_total"].sum() - 3.4) < 1e-9
+    assert not {"End Period", "Kickoff", "Punt"} & set(
+        classified.loc[classified["is_competitive"], "play_type"]
+    )
+
+    a = team_games[team_games["team"].eq("A")].iloc[0]
+    assert a["offense_possessions"] == 2
+    assert a["defense_possessions"] == 1
+    assert a["offense_competitive_plays"] == 3
+    assert "offense_epa_per_play" in team_games
+    assert "defense_epa_per_play_allowed" in team_games
+    assert "game_possessions" in team_games

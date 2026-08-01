@@ -9,7 +9,9 @@ export default function Home() {
 
   useEffect(() => {
     const fetchData = async () => {
-      const { data, error } = await supabase.from<'power_ratings', Rating>('power_ratings').select('*')
+      const { data, error } = await supabase
+        .from<'team_ratings', Rating>('team_ratings')
+        .select('*')
       if (error) {
         console.error('Supabase error:', error)
       } else {
