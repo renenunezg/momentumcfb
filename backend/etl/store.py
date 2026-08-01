@@ -4,7 +4,12 @@ from backend.config import PROCESSED_DIR, RAW_DIR
 
 
 def read_season_pbp(season: int) -> pd.DataFrame:
-    files = sorted((RAW_DIR / "pbp" / str(season)).glob("*.parquet"))
+    season_dir = RAW_DIR / "pbp" / str(season)
+    canonical = season_dir / "canonical.parquet"
+    if canonical.exists():
+        return pd.read_parquet(canonical)
+
+    files = sorted(season_dir.glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"no pbp parquet for {season}, run ingest first")
     return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)

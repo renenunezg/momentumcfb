@@ -7,22 +7,21 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="backend")
     sub = p.add_subparsers(dest="command", required=True)
 
-    ing = sub.add_parser("ingest", help="pull CFBD data into raw parquet")
+    ing = sub.add_parser("ingest", help="pull source data into raw parquet")
     ing.add_argument("--seasons", type=int, nargs="+", default=SEASONS)
     ing.add_argument("--week", type=int, default=None)
+    ing.add_argument(
+        "--pbp-source",
+        choices=["sportsdataverse", "cfbd"],
+        default="sportsdataverse",
+    )
 
-    feat = sub.add_parser("features", help="build team_game_epa parquet")
+    feat = sub.add_parser("features", help="build possession and team-game features")
     feat.add_argument("--seasons", type=int, nargs="+", default=SEASONS)
 
-    fit = sub.add_parser("fit", help="fit one season and print ratings")
+    fit = sub.add_parser("fit", help="fit joint scoring ratings and projections")
     fit.add_argument("--season", type=int, required=True)
-    fit.add_argument("--variant", choices=["all", "filtered"], default="filtered")
-    fit.add_argument("--method", choices=["advi", "nuts"], default="nuts")
-
-    bt = sub.add_parser("backtest", help="walk forward backtest vs closing lines")
-    bt.add_argument("--seasons", type=int, nargs="+", default=SEASONS)
-    bt.add_argument("--variant", choices=["all", "filtered"], default="filtered")
-    bt.add_argument("--method", choices=["advi", "nuts"], default="nuts")
+    fit.add_argument("--week", type=int, default=None)
 
     return p.parse_args(argv)
 
@@ -36,47 +35,55 @@ def main(argv=None):
 
         client = CFBDClient()
         for season in args.seasons:
-            ingest_season(client, season, only_week=args.week)
+            ingest_season(
+                client,
+                season,
+                only_week=args.week,
+                pbp_source=args.pbp_source,
+            )
 
     elif args.command == "features":
         from backend.etl import store
-        from backend.features.epa import team_game_epa
+        from backend.features.possessions import build_possessions, build_team_games
 
         for season in args.seasons:
             plays = store.read_season_pbp(season)
-            out = team_game_epa(plays)
-            store.write_processed(out, "team_game_epa", f"{season}.parquet")
-            print(f"{season}: {len(out)} team game rows")
+            possessions = build_possessions(plays)
+            team_games = build_team_games(possessions)
+            store.write_processed(possessions, "possessions", f"{season}.parquet")
+            store.write_processed(team_games, "team_games", f"{season}.parquet")
+            print(
+                f"{season}: {len(possessions)} possessions, "
+                f"{len(team_games)} team-game rows"
+            )
 
     elif args.command == "fit":
-        from backend.backtest.harness import (
-            build_season_prior,
-            load_season_inputs,
-            season_teams,
+        from datetime import timedelta
+
+        import pandas as pd
+
+        from backend.etl import store
+        from backend.features.scoring import build_scoring_games
+        from backend.model.joint_scoring import fit_joint_scoring
+
+        games = build_scoring_games(
+            store.read_games(args.season),
+            store.read_processed("team_games", f"{args.season}.parquet"),
         )
-        from backend.etl import store
-        from backend.model.state_space import fit_ratings
-
-        games, talent, returning = load_season_inputs(args.season, args.variant)
-        prior = build_season_prior(args.season, season_teams(games), talent, returning, {})
-        n_states = int(games["week_index"].max()) + 1
-        ratings, _ = fit_ratings(games, prior, n_states, method=args.method)
-        store.write_processed(ratings, "ratings", f"{args.season}.parquet")
+        forecast_week = args.week or int(games["model_week"].max()) + 1
+        target = games[games["model_week"].eq(forecast_week)]
+        as_of = (
+            target["start_date"].min()
+            if not target.empty
+            else games["start_date"].max() + timedelta(seconds=1)
+        ).to_pydatetime()
+        fitted = fit_joint_scoring(games, forecast_week, as_of)
+        ratings = pd.DataFrame(rating.to_record() for rating in fitted.ratings())
+        projections = pd.DataFrame(
+            projection.to_record() for projection in fitted.project(target)
+        )
+        filename = f"{args.season}_{forecast_week:02d}.parquet"
+        store.write_processed(ratings, "ratings", filename)
+        store.write_processed(projections, "projections", filename)
         print(ratings.head(30).to_string(index=False))
-
-    elif args.command == "backtest":
-        from backend.backtest.harness import run_backtest
-        from backend.backtest.metrics import ats_summary, calibration_table, mae
-        from backend.etl import store
-
-        preds = run_backtest(args.seasons, variant=args.variant, method=args.method)
-        store.write_processed(preds, "backtest", f"predictions_{args.variant}.parquet")
-        print(f"\nMAE vs actual margin: {mae(preds):.2f}")
-        print("\nATS by edge threshold:")
-        print(ats_summary(preds).to_string(index=False))
-        print("\nCalibration:")
-        print(calibration_table(preds).to_string(index=False))
-        print("\nBy season:")
-        for season, grp in preds.groupby("season"):
-            row = ats_summary(grp, thresholds=(3.0,)).iloc[0]
-            print(f"  {season}: {row.wins}-{row.losses} ({row.win_pct:.1%}) at 3+ edge")
+        print(f"wrote {len(ratings)} ratings and {len(projections)} projections")

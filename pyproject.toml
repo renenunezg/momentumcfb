@@ -11,14 +11,13 @@ pandas = "^2.3"
 pyarrow = "^17.0"
 requests = "^2.32"
 python-dotenv = "^1.1"
-pymc = "^5.16"
-arviz = "^0.19"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"
 
 [tool.pytest.ini_options]
-testpaths = ["backend/tests"]
+testpaths = ["tests"]
+pythonpath = ["."]
 markers = ["slow: long model fits"]
 
 [build-system]
