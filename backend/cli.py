@@ -23,6 +23,11 @@ def parse_args(argv=None):
     fit.add_argument("--season", type=int, required=True)
     fit.add_argument("--week", type=int, default=None)
 
+    sub.add_parser(
+        "calibrate",
+        help="tune and diagnose chronological joint scoring projections",
+    )
+
     return p.parse_args(argv)
 
 
@@ -87,3 +92,32 @@ def main(argv=None):
         store.write_processed(projections, "projections", filename)
         print(ratings.head(30).to_string(index=False))
         print(f"wrote {len(ratings)} ratings and {len(projections)} projections")
+
+    elif args.command == "calibrate":
+        from backend.etl import store
+        from backend.features.scoring import build_scoring_games
+        from backend.model.calibration import format_diagnostic, run_calibration
+
+        games_by_season = {
+            season: build_scoring_games(
+                store.read_games(season),
+                store.read_processed("team_games", f"{season}.parquet"),
+            )
+            for season in SEASONS
+        }
+        result = run_calibration(games_by_season, progress=print)
+        store.write_processed(
+            result.predictions,
+            "calibration",
+            "joint_scoring_predictions.parquet",
+        )
+        store.write_processed(
+            result.summary,
+            "calibration",
+            "joint_scoring_summary.parquet",
+        )
+        print(format_diagnostic(result.summary))
+        print(
+            f"wrote {len(result.predictions)} predictions and "
+            f"{len(result.summary)} calibration rows"
+        )
