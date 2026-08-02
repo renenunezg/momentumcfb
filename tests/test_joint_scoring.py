@@ -77,3 +77,17 @@ def test_joint_model_is_leak_free_and_reconciles_outputs():
         assert projection.margin_sd > 0
         assert projection.total_sd > 0
         assert -1 < projection.margin_total_correlation < 1
+
+    fcs_games = games.copy()
+    fcs_games.loc[fcs_games["home_team"].eq("D"), "home_classification"] = "fcs"
+    fcs_games.loc[fcs_games["away_team"].eq("D"), "away_classification"] = "fcs"
+    fcs_fit = fit_joint_scoring(fcs_games, forecast_week=3, as_of=as_of)
+    fcs_ratings = pd.DataFrame(rating.to_record() for rating in fcs_fit.ratings())
+    classifications = fcs_fit.teams.set_index("team_id")["classification"]
+    fcs_ratings["classification"] = fcs_ratings["team_id"].map(classifications)
+    assert set(fcs_ratings["classification"]) == {"fbs", "fcs"}
+    assert abs(
+        fcs_ratings.loc[
+            fcs_ratings["classification"].eq("fbs"), "power_rating"
+        ].mean()
+    ) < 1e-10

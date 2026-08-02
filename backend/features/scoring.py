@@ -5,11 +5,12 @@ import pandas as pd
 def build_scoring_games(
     games: pd.DataFrame, team_games: pd.DataFrame
 ) -> pd.DataFrame:
-    """Join completed schedules and possession features into one row per game."""
+    """Join completed Division I schedules and possession features by game."""
     schedule = games[games["completed"].fillna(False)].copy()
+    division_one = {"fbs", "fcs"}
     schedule = schedule[
-        schedule["home_classification"].str.lower().eq("fbs")
-        & schedule["away_classification"].str.lower().eq("fbs")
+        schedule["home_classification"].str.lower().isin(division_one)
+        & schedule["away_classification"].str.lower().isin(division_one)
     ]
     schedule = schedule.rename(
         columns={

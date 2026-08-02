@@ -28,6 +28,18 @@ def parse_args(argv=None):
         help="tune and diagnose chronological joint scoring projections",
     )
 
+    preseason = sub.add_parser(
+        "preseason",
+        help="build timestamped preseason ratings and market comparisons",
+    )
+    preseason.add_argument("--season", type=int, required=True)
+    preseason.add_argument("--week", type=int, default=1)
+    preseason.add_argument(
+        "--refresh",
+        action="store_true",
+        help="refresh the source snapshot from CFBD before forecasting",
+    )
+
     return p.parse_args(argv)
 
 
@@ -121,3 +133,41 @@ def main(argv=None):
             f"wrote {len(result.predictions)} predictions and "
             f"{len(result.summary)} calibration rows"
         )
+
+    elif args.command == "preseason":
+        from backend.cfbd.client import CFBDClient
+        from backend.etl.ingest import ingest_preseason_sources
+        from backend.model.preseason import run_preseason_forecast
+        from backend.odds.client import OddsAPIClient, OddsAPIError
+
+        if args.refresh:
+            try:
+                odds_client = OddsAPIClient()
+            except OddsAPIError as exc:
+                odds_client = None
+                print(f"WARNING: {exc}; retaining unpriced CFBD market fallback")
+            ingest_preseason_sources(
+                CFBDClient(), args.season, odds_client=odds_client
+            )
+        result = run_preseason_forecast(args.season, args.week)
+        print(
+            result.ratings[
+                [
+                    "team",
+                    "classification",
+                    "power_rating",
+                    "offense_points",
+                    "defense_points",
+                    "power_rating_sd",
+                    "missing_input_count",
+                ]
+            ]
+            .head(25)
+            .to_string(index=False)
+        )
+        print(
+            f"wrote {len(result.ratings)} ratings, "
+            f"{len(result.projections)} projections, and "
+            f"{len(result.market_comparisons)} market comparisons"
+        )
+        print(f"forecast log: {result.log_directory}")
