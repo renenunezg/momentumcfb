@@ -156,6 +156,33 @@ class GameProjection:
     def model_total(self) -> float:
         return self.expected_home_points + self.expected_away_points
 
+    @property
+    def margin_total_covariance(self) -> float:
+        return self.margin_total_correlation * self.margin_sd * self.total_sd
+
+    @property
+    def home_score_sd(self) -> float:
+        variance = 0.25 * (
+            self.margin_sd**2
+            + self.total_sd**2
+            + 2 * self.margin_total_covariance
+        )
+        return variance**0.5
+
+    @property
+    def away_score_sd(self) -> float:
+        variance = 0.25 * (
+            self.margin_sd**2
+            + self.total_sd**2
+            - 2 * self.margin_total_covariance
+        )
+        return variance**0.5
+
+    @property
+    def home_away_correlation(self) -> float:
+        covariance = 0.25 * (self.total_sd**2 - self.margin_sd**2)
+        return covariance / (self.home_score_sd * self.away_score_sd)
+
     def to_record(self) -> dict[str, object]:
         return {
             "season": self.season,
@@ -174,6 +201,9 @@ class GameProjection:
             "home_margin": self.home_margin,
             "home_spread": self.home_spread,
             "model_total": self.model_total,
+            "home_score_sd": self.home_score_sd,
+            "away_score_sd": self.away_score_sd,
+            "home_away_correlation": self.home_away_correlation,
             "margin_sd": self.margin_sd,
             "total_sd": self.total_sd,
             "margin_total_correlation": self.margin_total_correlation,

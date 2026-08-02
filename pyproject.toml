@@ -8,9 +8,11 @@ package-mode = false
 [tool.poetry.dependencies]
 python = ">=3.11,<3.13"
 pandas = "^2.3"
+numpy = "^2.4"
 pyarrow = "^17.0"
 requests = "^2.32"
 python-dotenv = "^1.1"
+scipy = "^1.17"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"

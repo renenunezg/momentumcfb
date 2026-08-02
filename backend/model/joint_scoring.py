@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+from math import isfinite, isnan
 
 import numpy as np
 import pandas as pd
@@ -7,12 +8,48 @@ import pandas as pd
 from backend.model.outputs import GameProjection, TeamRating
 
 MODEL_VERSION = "joint_scoring_v1"
-RATING_HALF_LIFE_WEEKS = 6.0
-STRENGTH_PRIOR_SD_PPP = 0.55
 PACE_PRIOR_SD = 2.0
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
-STUDENT_T_DF = 7.0
+
+
+@dataclass(frozen=True, slots=True)
+class JointScoringConfig:
+    rating_half_life_weeks: float = 6.0
+    strength_prior_sd_ppp: float = 0.55
+    covariance_shrinkage: float = 0.1
+    student_t_degrees_of_freedom: float = 7.0
+    score_covariance_scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        if isnan(self.rating_half_life_weeks) or self.rating_half_life_weeks <= 0:
+            raise ValueError("rating_half_life_weeks must be positive")
+        if (
+            not isfinite(self.strength_prior_sd_ppp)
+            or self.strength_prior_sd_ppp <= 0
+        ):
+            raise ValueError("strength_prior_sd_ppp must be positive")
+        if not 0 <= self.covariance_shrinkage < 1:
+            raise ValueError("covariance_shrinkage must be in [0, 1)")
+        if (
+            not isfinite(self.student_t_degrees_of_freedom)
+            or self.student_t_degrees_of_freedom <= 2
+        ):
+            raise ValueError("student_t_degrees_of_freedom must exceed 2")
+        if (
+            not isfinite(self.score_covariance_scale)
+            or self.score_covariance_scale <= 0
+        ):
+            raise ValueError("score_covariance_scale must be positive")
+
+
+DEFAULT_CONFIG = JointScoringConfig(
+    rating_half_life_weeks=float("inf"),
+    strength_prior_sd_ppp=0.45,
+    covariance_shrinkage=0.8,
+    student_t_degrees_of_freedom=500.0,
+    score_covariance_scale=1.125,
+)
 
 
 def _solve_ridge(
@@ -29,10 +66,11 @@ def _solve_ridge(
     return covariance @ rhs, covariance
 
 
-def _regularized_covariance(residuals: np.ndarray, floor: float) -> np.ndarray:
+def _regularized_covariance(
+    residuals: np.ndarray, floor: float, shrinkage: float
+) -> np.ndarray:
     covariance = np.cov(residuals, rowvar=False, ddof=1)
     covariance = np.atleast_2d(covariance).astype(float)
-    shrinkage = 0.1
     diagonal = np.diag(np.diag(covariance))
     return (1 - shrinkage) * covariance + shrinkage * diagonal + np.eye(2) * floor
 
@@ -80,6 +118,7 @@ class JointScoringFit:
     hfa_ppp: float
     parameter_covariance: np.ndarray
     score_residual_covariance: np.ndarray
+    config: JointScoringConfig
 
     @property
     def team_index(self) -> dict[int, int]:
@@ -149,6 +188,7 @@ class JointScoringFit:
             score_covariance = self.score_residual_covariance + (
                 score_design @ self.parameter_covariance @ score_design.T
             )
+            score_covariance *= self.config.score_covariance_scale**2
             transform = np.array([[1.0, -1.0], [1.0, 1.0]])
             margin_total_covariance = transform @ score_covariance @ transform.T
             margin_sd = float(np.sqrt(margin_total_covariance[0, 0]))
@@ -174,14 +214,17 @@ class JointScoringFit:
                     margin_sd=margin_sd,
                     total_sd=total_sd,
                     margin_total_correlation=float(np.clip(correlation, -0.999, 0.999)),
-                    degrees_of_freedom=STUDENT_T_DF,
+                    degrees_of_freedom=self.config.student_t_degrees_of_freedom,
                 )
             )
         return projections
 
 
 def fit_joint_scoring(
-    games: pd.DataFrame, forecast_week: int, as_of: datetime
+    games: pd.DataFrame,
+    forecast_week: int,
+    as_of: datetime,
+    config: JointScoringConfig = DEFAULT_CONFIG,
 ) -> JointScoringFit:
     """Fit ratings using only games strictly before the requested model week."""
     if as_of.tzinfo is None or as_of.utcoffset() is None:
@@ -189,6 +232,10 @@ def fit_joint_scoring(
     training = games[games["model_week"] < forecast_week].copy()
     if training.empty:
         raise ValueError("at least one prior model week is required")
+    if "start_date" in training:
+        latest_training_start = pd.to_datetime(training["start_date"], utc=True).max()
+        if latest_training_start.to_pydatetime() >= as_of:
+            raise ValueError("training games must start before as_of")
     catalog = _team_catalog(games)
     team_index = {
         int(team_id): index for index, team_id in enumerate(catalog["team_id"])
@@ -221,7 +268,9 @@ def fit_joint_scoring(
             game.home_epa_per_possession,
             game.away_epa_per_possession,
         ]
-        weight = 0.5 ** ((latest_week - game.model_week) / RATING_HALF_LIFE_WEEKS)
+        weight = 0.5 ** (
+            (latest_week - game.model_week) / config.rating_half_life_weeks
+        )
         recency[[home_row, away_row]] = weight
 
     base_ppp = float(np.average(points_per_possession, weights=recency))
@@ -243,7 +292,7 @@ def fit_joint_scoring(
     base_possessions = float(np.average(training["game_possessions"]))
     prior_mean = np.zeros(2 * n_teams + 1)
     prior_mean[-1] = HFA_PRIOR_POINTS / base_possessions
-    prior_sd = np.full(2 * n_teams + 1, STRENGTH_PRIOR_SD_PPP)
+    prior_sd = np.full(2 * n_teams + 1, config.strength_prior_sd_ppp)
     prior_sd[-1] = HFA_PRIOR_SD_POINTS / base_possessions
     parameters, covariance = _solve_ridge(
         design, target, recency, prior_mean, prior_sd
@@ -251,7 +300,11 @@ def fit_joint_scoring(
     paired_residuals = np.column_stack(
         [centered_points - design @ parameters, process_points - design @ parameters]
     )
-    process_covariance = _regularized_covariance(paired_residuals, floor=0.01)
+    process_covariance = _regularized_covariance(
+        paired_residuals,
+        floor=0.01,
+        shrinkage=config.covariance_shrinkage,
+    )
     inverse_process_covariance = np.linalg.inv(process_covariance)
     ones = np.ones(2)
     information = float(ones @ inverse_process_covariance @ ones)
@@ -318,7 +371,11 @@ def fit_joint_scoring(
             training["away_points"].to_numpy(float) - predicted_away,
         ]
     )
-    score_covariance = _regularized_covariance(score_residuals, floor=4.0)
+    score_covariance = _regularized_covariance(
+        score_residuals,
+        floor=4.0,
+        shrinkage=config.covariance_shrinkage,
+    )
     return JointScoringFit(
         season=int(training["season"].iloc[-1]),
         week=forecast_week,
@@ -332,4 +389,5 @@ def fit_joint_scoring(
         hfa_ppp=float(parameters[-1]),
         parameter_covariance=covariance,
         score_residual_covariance=score_covariance,
+        config=config,
     )
