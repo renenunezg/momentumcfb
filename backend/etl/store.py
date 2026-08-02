@@ -31,6 +31,12 @@ def read_returning(season: int) -> pd.DataFrame:
     return pd.read_parquet(RAW_DIR / "returning" / f"{season}.parquet")
 
 
+def read_preseason_source(season: int, source: str) -> pd.DataFrame:
+    return pd.read_parquet(
+        RAW_DIR / "preseason" / str(season) / f"{source}.parquet"
+    )
+
+
 def write_processed(df: pd.DataFrame, *parts: str) -> None:
     path = PROCESSED_DIR.joinpath(*parts)
     path.parent.mkdir(parents=True, exist_ok=True)

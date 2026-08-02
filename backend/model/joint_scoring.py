@@ -130,8 +130,6 @@ class JointScoringFit:
     def ratings(self) -> list[TeamRating]:
         ratings = []
         for row in self.teams.itertuples():
-            if str(row.classification).lower() != "fbs":
-                continue
             index = self.team_index[int(row.team_id)]
             vector = np.zeros(len(self.parameter_covariance))
             vector[index] = self.base_possessions
@@ -297,6 +295,19 @@ def fit_joint_scoring(
     parameters, covariance = _solve_ridge(
         design, target, recency, prior_mean, prior_sd
     )
+    classifications = catalog["classification"].fillna("").str.lower()
+    fbs_mask = classifications.eq("fbs").to_numpy()
+    fcs_mask = classifications.eq("fcs").to_numpy()
+    if fbs_mask.any() and fcs_mask.any():
+        initial_offense = parameters[:n_teams]
+        initial_defense = parameters[n_teams : 2 * n_teams]
+        fcs_indices = np.flatnonzero(fcs_mask)
+        prior_mean[fcs_indices] = (
+            initial_offense[fcs_mask].mean() - initial_offense[fbs_mask].mean()
+        )
+        prior_mean[n_teams + fcs_indices] = (
+            initial_defense[fcs_mask].mean() - initial_defense[fbs_mask].mean()
+        )
     paired_residuals = np.column_stack(
         [centered_points - design @ parameters, process_points - design @ parameters]
     )
@@ -320,12 +331,15 @@ def fit_joint_scoring(
 
     offense = parameters[:n_teams]
     defense = parameters[n_teams : 2 * n_teams]
-    offense_mean = float(offense.mean())
-    defense_mean = float(defense.mean())
+    center_mask = fbs_mask if fbs_mask.any() else np.ones(n_teams, dtype=bool)
+    offense_mean = float(offense[center_mask].mean())
+    defense_mean = float(defense[center_mask].mean())
     offense = offense - offense_mean
     defense = defense - defense_mean
     base_ppp += offense_mean - defense_mean
-    centering = np.eye(n_teams) - np.full((n_teams, n_teams), 1.0 / n_teams)
+    center_weights = np.zeros(n_teams)
+    center_weights[center_mask] = 1.0 / center_mask.sum()
+    centering = np.eye(n_teams) - np.tile(center_weights, (n_teams, 1))
     covariance_transform = np.zeros_like(covariance)
     covariance_transform[:n_teams, :n_teams] = centering
     covariance_transform[n_teams : 2 * n_teams, n_teams : 2 * n_teams] = centering
