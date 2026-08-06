@@ -40,6 +40,62 @@ def parse_args(argv=None):
         help="refresh the source snapshot from CFBD before forecasting",
     )
 
+    live = sub.add_parser(
+        "live-odds",
+        help="capture append-only live sportsbook line snapshots",
+    )
+    live.add_argument("--season", type=int, required=True)
+    live.add_argument(
+        "--polls",
+        type=int,
+        default=1,
+        help="maximum number of poll cycles before stopping",
+    )
+    live.add_argument("--interval-seconds", type=float, default=60.0)
+    live.add_argument(
+        "--lookback-hours",
+        type=float,
+        default=8.0,
+        help="include events that commenced up to this many hours ago",
+    )
+    live.add_argument(
+        "--lookahead-hours",
+        type=float,
+        default=6.0,
+        help="include events commencing up to this many hours ahead",
+    )
+    live.add_argument(
+        "--days-from",
+        type=int,
+        default=None,
+        choices=[1, 2, 3],
+        help="also fetch completed games from up to N days back (extra quota)",
+    )
+    live.add_argument(
+        "--min-quota",
+        type=int,
+        default=50,
+        help="stop polling once remaining API requests fall below this",
+    )
+    live.add_argument(
+        "--max-failures",
+        type=int,
+        default=3,
+        help="stop polling after this many consecutive failed polls",
+    )
+
+    replay = sub.add_parser(
+        "live-replay",
+        help="verify stored live odds snapshots and replay a point in time",
+    )
+    replay.add_argument("--season", type=int, required=True)
+    replay.add_argument(
+        "--as-of",
+        type=str,
+        default=None,
+        help="ISO timestamp; show the live market view available at that time",
+    )
+
     return p.parse_args(argv)
 
 
@@ -171,3 +227,59 @@ def main(argv=None):
             f"{len(result.market_comparisons)} market comparisons"
         )
         print(f"forecast log: {result.log_directory}")
+
+    elif args.command == "live-odds":
+        from backend.odds.live import load_division_one_schedule, run_live_polling
+
+        schedule = load_division_one_schedule(args.season)
+        completed = run_live_polling(
+            args.season,
+            schedule,
+            polls=args.polls,
+            interval_seconds=args.interval_seconds,
+            lookback_hours=args.lookback_hours,
+            lookahead_hours=args.lookahead_hours,
+            days_from=args.days_from,
+            min_quota=args.min_quota,
+            max_failures=args.max_failures,
+        )
+        print(f"completed {completed} of {args.polls} polls")
+
+    elif args.command == "live-replay":
+        import pandas as pd
+
+        from backend.odds.live import offers_available_at, verify_live_snapshots
+
+        problems, frames = verify_live_snapshots(args.season)
+        polls = frames["polls"]
+        print(
+            f"{len(polls)} polls stored "
+            f"({int(polls['poll_status'].eq('ok').sum()) if not polls.empty else 0} ok, "
+            f"{int(polls['poll_status'].eq('error').sum()) if not polls.empty else 0} failed), "
+            f"{len(frames['offers'])} offers, {len(frames['events'])} event states"
+        )
+        if problems:
+            for problem in problems:
+                print(f"PROBLEM: {problem}")
+        else:
+            print("replay check passed: snapshots are complete and append-only")
+        if args.as_of is not None:
+            as_of = pd.to_datetime(args.as_of, utc=True)
+            available = offers_available_at(polls, frames["offers"], as_of)
+            print(f"\navailable at {as_of.isoformat()}: {len(available)} offers")
+            if not available.empty:
+                view = available[
+                    [
+                        "game_id",
+                        "phase",
+                        "provider_key",
+                        "market",
+                        "selection",
+                        "point",
+                        "price",
+                        "staleness_seconds",
+                    ]
+                ].sort_values(["game_id", "market", "provider_key", "selection"])
+                print(view.to_string(index=False))
+        if problems:
+            raise SystemExit(1)
