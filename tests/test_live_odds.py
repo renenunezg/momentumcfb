@@ -168,8 +168,11 @@ def test_snapshots_are_append_only_and_replayable(tmp_path, monkeypatch):
     )
     assert before.empty
 
-    # Tampering with a stored snapshot must be detected by the replay check.
+    # Tampering with a stored snapshot must be detected by the replay check,
+    # even when the mutation keeps the row count unchanged.
     offers_path = next((tmp_path / "live_odds" / "2026" / "offers").glob("*.parquet"))
-    frames["offers"].iloc[:4].to_parquet(offers_path, index=False)
+    tampered = pd.read_parquet(offers_path)
+    tampered.loc[0, "point"] = tampered.loc[0, "point"] + 1.0
+    tampered.to_parquet(offers_path, index=False)
     problems, _ = live.verify_live_snapshots(2026)
-    assert any("offer_count" in problem for problem in problems)
+    assert any("offers_sha256" in problem for problem in problems)
