@@ -40,6 +40,19 @@ def parse_args(argv=None):
         help="refresh the source snapshot from CFBD before forecasting",
     )
 
+    ingame = sub.add_parser(
+        "ingame-baseline",
+        help="reconstruct play-boundary states and evaluate the baseline "
+        "in-game win projection",
+    )
+    ingame.add_argument("--seasons", type=int, nargs="+", default=SEASONS)
+    ingame.add_argument(
+        "--leakage-games-per-season",
+        type=int,
+        default=2,
+        help="games per season replayed from truncated play prefixes",
+    )
+
     live = sub.add_parser(
         "live-odds",
         help="capture append-only live sportsbook line snapshots",
@@ -227,6 +240,68 @@ def main(argv=None):
             f"{len(result.market_comparisons)} market comparisons"
         )
         print(f"forecast log: {result.log_directory}")
+
+    elif args.command == "ingame-baseline":
+        import pandas as pd
+
+        from backend.etl import store
+        from backend.features.ingame import build_game_states, leakage_problems
+        from backend.model.calibration import DEVELOPMENT_SEASONS
+        from backend.model.ingame import (
+            MODEL_VERSION,
+            build_baseline_inputs,
+            evaluate_baseline,
+            fit_baseline,
+            format_ingame_diagnostic,
+            win_probability,
+        )
+
+        state_frames = []
+        problems = []
+        for season in args.seasons:
+            plays = store.read_season_pbp(season)
+            states = build_game_states(plays)
+            store.write_processed(states, "ingame", "states", f"{season}.parquet")
+            state_frames.append(states)
+            game_ids = sorted(states["game_id"].unique())
+            step = max(1, len(game_ids) // max(args.leakage_games_per_season, 1))
+            sample = game_ids[::step][: args.leakage_games_per_season]
+            problems.extend(leakage_problems(plays, sample))
+            print(
+                f"{season}: {len(states)} play states across "
+                f"{states['game_id'].nunique()} games "
+                f"(leakage-checked {len(sample)})"
+            )
+        for problem in problems:
+            print(f"PROBLEM: {problem}")
+        if problems:
+            raise SystemExit(1)
+        print("leakage check passed: states are prefix-stable")
+
+        try:
+            anchors = store.read_processed(
+                "calibration", "joint_scoring_predictions.parquet"
+            )
+        except FileNotFoundError as exc:
+            raise SystemExit(
+                "missing chronological pregame projections; run "
+                "`python -m backend calibrate` first"
+            ) from exc
+        states = pd.concat(state_frames, ignore_index=True)
+        inputs = build_baseline_inputs(states, anchors)
+        development = inputs[inputs["season"].isin(DEVELOPMENT_SEASONS)]
+        params = fit_baseline(development)
+        inputs["win_probability"] = win_probability(inputs, params)
+        inputs["model_version"] = MODEL_VERSION
+        summary = evaluate_baseline(inputs, params)
+        store.write_processed(inputs, "ingame", "baseline_predictions.parquet")
+        store.write_processed(summary, "ingame", "baseline_summary.parquet")
+        print(
+            f"anchored {inputs['game_id'].nunique()} of "
+            f"{states['game_id'].nunique()} games with pregame projections; "
+            f"wrote {len(inputs)} baseline predictions"
+        )
+        print(format_ingame_diagnostic(summary))
 
     elif args.command == "live-odds":
         from backend.odds.live import load_division_one_schedule, run_live_polling
