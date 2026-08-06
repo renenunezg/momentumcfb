@@ -22,10 +22,12 @@ def _name_score(left: str, right: str) -> float:
     return SequenceMatcher(None, normalized_left, normalized_right).ratio()
 
 
-def _match_event(event, schedule: pd.DataFrame) -> tuple[int | None, float]:
-    commence_time = pd.to_datetime(event.commence_time, utc=True)
+def match_event(
+    commence_time, home_team: str, away_team: str, schedule: pd.DataFrame
+) -> tuple[int | None, float]:
+    commence = pd.to_datetime(commence_time, utc=True)
     time_difference = (
-        pd.to_datetime(schedule["start_date"], utc=True) - commence_time
+        pd.to_datetime(schedule["start_date"], utc=True) - commence
     ).abs()
     candidates = schedule[time_difference.le(pd.Timedelta(hours=2))].copy()
     if candidates.empty:
@@ -33,8 +35,8 @@ def _match_event(event, schedule: pd.DataFrame) -> tuple[int | None, float]:
     candidates["match_score"] = candidates.apply(
         lambda game: 0.5
         * (
-            _name_score(event.home_team, game.home_team)
-            + _name_score(event.away_team, game.away_team)
+            _name_score(home_team, game.home_team)
+            + _name_score(away_team, game.away_team)
         ),
         axis=1,
     )
@@ -70,7 +72,9 @@ def flatten_odds_api_offers(
         return pd.DataFrame(columns=offer_columns), pd.DataFrame()
 
     for event in events.itertuples():
-        game_id, match_score = _match_event(event, schedule)
+        game_id, match_score = match_event(
+            event.commence_time, event.home_team, event.away_team, schedule
+        )
         matches.append(
             {
                 "odds_api_event_id": event.id,
