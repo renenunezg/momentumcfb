@@ -7,6 +7,7 @@ rewritten, and game phase comes only from The Odds API scores feed so
 line movement alone can never mark a pregame offer as live.
 """
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -57,6 +58,8 @@ POLL_COLUMNS = [
     "dropped_untimestamped_offer_count",
     "max_offer_staleness_seconds",
     "median_offer_staleness_seconds",
+    "events_sha256",
+    "offers_sha256",
 ]
 
 EVENT_COLUMNS = [
@@ -132,6 +135,8 @@ POLL_DTYPES = {
     "dropped_untimestamped_offer_count": "Int64",
     "max_offer_staleness_seconds": "float64",
     "median_offer_staleness_seconds": "float64",
+    "events_sha256": "string",
+    "offers_sha256": "string",
 }
 
 EVENT_DTYPES = {
@@ -228,6 +233,11 @@ def division_one_schedule(games: pd.DataFrame) -> pd.DataFrame:
     return schedule[["game_id", "start_date", "home_team", "away_team"]].reset_index(
         drop=True
     )
+
+
+def frame_digest(frame: pd.DataFrame) -> str:
+    """Content hash of a snapshot frame, stable across parquet round-trips."""
+    return hashlib.sha256(frame.to_csv(index=False).encode()).hexdigest()
 
 
 def _staleness_seconds(fetched_at: datetime, provider_timestamp) -> float | None:
@@ -413,6 +423,8 @@ def build_live_snapshot(
                 "median_offer_staleness_seconds": (
                     float(staleness.median()) if not offers_frame.empty else None
                 ),
+                "events_sha256": frame_digest(events_frame),
+                "offers_sha256": frame_digest(offers_frame),
             }
         ],
         columns=POLL_COLUMNS,
@@ -649,10 +661,30 @@ def verify_live_snapshots(season: int) -> tuple[list[str], dict[str, pd.DataFram
                 f"{poll.snapshot_id}: stored offers {len(stored_offers)} != "
                 f"recorded offer_count {int(poll.offer_count)}"
             )
+        elif frame_digest(stored_offers.reset_index(drop=True)) != poll.offers_sha256:
+            problems.append(
+                f"{poll.snapshot_id}: stored offers do not match the "
+                "offers_sha256 recorded at capture time"
+            )
         if len(stored_events) != int(poll.event_count):
             problems.append(
                 f"{poll.snapshot_id}: stored events {len(stored_events)} != "
                 f"recorded event_count {int(poll.event_count)}"
+            )
+        elif frame_digest(stored_events.reset_index(drop=True)) != poll.events_sha256:
+            problems.append(
+                f"{poll.snapshot_id}: stored events do not match the "
+                "events_sha256 recorded at capture time"
+            )
+        replayed = offers_available_at(
+            polls, offers, pd.to_datetime(poll.odds_fetched_at, utc=True)
+        )
+        if not replayed["snapshot_id"].eq(poll.snapshot_id).all() or len(
+            replayed
+        ) != len(stored_offers):
+            problems.append(
+                f"{poll.snapshot_id}: replay at its own fetch time does not "
+                "reproduce the stored snapshot"
             )
 
     if not offers.empty:
