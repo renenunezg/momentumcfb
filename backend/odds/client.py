@@ -78,12 +78,13 @@ class OddsAPIClient:
             "markets": "spreads,totals",
             "oddsFormat": "american",
             "dateFormat": "iso",
-            "commenceTimeFrom": commence_from.astimezone(timezone.utc)
-            .replace(microsecond=0)
-            .isoformat(),
-            "commenceTimeTo": commence_to.astimezone(timezone.utc)
-            .replace(microsecond=0)
-            .isoformat(),
+            # The API rejects "+00:00" offsets; it requires the trailing Z form.
+            "commenceTimeFrom": commence_from.astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "commenceTimeTo": commence_to.astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
             "includeLinks": "true",
         }
         if self.bookmakers:
