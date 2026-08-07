@@ -53,18 +53,26 @@ def parse_args(argv=None):
         help="games per season replayed from truncated play prefixes",
     )
 
-    momentum = sub.add_parser(
-        "ingame-momentum",
-        help="layer the latent momentum adjustment over the frozen baseline "
-        "and record the adopt-or-reject verdict",
-    )
-    momentum.add_argument("--seasons", type=int, nargs="+", default=SEASONS)
-    momentum.add_argument(
-        "--leakage-games-per-season",
-        type=int,
-        default=2,
-        help="games per season replayed from truncated play prefixes",
-    )
+    for name, description in (
+        (
+            "ingame-momentum",
+            "layer the cumulative-evidence momentum adjustment over the "
+            "frozen baseline and record the adopt-or-reject verdict",
+        ),
+        (
+            "ingame-momentum-recency",
+            "layer the recency-weighted momentum adjustment over the frozen "
+            "baseline and record the adopt-or-reject verdict",
+        ),
+    ):
+        momentum = sub.add_parser(name, help=description)
+        momentum.add_argument("--seasons", type=int, nargs="+", default=SEASONS)
+        momentum.add_argument(
+            "--leakage-games-per-season",
+            type=int,
+            default=2,
+            help="games per season replayed from truncated play prefixes",
+        )
 
     live = sub.add_parser(
         "live-odds",
@@ -316,7 +324,7 @@ def main(argv=None):
         )
         print(format_ingame_diagnostic(summary))
 
-    elif args.command == "ingame-momentum":
+    elif args.command in ("ingame-momentum", "ingame-momentum-recency"):
         import numpy as np
         import pandas as pd
 
@@ -330,11 +338,16 @@ def main(argv=None):
         from backend.model.ingame import IngameBaselineParams, win_probability
         from backend.model.momentum import (
             MODEL_VERSION,
+            RECENCY_MODEL_VERSION,
             evaluate_momentum,
             fit_momentum,
+            fit_momentum_recency,
             format_momentum_diagnostic,
+            momentum_recency_win_probability,
             momentum_win_probability,
         )
+
+        recency = args.command == "ingame-momentum-recency"
 
         evidence_frames = []
         problems = []
@@ -414,14 +427,33 @@ def main(argv=None):
         )
 
         development = inputs[inputs["season"].isin(DEVELOPMENT_SEASONS)]
-        params = fit_momentum(development, baseline_params)
-        inputs["momentum_win_probability"] = momentum_win_probability(
-            inputs, baseline_params, params
-        )
-        inputs["model_version"] = MODEL_VERSION
-        summary = evaluate_momentum(inputs, params)
-        store.write_processed(inputs, "ingame", "momentum_predictions.parquet")
-        store.write_processed(summary, "ingame", "momentum_summary.parquet")
+        if recency:
+            params = fit_momentum_recency(
+                development, baseline_params, progress=print
+            )
+            inputs["momentum_win_probability"] = momentum_recency_win_probability(
+                inputs, baseline_params, params
+            )
+            inputs["model_version"] = RECENCY_MODEL_VERSION
+            summary = evaluate_momentum(
+                inputs,
+                params,
+                rejection_note=(
+                    "momentum iteration pauses until Rene agrees on a "
+                    "structurally different approach"
+                ),
+            )
+            prefix = "momentum_recency"
+        else:
+            params = fit_momentum(development, baseline_params)
+            inputs["momentum_win_probability"] = momentum_win_probability(
+                inputs, baseline_params, params
+            )
+            inputs["model_version"] = MODEL_VERSION
+            summary = evaluate_momentum(inputs, params)
+            prefix = "momentum"
+        store.write_processed(inputs, "ingame", f"{prefix}_predictions.parquet")
+        store.write_processed(summary, "ingame", f"{prefix}_summary.parquet")
         print(
             f"momentum probabilities at {len(inputs)} play boundaries across "
             f"{inputs['game_id'].nunique()} games (every baseline boundary)"

@@ -21,6 +21,18 @@ from backend.features.possessions import (
 REGULATION_PERIODS = 4
 PERIOD_SECONDS = 900.0
 FIELD_POSITION_REFERENCE_YARDS_TO_GOAL = 75.0
+# Recency-weighted evidence decays by half-life measured in scrimmage plays;
+# the tick counter is scrimmage plays so dead time never erodes evidence.
+DECAY_HALF_LIVES = (30, 60, 120)
+DECAYED_FAMILIES = (
+    "epa_total",
+    "successes",
+    "stops_forced",
+    "turnovers_forced",
+    "field_position_total",
+    "fourth_down_conversions",
+    "missed_kicks",
+)
 
 STATE_COLUMNS = [
     "season",
@@ -134,6 +146,20 @@ def build_game_states(plays: pd.DataFrame) -> pd.DataFrame:
     return states[STATE_COLUMNS].reset_index(drop=True)
 
 
+def _decayed_columns() -> list[str]:
+    columns = []
+    for half_life in DECAY_HALF_LIVES:
+        columns.append(f"evidence_plays_decayed_hl{half_life}")
+        columns.append(f"scrimmage_plays_decayed_hl{half_life}")
+        columns.append(f"elapsed_seconds_decayed_hl{half_life}")
+        columns.extend(
+            f"{side}_{family}_hl{half_life}"
+            for family in DECAYED_FAMILIES
+            for side in ("home", "away")
+        )
+    return columns
+
+
 EVIDENCE_COLUMNS = [
     "game_id",
     "source_play_id",
@@ -156,6 +182,7 @@ EVIDENCE_COLUMNS = [
     "away_fourth_down_conversions",
     "home_missed_kicks",
     "away_missed_kicks",
+    *_decayed_columns(),
 ]
 
 
@@ -232,6 +259,56 @@ def build_process_evidence(plays: pd.DataFrame) -> pd.DataFrame:
     game_ids = classified["game_id"]
     evidence = contributions.groupby(game_ids, sort=False).cumsum()
     evidence = evidence.groupby(game_ids, sort=False).shift().fillna(0.0)
+
+    # Recency-weighted counterparts: contribution c_i decays by
+    # lambda ** (scrimmage plays run since play i), evaluated pre-snap, via an
+    # exact scaled cumulative sum so truncated-prefix replays match bit-for-bit.
+    decay_source = contributions[
+        [
+            f"{side}_{family}"
+            for family in DECAYED_FAMILIES
+            for side in ("home", "away")
+        ]
+        + ["evidence_plays", "scrimmage_plays_before"]
+    ].copy()
+    elapsed = classified.groupby("game_id", sort=False)[
+        "regulation_seconds_elapsed"
+    ].ffill()
+    decay_source["elapsed_seconds"] = (
+        elapsed.groupby(game_ids, sort=False).diff().clip(lower=0.0).fillna(0.0)
+    )
+    ticks = (
+        classified["is_scrimmage"]
+        .groupby(game_ids, sort=False)
+        .cumsum()
+        .to_numpy(float)
+    )
+    decayed_frames = []
+    for half_life in DECAY_HALF_LIVES:
+        decay = 0.5 ** (1.0 / half_life)
+        scaled = decay_source.mul(
+            pd.Series(np.power(decay, -ticks), index=classified.index), axis=0
+        )
+        sums = scaled.groupby(game_ids, sort=False).cumsum()
+        shifted = sums.groupby(game_ids, sort=False).shift()
+        rescale = (
+            pd.Series(np.power(decay, ticks), index=classified.index)
+            .groupby(game_ids, sort=False)
+            .shift()
+        )
+        decayed = shifted.mul(rescale, axis=0).fillna(0.0)
+        renamed = {
+            "evidence_plays": f"evidence_plays_decayed_hl{half_life}",
+            "scrimmage_plays_before": f"scrimmage_plays_decayed_hl{half_life}",
+            "elapsed_seconds": f"elapsed_seconds_decayed_hl{half_life}",
+        }
+        decayed.columns = [
+            renamed.get(column, f"{column}_hl{half_life}")
+            for column in decayed.columns
+        ]
+        decayed_frames.append(decayed)
+
+    evidence = pd.concat([evidence, *decayed_frames], axis=1)
     evidence.insert(0, "game_id", classified["game_id"])
     evidence.insert(1, "source_play_id", classified["id"].astype("string"))
     evidence.insert(2, "play_index", game_ids.groupby(game_ids).cumcount() + 1)
