@@ -1,4 +1,5 @@
 import pandas as pd
+import pyarrow.parquet
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 
@@ -43,5 +44,14 @@ def write_processed(df: pd.DataFrame, *parts: str) -> None:
     df.to_parquet(path, index=False)
 
 
-def read_processed(*parts: str) -> pd.DataFrame:
-    return pd.read_parquet(PROCESSED_DIR.joinpath(*parts))
+def read_processed(
+    *parts: str, columns: list[str] | None = None
+) -> pd.DataFrame:
+    return pd.read_parquet(PROCESSED_DIR.joinpath(*parts), columns=columns)
+
+
+def processed_columns(*parts: str) -> list[str]:
+    """Column names of a processed artifact, from parquet metadata only."""
+    return list(
+        pyarrow.parquet.read_schema(PROCESSED_DIR.joinpath(*parts)).names
+    )
