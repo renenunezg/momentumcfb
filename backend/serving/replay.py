@@ -3,8 +3,10 @@
 Replays a stored game as a simulated live feed: plays arrive one at a time in
 chronological order, and after each event the play-boundary state is rebuilt
 from only the plays seen so far, then scored with the frozen baseline
-parameters and the game's stored pregame anchor. This rebuild-per-play loop is
-the reference serving path; ``stream_problems`` proves each streamed
+parameters and the game's pregame anchor. Serving inputs are outcome-free —
+only the serving anchor columns are read, never actual final scores — so the
+same loop can score a game whose result is unknown. This rebuild-per-play loop
+is the reference serving path; ``stream_problems`` proves each streamed
 probability sequence equals the stored batch predictions exactly.
 """
 
@@ -16,7 +18,7 @@ import pandas as pd
 from backend.features.ingame import build_game_states
 from backend.model.ingame import (
     IngameBaselineParams,
-    build_baseline_inputs,
+    build_serving_inputs,
     win_probability,
 )
 
@@ -63,8 +65,10 @@ def replay_game(
 
     Each event's latency covers exactly the serving work: rebuild the
     play-boundary state from the prefix, join the pregame anchor, and produce
-    the baseline win probability. Events the batch pipeline filters out (no
-    anchor row survives the join) are recorded with ``emitted`` False.
+    the baseline win probability. The anchor row needs only the outcome-free
+    serving columns (game_id, model_week, home_margin, margin_sd). Events the
+    serving path filters out (no anchor row survives the join, or the play
+    boundary has no usable clock) are recorded with ``emitted`` False.
     """
     feed = chronological_plays(game_plays)
     game_id = feed["game_id"].iloc[0]
@@ -73,7 +77,7 @@ def replay_game(
         prefix = feed.iloc[:count]
         started = perf_counter()
         boundary = build_game_states(prefix).iloc[[-1]]
-        inputs = build_baseline_inputs(boundary, anchor)
+        inputs = build_serving_inputs(boundary, anchor)
         emitted = bool(len(inputs))
         probability = (
             float(win_probability(inputs, params)[0]) if emitted else np.nan

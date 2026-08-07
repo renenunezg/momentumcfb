@@ -86,6 +86,13 @@ def parse_args(argv=None):
         default=None,
         help="replay a single game for diagnosis; skips writing artifacts",
     )
+    stream.add_argument(
+        "--outcome-free",
+        action="store_true",
+        help="serve from outcome-free anchors: the game list and every anchor "
+        "column handed to the driver come from the pregame projection table "
+        "alone, with no actual_* columns present",
+    )
 
     live = sub.add_parser(
         "live-odds",
@@ -479,7 +486,11 @@ def main(argv=None):
         import pandas as pd
 
         from backend.etl import store
-        from backend.model.ingame import MODEL_VERSION, IngameBaselineParams
+        from backend.model.ingame import (
+            MODEL_VERSION,
+            SERVING_ANCHOR_COLUMNS,
+            IngameBaselineParams,
+        )
         from backend.serving.replay import (
             latency_conclusion,
             replay_game,
@@ -524,11 +535,30 @@ def main(argv=None):
         anchors = store.read_processed(
             "calibration", "joint_scoring_predictions.parquet"
         )
+        if args.outcome_free:
+            # Serving must not learn which games to score, or anything else,
+            # from outcome-bearing artifacts: the driver sees only the
+            # season's pregame anchor rows, stripped to the serving columns.
+            anchors = anchors[anchors["season"].eq(args.season)][
+                SERVING_ANCHOR_COLUMNS
+            ]
+            game_ids = list(dict.fromkeys(anchors["game_id"]))
+            if args.game_id is not None:
+                game_ids = [gid for gid in game_ids if gid == args.game_id]
+            if not game_ids:
+                raise SystemExit(
+                    f"no pregame anchors for season {args.season}"
+                    + (
+                        f" game {args.game_id}"
+                        if args.game_id is not None
+                        else ""
+                    )
+                )
+        else:
+            game_ids = list(dict.fromkeys(stored["game_id"]))
         plays_by_game = dict(
             iter(store.read_season_pbp(args.season).groupby("game_id", sort=False))
         )
-
-        game_ids = list(dict.fromkeys(stored["game_id"]))
         problems = []
         event_frames = []
         started = perf_counter()
@@ -568,6 +598,7 @@ def main(argv=None):
             "summary_type": "equivalence",
             "season": args.season,
             "model_version": MODEL_VERSION,
+            "outcome_free": bool(args.outcome_free),
             "games": int(events["game_id"].nunique()),
             "events": len(events),
             "streamed_rows": int(events["emitted"].sum()),
@@ -605,10 +636,12 @@ def main(argv=None):
             store.write_processed(
                 summary, "serving", f"stream_replay_summary_{args.season}.parquet"
             )
+        mode = " (outcome-free)" if args.outcome_free else ""
         print(
-            f"{equivalence['status']}: {equivalence['streamed_rows']} streamed "
-            f"probabilities vs {equivalence['stored_rows']} stored rows across "
-            f"{equivalence['games']} games ({equivalence['events']} play events)"
+            f"{equivalence['status']}{mode}: {equivalence['streamed_rows']} "
+            f"streamed probabilities vs {equivalence['stored_rows']} stored "
+            f"rows across {equivalence['games']} games "
+            f"({equivalence['events']} play events)"
         )
         print(
             f"latency per event: median {latency['median_seconds'] * 1e3:.1f} ms, "

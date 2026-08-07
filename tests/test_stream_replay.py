@@ -86,7 +86,14 @@ def test_streamed_probabilities_equal_batch_and_skip_filtered_rows():
     stored = build_baseline_inputs(build_game_states(plays), anchor)
     stored["win_probability"] = win_probability(stored, PARAMS)
 
-    events = replay_game(plays.sample(frac=1, random_state=7), anchor, PARAMS)
+    # The serving path must score without knowing the result: stream from an
+    # anchor that carries only the pregame projection columns.
+    serving_anchor = anchor.drop(
+        columns=["actual_home_points", "actual_away_points"]
+    )
+    events = replay_game(
+        plays.sample(frac=1, random_state=7), serving_anchor, PARAMS
+    )
 
     assert stream_problems(events, stored) == []
     assert len(events) == len(plays)
