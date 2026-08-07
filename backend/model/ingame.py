@@ -23,14 +23,16 @@ POSSESSION_REFERENCE_YARDS_TO_GOAL = 75.0
 MARGIN_BUCKET_EDGES = (-np.inf, -16.5, -8.5, -3.5, 3.5, 8.5, 16.5, np.inf)
 MARGIN_BUCKET_LABELS = ("<=-17", "-16:-9", "-8:-4", "-3:3", "4:8", "9:16", "17+")
 
-ANCHOR_COLUMNS = [
+SERVING_ANCHOR_COLUMNS = [
     "game_id",
     "model_week",
     "home_margin",
     "margin_sd",
-    "actual_home_points",
-    "actual_away_points",
 ]
+
+OUTCOME_COLUMNS = ["actual_home_points", "actual_away_points"]
+
+ANCHOR_COLUMNS = SERVING_ANCHOR_COLUMNS + OUTCOME_COLUMNS
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,27 +57,27 @@ class IngameBaselineParams:
         }
 
 
-def build_baseline_inputs(
+def build_serving_inputs(
     states: pd.DataFrame, anchors: pd.DataFrame
 ) -> pd.DataFrame:
-    """Join play-boundary states to chronological pregame projections."""
-    missing = sorted(set(ANCHOR_COLUMNS) - set(anchors.columns))
+    """Join play-boundary states to chronological pregame projections.
+
+    This is the live serving contract: only play states and the pregame
+    anchor projection (game_id, model_week, home_margin, margin_sd) are
+    read — never actual final scores — so it can score a game whose result
+    is unknown.
+    """
+    missing = sorted(set(SERVING_ANCHOR_COLUMNS) - set(anchors.columns))
     if missing:
         raise ValueError(f"anchors are missing columns: {', '.join(missing)}")
-    anchor = anchors[ANCHOR_COLUMNS].rename(
+    anchor = anchors[SERVING_ANCHOR_COLUMNS].rename(
         columns={"home_margin": "pregame_margin", "margin_sd": "pregame_margin_sd"}
     )
     if anchor["game_id"].duplicated().any():
         raise ValueError("anchors must contain one projection per game_id")
 
     merged = states.merge(anchor, on="game_id", how="inner", validate="many_to_one")
-    merged = merged[
-        merged["actual_home_points"].ne(merged["actual_away_points"])
-        & merged["seconds_remaining"].notna()
-    ].copy()
-    merged["home_win"] = merged["actual_home_points"].gt(
-        merged["actual_away_points"]
-    )
+    merged = merged[merged["seconds_remaining"].notna()].copy()
     merged["fraction_remaining"] = np.where(
         merged["is_overtime"],
         0.0,
@@ -89,6 +91,43 @@ def build_baseline_inputs(
         scrimmage, merged["yards_to_goal"], np.nan
     )
     return merged.reset_index(drop=True)
+
+
+def build_baseline_inputs(
+    states: pd.DataFrame, anchors: pd.DataFrame
+) -> pd.DataFrame:
+    """Serving inputs plus the outcome labels backtests fit and score on.
+
+    Layers the home_win label and the tie filter from actual final scores on
+    top of ``build_serving_inputs``; fitting and evaluation need this wrapper,
+    live serving must never call it.
+    """
+    missing = sorted(set(ANCHOR_COLUMNS) - set(anchors.columns))
+    if missing:
+        raise ValueError(f"anchors are missing columns: {', '.join(missing)}")
+    merged = build_serving_inputs(states, anchors).merge(
+        anchors[["game_id", *OUTCOME_COLUMNS]],
+        on="game_id",
+        how="inner",
+        validate="many_to_one",
+    )
+    merged = merged[
+        merged["actual_home_points"].ne(merged["actual_away_points"])
+    ].copy()
+    merged["home_win"] = merged["actual_home_points"].gt(
+        merged["actual_away_points"]
+    )
+    # Stored baseline_predictions keep the pre-split column layout, with the
+    # outcome labels between the anchor and derived serving columns.
+    tail = [
+        *OUTCOME_COLUMNS,
+        "home_win",
+        "fraction_remaining",
+        "possession_sign",
+        "possession_yards_to_goal",
+    ]
+    ordered = [column for column in merged.columns if column not in tail] + tail
+    return merged[ordered].reset_index(drop=True)
 
 
 def margin_distribution(
