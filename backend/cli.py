@@ -90,8 +90,24 @@ def parse_args(argv=None):
         "--outcome-free",
         action="store_true",
         help="serve from outcome-free anchors: the game list and every anchor "
-        "column handed to the driver come from the pregame projection table "
+        "column handed to the driver come from the serving anchor loader "
         "alone, with no actual_* columns present",
+    )
+
+    anchors = sub.add_parser(
+        "serving-anchors",
+        help="build outcome-free serving anchors from a stored projection "
+        "artifact and prove the stored artifact round-trips through the "
+        "anchor loader",
+    )
+    anchors.add_argument("--season", type=int, required=True)
+    anchors.add_argument("--week", type=int, default=1)
+    anchors.add_argument(
+        "--source",
+        choices=["preseason"],
+        default="preseason",
+        help="stored projection artifact to anchor on "
+        "(weekly fit projections come later)",
     )
 
     live = sub.add_parser(
@@ -486,11 +502,8 @@ def main(argv=None):
         import pandas as pd
 
         from backend.etl import store
-        from backend.model.ingame import (
-            MODEL_VERSION,
-            SERVING_ANCHOR_COLUMNS,
-            IngameBaselineParams,
-        )
+        from backend.model.ingame import MODEL_VERSION, IngameBaselineParams
+        from backend.serving.anchors import load_serving_anchors
         from backend.serving.replay import (
             latency_conclusion,
             replay_game,
@@ -532,16 +545,15 @@ def main(argv=None):
             ),
             sd_floor_points=float(parameter["sd_floor_points"]),
         )
-        anchors = store.read_processed(
-            "calibration", "joint_scoring_predictions.parquet"
-        )
         if args.outcome_free:
             # Serving must not learn which games to score, or anything else,
-            # from outcome-bearing artifacts: the driver sees only the
-            # season's pregame anchor rows, stripped to the serving columns.
-            anchors = anchors[anchors["season"].eq(args.season)][
-                SERVING_ANCHOR_COLUMNS
-            ]
+            # from outcome-bearing artifacts: the driver sees only contract
+            # rows from the anchor loader, on its calibration source so
+            # historical replays keep the anchors they were scored with.
+            try:
+                anchors = load_serving_anchors(season=args.season)
+            except (FileNotFoundError, ValueError) as exc:
+                raise SystemExit(str(exc)) from exc
             game_ids = list(dict.fromkeys(anchors["game_id"]))
             if args.game_id is not None:
                 game_ids = [gid for gid in game_ids if gid == args.game_id]
@@ -555,6 +567,9 @@ def main(argv=None):
                     )
                 )
         else:
+            anchors = store.read_processed(
+                "calibration", "joint_scoring_predictions.parquet"
+            )
             game_ids = list(dict.fromkeys(stored["game_id"]))
         plays_by_game = dict(
             iter(store.read_season_pbp(args.season).groupby("game_id", sort=False))
@@ -652,6 +667,44 @@ def main(argv=None):
         print(f"conclusion: {conclusion['diagnostic']}")
         if problems:
             raise SystemExit(1)
+
+    elif args.command == "serving-anchors":
+        from backend.etl import store
+        from backend.serving.anchors import (
+            load_serving_anchors,
+            serving_anchor_artifact,
+        )
+
+        try:
+            anchors = load_serving_anchors(
+                args.source, season=args.season, week=args.week
+            )
+        except FileNotFoundError as exc:
+            raise SystemExit(
+                f"no stored {args.source} projections for season "
+                f"{args.season} week {args.week}; run `python -m backend "
+                f"{args.source} --season {args.season}` first"
+            ) from exc
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        artifact = serving_anchor_artifact(args.season, args.week)
+        store.write_processed(anchors, *artifact)
+        stored = load_serving_anchors(
+            "serving", season=args.season, week=args.week
+        )
+        if not stored.equals(anchors):
+            raise SystemExit(
+                f"stored {'/'.join(artifact)} does not round-trip through "
+                "the serving anchor loader"
+            )
+        weeks = sorted(stored["model_week"].unique())
+        print(
+            f"wrote {'/'.join(artifact)}: {len(stored)} outcome-free anchors "
+            f"for season {args.season} model week"
+            f"{'s' if len(weeks) > 1 else ''} "
+            + ", ".join(str(week) for week in weeks)
+            + f" from the {args.source} projections"
+        )
 
     elif args.command == "live-odds":
         from backend.odds.live import load_division_one_schedule, run_live_polling
