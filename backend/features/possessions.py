@@ -72,6 +72,27 @@ SPECIAL_TEAMS_TYPES = frozenset(
         "Two Point Rush",
     }
 )
+# On every punt and kick row the provider lists the kicking team as offense,
+# including return touchdowns (verified numerically on 2019-2022 score deltas).
+PUNT_TYPES = frozenset(
+    {
+        "Blocked Punt",
+        "Blocked Punt Touchdown",
+        "Punt",
+        "Punt (Safety)",
+        "Punt Return",
+        "Punt Return Touchdown",
+    }
+)
+MISSED_KICK_TYPES = frozenset(
+    {
+        "Blocked Field Goal",
+        "Blocked Field Goal Touchdown",
+        "Field Goal Missed",
+        "Missed Field Goal Return",
+        "Missed Field Goal Return Touchdown",
+    }
+)
 ADMINISTRATIVE_TYPES = frozenset(
     {
         "End of Game",

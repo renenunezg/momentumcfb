@@ -91,9 +91,10 @@ def build_baseline_inputs(
     return merged.reset_index(drop=True)
 
 
-def win_probability(
+def margin_distribution(
     inputs: pd.DataFrame, params: IngameBaselineParams
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
+    """Mean and standard deviation of the final home margin at each state."""
     yards_to_goal = (
         inputs["possession_yards_to_goal"]
         .fillna(POSSESSION_REFERENCE_YARDS_TO_GOAL)
@@ -114,7 +115,14 @@ def win_probability(
         fraction * np.square(inputs["pregame_margin_sd"].to_numpy(float))
         + params.sd_floor_points**2
     )
-    return norm.cdf(mean / np.sqrt(variance))
+    return mean, np.sqrt(variance)
+
+
+def win_probability(
+    inputs: pd.DataFrame, params: IngameBaselineParams
+) -> np.ndarray:
+    mean, sd = margin_distribution(inputs, params)
+    return norm.cdf(mean / sd)
 
 
 def _mean_log_loss(outcome: np.ndarray, probability: np.ndarray) -> float:
