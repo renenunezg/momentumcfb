@@ -74,6 +74,19 @@ def parse_args(argv=None):
             help="games per season replayed from truncated play prefixes",
         )
 
+    stream = sub.add_parser(
+        "ingame-stream",
+        help="replay stored plays as a simulated live feed and prove streamed "
+        "baseline probabilities equal the stored batch outputs",
+    )
+    stream.add_argument("--season", type=int, required=True)
+    stream.add_argument(
+        "--game-id",
+        type=int,
+        default=None,
+        help="replay a single game for diagnosis; skips writing artifacts",
+    )
+
     live = sub.add_parser(
         "live-odds",
         help="capture append-only live sportsbook line snapshots",
@@ -459,6 +472,153 @@ def main(argv=None):
             f"{inputs['game_id'].nunique()} games (every baseline boundary)"
         )
         print(format_momentum_diagnostic(summary))
+
+    elif args.command == "ingame-stream":
+        from time import perf_counter
+
+        import pandas as pd
+
+        from backend.etl import store
+        from backend.model.ingame import MODEL_VERSION, IngameBaselineParams
+        from backend.serving.replay import (
+            latency_conclusion,
+            replay_game,
+            stream_problems,
+            summarize_latency,
+        )
+
+        try:
+            stored = store.read_processed("ingame", "baseline_predictions.parquet")
+            baseline_summary = store.read_processed(
+                "ingame", "baseline_summary.parquet"
+            )
+        except FileNotFoundError as exc:
+            raise SystemExit(
+                "missing baseline predictions; run "
+                "`python -m backend ingame-baseline` first"
+            ) from exc
+        stored = stored[stored["season"].eq(args.season)]
+        if args.game_id is not None:
+            stored = stored[stored["game_id"].eq(args.game_id)]
+        if stored.empty:
+            raise SystemExit(
+                f"no stored baseline predictions for season {args.season}"
+                + (f" game {args.game_id}" if args.game_id is not None else "")
+            )
+        versions = sorted(stored["model_version"].unique())
+        if versions != [MODEL_VERSION]:
+            raise SystemExit(
+                f"stored predictions carry model versions {versions}; "
+                f"the streaming harness serves {MODEL_VERSION}"
+            )
+        parameter = baseline_summary[
+            baseline_summary["summary_type"].eq("parameter")
+        ].iloc[0]
+        params = IngameBaselineParams(
+            possession_points=float(parameter["possession_points"]),
+            field_position_points_per_yard=float(
+                parameter["field_position_points_per_yard"]
+            ),
+            sd_floor_points=float(parameter["sd_floor_points"]),
+        )
+        anchors = store.read_processed(
+            "calibration", "joint_scoring_predictions.parquet"
+        )
+        plays_by_game = dict(
+            iter(store.read_season_pbp(args.season).groupby("game_id", sort=False))
+        )
+
+        game_ids = list(dict.fromkeys(stored["game_id"]))
+        problems = []
+        event_frames = []
+        started = perf_counter()
+        for number, game_id in enumerate(game_ids, start=1):
+            game_plays = plays_by_game.get(game_id)
+            anchor = anchors[anchors["game_id"].eq(game_id)]
+            if game_plays is None or game_plays.empty:
+                problems.append(f"game {game_id}: no raw plays to replay")
+                continue
+            if anchor.empty:
+                problems.append(f"game {game_id}: no stored pregame anchor")
+                continue
+            events = replay_game(game_plays, anchor, params)
+            problems.extend(
+                stream_problems(
+                    events,
+                    stored[stored["game_id"].eq(game_id)].reset_index(drop=True),
+                )
+            )
+            event_frames.append(events)
+            if number % 50 == 0 or number == len(game_ids):
+                print(
+                    f"replayed {number}/{len(game_ids)} games "
+                    f"({sum(len(f) for f in event_frames)} events, "
+                    f"{perf_counter() - started:.0f}s elapsed)",
+                    flush=True,
+                )
+
+        for problem in problems:
+            print(f"PROBLEM: {problem}")
+        if not event_frames:
+            raise SystemExit(1)
+        events = pd.concat(event_frames, ignore_index=True)
+        latency = summarize_latency(events["latency_seconds"])
+        conclusion = latency_conclusion(latency)
+        equivalence = {
+            "summary_type": "equivalence",
+            "season": args.season,
+            "model_version": MODEL_VERSION,
+            "games": int(events["game_id"].nunique()),
+            "events": len(events),
+            "streamed_rows": int(events["emitted"].sum()),
+            "stored_rows": len(stored),
+            "problem_count": len(problems),
+            "status": "exact_match" if not problems else "mismatch",
+            "diagnostic": (
+                "every streamed probability equals the stored baseline "
+                "prediction row"
+                if not problems
+                else "streamed outputs diverge from stored baseline predictions"
+            ),
+        }
+        summary = pd.DataFrame(
+            [
+                equivalence,
+                {
+                    "summary_type": "latency",
+                    "season": args.season,
+                    "model_version": MODEL_VERSION,
+                    **latency,
+                },
+                {
+                    "summary_type": "conclusion",
+                    "season": args.season,
+                    "model_version": MODEL_VERSION,
+                    **conclusion,
+                },
+            ]
+        )
+        if args.game_id is None:
+            store.write_processed(
+                events, "serving", f"stream_replay_events_{args.season}.parquet"
+            )
+            store.write_processed(
+                summary, "serving", f"stream_replay_summary_{args.season}.parquet"
+            )
+        print(
+            f"{equivalence['status']}: {equivalence['streamed_rows']} streamed "
+            f"probabilities vs {equivalence['stored_rows']} stored rows across "
+            f"{equivalence['games']} games ({equivalence['events']} play events)"
+        )
+        print(
+            f"latency per event: median {latency['median_seconds'] * 1e3:.1f} ms, "
+            f"p99 {latency['p99_seconds'] * 1e3:.1f} ms, "
+            f"mean {latency['mean_seconds'] * 1e3:.1f} ms, "
+            f"max {latency['max_seconds'] * 1e3:.1f} ms"
+        )
+        print(f"conclusion: {conclusion['diagnostic']}")
+        if problems:
+            raise SystemExit(1)
 
     elif args.command == "live-odds":
         from backend.odds.live import load_division_one_schedule, run_live_polling
