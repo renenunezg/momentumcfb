@@ -110,6 +110,15 @@ def test_process_evidence_is_presnap_and_attributes_every_family():
     assert final["home_missed_kicks"] == 1
     assert final["away_missed_kicks"] == 0
 
+    # Decayed counterparts tick on scrimmage plays: contributions at scrimmage
+    # counts 1, 2, 5, 6 decay against the 7 scrimmage plays run before play 11.
+    lam = 0.5 ** (1.0 / 30.0)
+    assert final["home_epa_total_hl30"] == pytest.approx(
+        0.3 * lam**6 - 0.5 * lam**5 - 0.2 * lam**2 + 0.8 * lam
+    )
+    # The punt is the newest evidence at play 5, so it carries full weight.
+    assert after_punt["away_stops_forced_hl30"] == pytest.approx(1.0)
+
 
 def test_extended_leakage_check_covers_process_evidence(monkeypatch):
     plays = _game_plays()
