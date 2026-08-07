@@ -53,6 +53,19 @@ def parse_args(argv=None):
         help="games per season replayed from truncated play prefixes",
     )
 
+    momentum = sub.add_parser(
+        "ingame-momentum",
+        help="layer the latent momentum adjustment over the frozen baseline "
+        "and record the adopt-or-reject verdict",
+    )
+    momentum.add_argument("--seasons", type=int, nargs="+", default=SEASONS)
+    momentum.add_argument(
+        "--leakage-games-per-season",
+        type=int,
+        default=2,
+        help="games per season replayed from truncated play prefixes",
+    )
+
     live = sub.add_parser(
         "live-odds",
         help="capture append-only live sportsbook line snapshots",
@@ -302,6 +315,118 @@ def main(argv=None):
             f"wrote {len(inputs)} baseline predictions"
         )
         print(format_ingame_diagnostic(summary))
+
+    elif args.command == "ingame-momentum":
+        import numpy as np
+        import pandas as pd
+
+        from backend.etl import store
+        from backend.features.ingame import (
+            build_momentum_states,
+            build_process_evidence,
+            leakage_problems,
+        )
+        from backend.model.calibration import DEVELOPMENT_SEASONS
+        from backend.model.ingame import IngameBaselineParams, win_probability
+        from backend.model.momentum import (
+            MODEL_VERSION,
+            evaluate_momentum,
+            fit_momentum,
+            format_momentum_diagnostic,
+            momentum_win_probability,
+        )
+
+        evidence_frames = []
+        problems = []
+        for season in args.seasons:
+            plays = store.read_season_pbp(season)
+            evidence = build_process_evidence(plays)
+            evidence_frames.append(evidence)
+            game_ids = sorted(evidence["game_id"].unique())
+            step = max(1, len(game_ids) // max(args.leakage_games_per_season, 1))
+            sample = game_ids[::step][: args.leakage_games_per_season]
+            problems.extend(
+                leakage_problems(plays, sample, builder=build_momentum_states)
+            )
+            print(
+                f"{season}: evidence at {len(evidence)} play boundaries across "
+                f"{evidence['game_id'].nunique()} games "
+                f"(leakage-checked {len(sample)})"
+            )
+        for problem in problems:
+            print(f"PROBLEM: {problem}")
+        if problems:
+            raise SystemExit(1)
+        print(
+            "extended leakage check passed: states and process evidence are "
+            "prefix-stable"
+        )
+
+        try:
+            baseline = store.read_processed("ingame", "baseline_predictions.parquet")
+            baseline_summary = store.read_processed(
+                "ingame", "baseline_summary.parquet"
+            )
+        except FileNotFoundError as exc:
+            raise SystemExit(
+                "missing baseline predictions; run "
+                "`python -m backend ingame-baseline` first"
+            ) from exc
+        baseline = baseline[baseline["season"].isin(args.seasons)]
+        parameter = baseline_summary[
+            baseline_summary["summary_type"].eq("parameter")
+        ].iloc[0]
+        baseline_params = IngameBaselineParams(
+            possession_points=float(parameter["possession_points"]),
+            field_position_points_per_yard=float(
+                parameter["field_position_points_per_yard"]
+            ),
+            sd_floor_points=float(parameter["sd_floor_points"]),
+        )
+
+        evidence = pd.concat(evidence_frames, ignore_index=True).drop(
+            columns=["play_index"]
+        )
+        inputs = baseline.merge(
+            evidence,
+            on=["game_id", "source_play_id"],
+            how="inner",
+            validate="one_to_one",
+        )
+        if len(inputs) != len(baseline):
+            raise SystemExit(
+                f"process evidence covers {len(inputs)} of {len(baseline)} "
+                "baseline play boundaries"
+            )
+        if not np.allclose(
+            win_probability(inputs, baseline_params),
+            inputs["win_probability"].to_numpy(float),
+            atol=1e-9,
+        ):
+            raise SystemExit(
+                "stored baseline probabilities do not match the frozen parameters"
+            )
+        inputs = inputs.rename(
+            columns={
+                "win_probability": "baseline_win_probability",
+                "model_version": "baseline_model_version",
+            }
+        )
+
+        development = inputs[inputs["season"].isin(DEVELOPMENT_SEASONS)]
+        params = fit_momentum(development, baseline_params)
+        inputs["momentum_win_probability"] = momentum_win_probability(
+            inputs, baseline_params, params
+        )
+        inputs["model_version"] = MODEL_VERSION
+        summary = evaluate_momentum(inputs, params)
+        store.write_processed(inputs, "ingame", "momentum_predictions.parquet")
+        store.write_processed(summary, "ingame", "momentum_summary.parquet")
+        print(
+            f"momentum probabilities at {len(inputs)} play boundaries across "
+            f"{inputs['game_id'].nunique()} games (every baseline boundary)"
+        )
+        print(format_momentum_diagnostic(summary))
 
     elif args.command == "live-odds":
         from backend.odds.live import load_division_one_schedule, run_live_polling

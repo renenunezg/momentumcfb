@@ -10,10 +10,17 @@ states line up with the possession pipeline.
 import numpy as np
 import pandas as pd
 
-from backend.features.possessions import classify_plays
+from backend.features.possessions import (
+    GARBAGE_MARGIN,
+    GARBAGE_MARGIN_LATE,
+    MISSED_KICK_TYPES,
+    PUNT_TYPES,
+    classify_plays,
+)
 
 REGULATION_PERIODS = 4
 PERIOD_SECONDS = 900.0
+FIELD_POSITION_REFERENCE_YARDS_TO_GOAL = 75.0
 
 STATE_COLUMNS = [
     "season",
@@ -127,8 +134,127 @@ def build_game_states(plays: pd.DataFrame) -> pd.DataFrame:
     return states[STATE_COLUMNS].reset_index(drop=True)
 
 
+EVIDENCE_COLUMNS = [
+    "game_id",
+    "source_play_id",
+    "play_index",
+    "evidence_plays",
+    "scrimmage_plays_before",
+    "home_epa_total",
+    "away_epa_total",
+    "home_successes",
+    "away_successes",
+    "home_stops_forced",
+    "away_stops_forced",
+    "home_turnovers_forced",
+    "away_turnovers_forced",
+    "home_field_position_total",
+    "away_field_position_total",
+    "home_fourth_down_attempts",
+    "away_fourth_down_attempts",
+    "home_fourth_down_conversions",
+    "away_fourth_down_conversions",
+    "home_missed_kicks",
+    "away_missed_kicks",
+]
+
+
+def build_process_evidence(plays: pd.DataFrame) -> pd.DataFrame:
+    """Cumulative process evidence knowable pre-snap at every play boundary.
+
+    Evidence for play N sums contributions of plays 1..N-1 only, mirroring the
+    score shift in ``build_game_states``. Stop and turnover credit goes to the
+    row's defense: the kicking or punting team is always listed as offense,
+    including on return touchdowns.
+    """
+    classified = classify_plays(plays)
+    offense_is_home = classified["offense"].eq(classified["home"])
+
+    # Same lopsided-margin rule as is_garbage_time, but computable for
+    # special-teams rows too so punts and kicks share the filter.
+    threshold = classified["period"].map(GARBAGE_MARGIN).fillna(GARBAGE_MARGIN_LATE)
+    lopsided = (
+        (classified["offense_score"] - classified["defense_score"])
+        .abs()
+        .gt(threshold)
+    )
+
+    epa = classified["epa"].where(classified["is_competitive"], 0.0).fillna(0.0)
+    fourth_attempt = classified["is_competitive"] & classified["down"].eq(4)
+    fourth_converted = fourth_attempt & classified["is_success"]
+    turnover = classified["is_turnover"] & ~lopsided
+    punt = classified["play_type"].isin(PUNT_TYPES) & ~lopsided
+    missed_kick = classified["play_type"].isin(MISSED_KICK_TYPES) & ~lopsided
+    stop = punt | missed_kick | (fourth_attempt & ~fourth_converted & ~turnover)
+
+    # Possession starts reuse the possession split rule on scrimmage rows.
+    scrimmage = classified[classified["is_scrimmage"]]
+    by_game = scrimmage.groupby("game_id", sort=False)
+    previous_offense = by_game["offense"].shift()
+    new_possession = (
+        previous_offense.isna()
+        | scrimmage["offense"].ne(previous_offense)
+        | scrimmage["defense"].ne(by_game["defense"].shift())
+        | scrimmage["boundary_before"].ne(by_game["boundary_before"].shift())
+        | scrimmage["source_drive_id"].ne(by_game["source_drive_id"].shift())
+    )
+    start_advantage = (
+        (FIELD_POSITION_REFERENCE_YARDS_TO_GOAL - scrimmage["yards_to_goal"])
+        .where(new_possession & ~lopsided.loc[scrimmage.index], 0.0)
+        .fillna(0.0)
+        .reindex(classified.index, fill_value=0.0)
+    )
+
+    def _split(values: pd.Series, credit_home: pd.Series):
+        numeric = values.astype(float)
+        return numeric.where(credit_home, 0.0), numeric.where(~credit_home, 0.0)
+
+    contributions = pd.DataFrame(index=classified.index)
+    contributions["evidence_plays"] = classified["is_competitive"].astype(float)
+    contributions["scrimmage_plays_before"] = classified["is_scrimmage"].astype(float)
+    offense_families = {
+        "epa_total": epa,
+        "successes": classified["is_success"],
+        "field_position_total": start_advantage,
+        "fourth_down_attempts": fourth_attempt,
+        "fourth_down_conversions": fourth_converted,
+        "missed_kicks": missed_kick,
+    }
+    for name, values in offense_families.items():
+        home, away = _split(values, offense_is_home)
+        contributions[f"home_{name}"] = home
+        contributions[f"away_{name}"] = away
+    for name, values in {"stops_forced": stop, "turnovers_forced": turnover}.items():
+        home, away = _split(values, ~offense_is_home)
+        contributions[f"home_{name}"] = home
+        contributions[f"away_{name}"] = away
+
+    game_ids = classified["game_id"]
+    evidence = contributions.groupby(game_ids, sort=False).cumsum()
+    evidence = evidence.groupby(game_ids, sort=False).shift().fillna(0.0)
+    evidence.insert(0, "game_id", classified["game_id"])
+    evidence.insert(1, "source_play_id", classified["id"].astype("string"))
+    evidence.insert(2, "play_index", game_ids.groupby(game_ids).cumcount() + 1)
+    return evidence[EVIDENCE_COLUMNS].reset_index(drop=True)
+
+
+def build_momentum_states(plays: pd.DataFrame) -> pd.DataFrame:
+    """Play states joined with process evidence for the extended leakage replay."""
+    states = build_game_states(plays)
+    evidence = build_process_evidence(plays)
+    merged = states.merge(
+        evidence,
+        on=["game_id", "source_play_id", "play_index"],
+        how="inner",
+        validate="one_to_one",
+    )
+    if len(merged) != len(states):
+        raise ValueError("process evidence does not align with play states")
+    return merged
+
+
 def leakage_problems(
-    plays: pd.DataFrame, game_ids, checkpoints: int = 4
+    plays: pd.DataFrame, game_ids, checkpoints: int = 4, builder=build_game_states
 ) -> list[str]:
     """Prove states are prefix-stable: rebuilding from only the first N plays
     must reproduce states 1..N exactly, so no state can depend on later plays.
@@ -136,7 +262,7 @@ def leakage_problems(
     problems = []
     for game_id in game_ids:
         game_plays = plays[plays["game_id"].eq(game_id)]
-        full = build_game_states(game_plays)
+        full = builder(game_plays)
         total = len(full)
         if total == 0:
             problems.append(f"game {game_id}: no plays to verify")
@@ -147,7 +273,7 @@ def leakage_problems(
         )
         for cut in cuts:
             kept = full["source_play_id"].iloc[:cut]
-            truncated = build_game_states(
+            truncated = builder(
                 game_plays[game_plays["id"].astype("string").isin(set(kept))]
             )
             if len(truncated) != cut or not truncated.equals(full.iloc[:cut].reset_index(drop=True)):
