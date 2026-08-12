@@ -110,6 +110,41 @@ def parse_args(argv=None):
         "(weekly fit projections come later)",
     )
 
+    serve = sub.add_parser(
+        "serve-game",
+        help="score one game from its play feed and serving anchors alone, "
+        "without reading any stored prediction or outcome",
+    )
+    serve.add_argument("--season", type=int, required=True)
+    serve.add_argument("--game-id", type=int, required=True)
+    serve.add_argument(
+        "--anchor-source",
+        choices=["calibration", "serving"],
+        default="calibration",
+        help="calibration anchors cover a completed season; serving anchors "
+        "come from a stored serving anchor artifact and need --week",
+    )
+    serve.add_argument(
+        "--week",
+        type=int,
+        default=None,
+        help="projection week naming the serving anchor artifact",
+    )
+
+    verify = sub.add_parser(
+        "serve-verify",
+        help="compare already-served events against the stored baseline "
+        "predictions; the only step that reads them",
+    )
+    verify.add_argument("--season", type=int, required=True)
+    verify.add_argument(
+        "--game-id",
+        type=int,
+        nargs="+",
+        default=None,
+        help="verify only these served games (default: every served game)",
+    )
+
     live = sub.add_parser(
         "live-odds",
         help="capture append-only live sportsbook line snapshots",
@@ -705,6 +740,81 @@ def main(argv=None):
             + ", ".join(str(week) for week in weeks)
             + f" from the {args.source} projections"
         )
+
+    elif args.command == "serve-game":
+        from backend.etl import store
+        from backend.serving.replay import summarize_latency
+        from backend.serving.serve import (
+            MissingPlayFeed,
+            serve_game,
+            served_events_artifact,
+        )
+
+        if args.anchor_source == "serving" and args.week is None:
+            raise SystemExit("--anchor-source serving requires --week")
+        if args.anchor_source == "calibration" and args.week is not None:
+            raise SystemExit(
+                "calibration anchors cover a whole season; drop --week"
+            )
+        try:
+            events = serve_game(
+                args.season,
+                args.game_id,
+                source=args.anchor_source,
+                week=args.week,
+            )
+        except (MissingPlayFeed, FileNotFoundError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        artifact = served_events_artifact(args.season, args.game_id)
+        store.write_processed(events, *artifact)
+        latency = summarize_latency(events["latency_seconds"])
+        print(
+            f"wrote {'/'.join(artifact)}: {int(events['emitted'].sum())} win "
+            f"probabilities across {len(events)} play events for game "
+            f"{args.game_id} (model week {int(events['model_week'].iloc[0])}, "
+            f"{args.anchor_source} anchors)"
+        )
+        print(
+            f"latency per event: median {latency['median_seconds'] * 1e3:.1f} ms, "
+            f"p99 {latency['p99_seconds'] * 1e3:.1f} ms, "
+            f"max {latency['max_seconds'] * 1e3:.1f} ms"
+        )
+
+    elif args.command == "serve-verify":
+        from backend.etl import store
+        from backend.serving.verify import verify_served
+
+        try:
+            problems, frames = verify_served(args.season, args.game_id)
+        except (FileNotFoundError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        for problem in problems:
+            print(f"PROBLEM: {problem}")
+        if args.game_id is None:
+            store.write_processed(
+                frames["games"],
+                "serving",
+                f"served_verification_games_{args.season}.parquet",
+            )
+            store.write_processed(
+                frames["summary"],
+                "serving",
+                f"served_verification_{args.season}.parquet",
+            )
+        summary = frames["summary"].iloc[0]
+        print(
+            f"{summary['status']}: {summary['served_rows']} served "
+            f"probabilities vs {summary['stored_rows']} stored baseline rows "
+            f"across {summary['compared_games']} of {summary['served_games']} "
+            f"served games"
+        )
+        if summary["unverifiable_games"]:
+            print(
+                f"{summary['unverifiable_games']} served games have no stored "
+                "baseline predictions to compare against"
+            )
+        if problems:
+            raise SystemExit(1)
 
     elif args.command == "live-odds":
         from backend.odds.live import load_division_one_schedule, run_live_polling
