@@ -50,6 +50,14 @@ def read_processed(
     return pd.read_parquet(PROCESSED_DIR.joinpath(*parts), columns=columns)
 
 
+def processed_names(*parts: str) -> list[str]:
+    """Parquet file stems stored under a processed directory, if it exists."""
+    directory = PROCESSED_DIR.joinpath(*parts)
+    if not directory.is_dir():
+        return []
+    return sorted(path.stem for path in directory.glob("*.parquet"))
+
+
 def processed_columns(*parts: str) -> list[str]:
     """Column names of a processed artifact, from parquet metadata only."""
     return list(
