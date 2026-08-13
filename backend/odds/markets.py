@@ -46,6 +46,12 @@ def match_event(
     return int(best.game_id), float(best.match_score)
 
 
+def _stored_sequence(value) -> list | np.ndarray:
+    """Nested payloads read back from parquet arrive as numpy arrays, whose
+    truthiness raises once they hold more than one element."""
+    return value if isinstance(value, (list, np.ndarray)) else []
+
+
 def flatten_odds_api_offers(
     events: pd.DataFrame, schedule: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -88,18 +94,12 @@ def flatten_odds_api_offers(
         )
         if game_id is None:
             continue
-        bookmakers = (
-            event.bookmakers
-            if isinstance(event.bookmakers, (list, np.ndarray))
-            else []
-        )
-        for bookmaker in bookmakers:
-            markets = bookmaker.get("markets") or []
-            for market in markets:
+        for bookmaker in _stored_sequence(event.bookmakers):
+            for market in _stored_sequence(bookmaker.get("markets")):
                 market_key = market.get("key")
                 if market_key not in {"spreads", "totals"}:
                     continue
-                for outcome in market.get("outcomes") or []:
+                for outcome in _stored_sequence(market.get("outcomes")):
                     if market_key == "spreads":
                         if outcome.get("name") == event.home_team:
                             selection = "home"
