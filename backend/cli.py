@@ -1,6 +1,6 @@
 import argparse
 
-from backend.config import SEASONS
+from backend.config import EVAL_SEASONS, SEASONS
 
 
 def parse_args(argv=None):
@@ -97,17 +97,39 @@ def parse_args(argv=None):
     anchors = sub.add_parser(
         "serving-anchors",
         help="build outcome-free serving anchors from a stored projection "
-        "artifact and prove the stored artifact round-trips through the "
-        "anchor loader",
+        "artifact or the raw market lines and prove the stored artifact "
+        "round-trips through the anchor loader",
     )
     anchors.add_argument("--season", type=int, required=True)
-    anchors.add_argument("--week", type=int, default=1)
+    anchors.add_argument(
+        "--week",
+        type=int,
+        default=None,
+        help="projection week naming a preseason artifact (default 1); "
+        "market anchors cover the whole season and take no week",
+    )
     anchors.add_argument(
         "--source",
-        choices=["preseason"],
+        choices=["preseason", "market"],
         default="preseason",
-        help="stored projection artifact to anchor on "
-        "(weekly fit projections come later)",
+        help="anchor on a stored projection artifact, or flatten the raw "
+        "market lines into closing-spread anchors "
+        "(weekly fit projections were considered and dropped: the live "
+        "model always starts after kickoff, when the closing line is known)",
+    )
+
+    market_eval = sub.add_parser(
+        "ingame-market-anchor",
+        help="rescore the frozen in-game baseline on market closing-line "
+        "anchors — identical play boundaries and parameters, anchor as the "
+        "only variable — and record the adopt-or-reject verdict",
+    )
+    market_eval.add_argument(
+        "--seasons",
+        type=int,
+        nargs="+",
+        default=EVAL_SEASONS,
+        help="seasons with stored market anchor artifacts",
     )
 
     serve = sub.add_parser(
@@ -710,22 +732,53 @@ def main(argv=None):
             serving_anchor_artifact,
         )
 
-        try:
-            anchors = load_serving_anchors(
-                args.source, season=args.season, week=args.week
+        if args.source == "market":
+            from backend.model.ingame import SERVING_ANCHOR_COLUMNS
+            from backend.serving.market import (
+                MARKET_ANCHOR_WEEK,
+                build_market_anchors,
+                cross_check_closing_spreads,
             )
-        except FileNotFoundError as exc:
-            raise SystemExit(
-                f"no stored {args.source} projections for season "
-                f"{args.season} week {args.week}; run `python -m backend "
-                f"{args.source} --season {args.season}` first"
-            ) from exc
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from exc
-        artifact = serving_anchor_artifact(args.season, args.week)
-        store.write_processed(anchors, *artifact)
+
+            if args.week is not None:
+                raise SystemExit(
+                    "market anchors cover a whole season; drop --week"
+                )
+            try:
+                built = build_market_anchors(args.season)
+            except FileNotFoundError as exc:
+                raise SystemExit(
+                    f"season {args.season} has no stored lines or schedule; "
+                    "run `python -m backend ingest` first"
+                ) from exc
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            checked, problems = cross_check_closing_spreads(built, args.season)
+            for problem in problems:
+                print(f"PROBLEM: {problem}")
+            if problems:
+                raise SystemExit(1)
+            week = MARKET_ANCHOR_WEEK
+            anchors = built[SERVING_ANCHOR_COLUMNS].reset_index(drop=True)
+        else:
+            week = args.week if args.week is not None else 1
+            try:
+                anchors = load_serving_anchors(
+                    args.source, season=args.season, week=week
+                )
+            except FileNotFoundError as exc:
+                raise SystemExit(
+                    f"no stored {args.source} projections for season "
+                    f"{args.season} week {week}; run `python -m backend "
+                    f"{args.source} --season {args.season}` first"
+                ) from exc
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            built = anchors
+        artifact = serving_anchor_artifact(args.season, week)
+        store.write_processed(built, *artifact)
         stored = load_serving_anchors(
-            "serving", season=args.season, week=args.week
+            "serving", season=args.season, week=week
         )
         if not stored.equals(anchors):
             raise SystemExit(
@@ -733,13 +786,168 @@ def main(argv=None):
                 "the serving anchor loader"
             )
         weeks = sorted(stored["model_week"].unique())
+        source_note = (
+            "the market closing lines" if args.source == "market"
+            else f"the {args.source} projections"
+        )
         print(
             f"wrote {'/'.join(artifact)}: {len(stored)} outcome-free anchors "
             f"for season {args.season} model week"
             f"{'s' if len(weeks) > 1 else ''} "
-            + ", ".join(str(week) for week in weeks)
-            + f" from the {args.source} projections"
+            + (
+                f"{weeks[0]}-{weeks[-1]}"
+                if len(weeks) > 2
+                else ", ".join(str(week) for week in weeks)
+            )
+            + f" from {source_note}"
         )
+        if args.source == "market":
+            sd_note = built["margin_sd_method"].iloc[0]
+            print(
+                f"cross-checked {checked} closing spreads against "
+                "backtest/predictions_filtered.parquet"
+                + ("" if checked else " (season absent from the backtest)")
+            )
+            print(
+                f"margin_sd {built['margin_sd'].iloc[0]:.3f} points ({sd_note})"
+            )
+
+    elif args.command == "ingame-market-anchor":
+        import numpy as np
+        import pandas as pd
+
+        from backend.etl import store
+        from backend.model.ingame import IngameBaselineParams, win_probability
+        from backend.model.market_anchor import (
+            MODEL_VERSION,
+            evaluate_market_anchor,
+            format_market_anchor_diagnostic,
+        )
+        from backend.serving.anchors import load_serving_anchors
+        from backend.serving.market import MARKET_ANCHOR_WEEK
+
+        anchor_frames = []
+        for season in args.seasons:
+            try:
+                season_anchors = load_serving_anchors(
+                    "serving", season=season, week=MARKET_ANCHOR_WEEK
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                raise SystemExit(
+                    f"no stored market anchors for season {season} "
+                    f"(run `python -m backend serving-anchors --season "
+                    f"{season} --source market` first): {exc}"
+                ) from exc
+            anchor_frames.append(season_anchors)
+        anchors = pd.concat(anchor_frames, ignore_index=True)
+
+        try:
+            baseline = store.read_processed(
+                "ingame", "baseline_predictions.parquet"
+            )
+            baseline_summary = store.read_processed(
+                "ingame", "baseline_summary.parquet"
+            )
+        except FileNotFoundError as exc:
+            raise SystemExit(
+                "missing baseline predictions; run "
+                "`python -m backend ingame-baseline` first"
+            ) from exc
+        baseline = baseline[baseline["season"].isin(args.seasons)]
+        parameter = baseline_summary[
+            baseline_summary["summary_type"].eq("parameter")
+        ].iloc[0]
+        params = IngameBaselineParams(
+            possession_points=float(parameter["possession_points"]),
+            field_position_points_per_yard=float(
+                parameter["field_position_points_per_yard"]
+            ),
+            sd_floor_points=float(parameter["sd_floor_points"]),
+        )
+        if not np.allclose(
+            win_probability(baseline, params),
+            baseline["win_probability"].to_numpy(float),
+            atol=1e-9,
+        ):
+            raise SystemExit(
+                "stored baseline probabilities do not match the frozen "
+                "parameters"
+            )
+
+        # Identical play boundaries: every stored baseline state must carry a
+        # market anchor, so the anchor is the only variable in the comparison.
+        anchored_games = set(anchors["game_id"])
+        missing = baseline[~baseline["game_id"].isin(anchored_games)]
+        if not missing.empty:
+            raise SystemExit(
+                f"{missing['game_id'].nunique()} baseline games in seasons "
+                f"{sorted(missing['season'].unique())} have no market anchor; "
+                "the comparison requires identical play boundaries"
+            )
+        inputs = baseline.rename(
+            columns={
+                "win_probability": "baseline_win_probability",
+                "pregame_margin": "baseline_pregame_margin",
+                "pregame_margin_sd": "baseline_pregame_margin_sd",
+                "model_version": "baseline_model_version",
+            }
+        ).merge(
+            anchors.rename(
+                columns={
+                    "model_week": "market_model_week",
+                    "home_margin": "pregame_margin",
+                    "margin_sd": "pregame_margin_sd",
+                }
+            ),
+            on="game_id",
+            how="inner",
+            validate="many_to_one",
+        )
+        inputs["market_win_probability"] = win_probability(inputs, params)
+        inputs["model_version"] = MODEL_VERSION
+
+        anchor_note = (
+            "frozen baseline parameters and play boundaries, anchor swapped "
+            "to the market closing line (home_margin = -closing_spread, "
+            f"margin_sd {inputs['pregame_margin_sd'].iloc[0]:.3f} constant) "
+            f"across seasons {min(args.seasons)}-{max(args.seasons)}"
+        )
+        summary = evaluate_market_anchor(inputs, anchor_note)
+
+        # The frozen holdout numbers must reproduce exactly from the same
+        # states, or the boundaries are not identical after all.
+        frozen = baseline_summary[
+            baseline_summary["summary_type"].eq("evaluation")
+            & baseline_summary["partition"].eq("holdout")
+            & baseline_summary["scope"].eq("overall")
+        ].iloc[0]
+        rescored = summary[
+            summary["summary_type"].eq("evaluation")
+            & summary["partition"].eq("holdout")
+            & summary["scope"].eq("overall")
+        ].iloc[0]
+        if int(rescored["n_states"]) != int(frozen["n_states"]) or not np.isclose(
+            rescored["baseline_log_loss"], frozen["log_loss"], atol=1e-9
+        ):
+            raise SystemExit(
+                "holdout baseline does not reproduce the frozen summary "
+                f"({rescored['n_states']} states, log loss "
+                f"{rescored['baseline_log_loss']:.6f} vs frozen "
+                f"{frozen['n_states']:.0f} states, {frozen['log_loss']:.6f})"
+            )
+
+        store.write_processed(
+            inputs, "ingame", "market_anchor_predictions.parquet"
+        )
+        store.write_processed(summary, "ingame", "market_anchor_summary.parquet")
+        print(
+            f"market-anchored probabilities at {len(inputs)} play boundaries "
+            f"across {inputs['game_id'].nunique()} games "
+            "(every baseline boundary in "
+            + ", ".join(str(season) for season in args.seasons)
+            + ")"
+        )
+        print(format_market_anchor_diagnostic(summary))
 
     elif args.command == "serve-game":
         from backend.etl import store
