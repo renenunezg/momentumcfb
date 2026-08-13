@@ -176,3 +176,40 @@ def test_snapshots_are_append_only_and_replayable(tmp_path, monkeypatch):
     tampered.to_parquet(offers_path, index=False)
     problems, _ = live.verify_live_snapshots(2026)
     assert any("offers_sha256" in problem for problem in problems)
+
+
+def test_flatten_offers_survives_parquet_nested_arrays(tmp_path):
+    # Odds snapshots are read back from parquet, which turns every nested
+    # list into a numpy array; truthiness checks on those raised as soon as
+    # a bookmaker carried more than one market (spreads + totals).
+    from backend.odds.markets import flatten_odds_api_offers
+
+    events = pd.DataFrame(
+        [
+            {
+                **_odds_event(
+                    "ev-1",
+                    "Alabama Crimson Tide",
+                    "Georgia Bulldogs",
+                    NOW.isoformat(),
+                    NOW.isoformat(),
+                ),
+                "execution_eligibility_verified": False,
+                "source_fetched_at": NOW.isoformat(),
+            }
+        ]
+    )
+    path = tmp_path / "odds_api.parquet"
+    events.to_parquet(path, index=False)
+    schedule = pd.DataFrame(
+        {
+            "game_id": [7],
+            "start_date": [NOW.isoformat()],
+            "home_team": ["Alabama"],
+            "away_team": ["Georgia"],
+        }
+    )
+    offers, coverage = flatten_odds_api_offers(pd.read_parquet(path), schedule)
+    assert coverage["matched"].all()
+    assert len(offers) == 4  # two spreads outcomes + over + under
+    assert set(offers["market"]) == {"spreads", "totals"}
