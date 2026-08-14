@@ -13,6 +13,8 @@ pyarrow = "^17.0"
 requests = "^2.32"
 python-dotenv = "^1.1"
 scipy = "^1.17"
+sqlalchemy = "^2.0.52"
+psycopg2-binary = "^2.9.12"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"

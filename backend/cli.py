@@ -223,6 +223,26 @@ def parse_args(argv=None):
         help="ISO timestamp; show the live market view available at that time",
     )
 
+    pub = sub.add_parser(
+        "publish",
+        help="publish serving tables to the cfb schema of the momentum "
+        "Supabase project (the website's only data interface)",
+    )
+    pub.add_argument("--season", type=int, required=True)
+    pub.add_argument("--week", type=int, default=1)
+    pub.add_argument(
+        "--source",
+        choices=["preseason", "fit"],
+        default="preseason",
+        help="publish a preseason forecast artifact or an in-season fit "
+        "artifact (fit artifacts carry no market comparisons)",
+    )
+    pub.add_argument(
+        "--skip-backtest",
+        action="store_true",
+        help="skip the full refresh of the backtest history table",
+    )
+
     return p.parse_args(argv)
 
 
@@ -1079,3 +1099,15 @@ def main(argv=None):
                 print(view.to_string(index=False))
         if problems:
             raise SystemExit(1)
+
+    elif args.command == "publish":
+        from backend.publish import publish
+
+        stored = publish(
+            args.season,
+            args.week,
+            source=args.source,
+            include_backtest=not args.skip_backtest,
+        )
+        for table, count in stored.items():
+            print(f"cfb.{table}: {count} rows stored")
