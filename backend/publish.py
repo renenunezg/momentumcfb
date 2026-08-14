@@ -1,8 +1,9 @@
 """Publish serving tables to the cfb schema of the momentum Supabase project.
 
 Supabase is the only interface between this model and the website
-(momentumweb); the four tables written here are that API surface:
+(momentumweb); the five tables written here are that API surface:
 
+- teams                 team identity dimension (logos, colors), full refresh
 - team_ratings          one row per team per published (season, week)
 - game_projections      current forecast, one row per game
 - market_comparisons    best priced offer vs model, one row per game
@@ -15,10 +16,25 @@ to_sql(if_exists="replace") would drop them.
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 from sqlalchemy import text
 
-from backend.config import PROCESSED_DIR
+from backend.config import PROCESSED_DIR, RAW_DIR
+
+TEAMS_COLUMNS = [
+    "team_id",
+    "team",
+    "mascot",
+    "abbreviation",
+    "conference",
+    "classification",
+    "color",
+    "alternate_color",
+    "logo_light",
+    "logo_dark",
+]
 
 TEAM_RATINGS_COLUMNS = [
     "season",
@@ -145,6 +161,72 @@ def _serving_frame(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return out
 
 
+_HEX_COLOR = re.compile(r"^#[0-9a-f]{6}$")
+
+
+def _hex_color(value) -> str | None:
+    """CFBD stores a missing color as the literal string '#null', which would
+    reach the browser as an invalid CSS color; anything not a six-digit hex
+    becomes NULL so the site can fall back deliberately."""
+    if not isinstance(value, str):
+        return None
+    color = value.strip().lower()
+    return color if _HEX_COLOR.match(color) else None
+
+
+# The site renders logos at roughly 20px, and the schedule page loads two per
+# game; at CFBD's 500px variant that is ~9MB of PNG for a full week, so serve
+# the 128px variant, which still has ample headroom over the display size.
+LOGO_TARGET_WIDTH = 128
+
+
+def _logo(logos, dark: bool) -> str | None:
+    """CFBD ships each logo at eight widths in a light and a dark variant
+    (.../logos/128/333.png, .../logos-dark/128/333.png). Pick the narrowest
+    variant at or above the target width, or the widest available below it."""
+    marker = "/logos-dark/" if dark else "/logos/"
+    candidates = []
+    for url in logos if logos is not None else ():
+        if not isinstance(url, str) or marker not in url:
+            continue
+        segment = url.rsplit(marker, 1)[1].split("/", 1)[0]
+        if segment.isdigit():
+            candidates.append((int(segment), url))
+    if not candidates:
+        return None
+    at_or_above = [c for c in candidates if c[0] >= LOGO_TARGET_WIDTH]
+    return min(at_or_above)[1] if at_or_above else max(candidates)[1]
+
+
+def teams_path(season: int):
+    return RAW_DIR / "preseason" / str(season) / "teams.parquet"
+
+
+def load_teams(season: int) -> pd.DataFrame:
+    """Team identity from the season's preseason /teams snapshot.
+
+    Every division is kept, not just D1: game_projections can name a
+    non-D1 opponent, and the site resolves logos by team_id alone.
+    """
+    raw = pd.read_parquet(teams_path(season))
+    out = pd.DataFrame(
+        {
+            "team_id": pd.to_numeric(raw["id"], errors="coerce").astype("Int64"),
+            "team": raw["school"],
+            "mascot": raw["mascot"],
+            "abbreviation": raw["abbreviation"],
+            "conference": raw["conference"],
+            "classification": raw["classification"],
+            "color": raw["color"].map(_hex_color),
+            "alternate_color": raw["alternate_color"].map(_hex_color),
+            "logo_light": raw["logos"].map(lambda v: _logo(v, dark=False)),
+            "logo_dark": raw["logos"].map(lambda v: _logo(v, dark=True)),
+        }
+    )
+    out = out.dropna(subset=["team_id"]).drop_duplicates(subset=["team_id"])
+    return _serving_frame(out, TEAMS_COLUMNS)
+
+
 def load_team_ratings(source: str, season: int, week: int) -> pd.DataFrame:
     path = _artifact_dir(source, "ratings") / f"{season}_{week:02d}.parquet"
     return _serving_frame(pd.read_parquet(path), TEAM_RATINGS_COLUMNS)
@@ -177,6 +259,9 @@ def publish(
     """Publish the serving tables for one (season, week) in one transaction."""
     from backend.db import engine
 
+    # Team identity comes from the preseason /teams snapshot, which an
+    # in-season fit publish does not produce; skip it rather than fail.
+    teams = load_teams(season) if teams_path(season).exists() else None
     ratings = load_team_ratings(source, season, week)
     projections = load_game_projections(source, season, week)
     # Market comparisons are produced only by the preseason forecast; fit
@@ -189,6 +274,12 @@ def publish(
     game_ids = [int(g) for g in projections["game_id"]]
 
     with engine.begin() as conn:
+        if teams is not None:
+            # A dimension with no natural version: replace it wholesale so a
+            # rebrand or a reclassification cannot leave a stale row behind.
+            conn.execute(text("DELETE FROM teams"))
+            teams.to_sql("teams", con=conn, if_exists="append", index=False)
+
         conn.execute(
             text("DELETE FROM team_ratings WHERE season = :s AND week = :w"),
             {"s": season, "w": week},
@@ -221,6 +312,7 @@ def publish(
 
     # Read back stored totals so the caller reports what the website will see.
     tables = [
+        "teams",
         "team_ratings",
         "game_projections",
         "market_comparisons",
