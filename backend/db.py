@@ -44,6 +44,14 @@ def _block_unauthorized_writes(
         )
 
 
+def _pin_search_path(dbapi_connection, connection_record):
+    # The shared postgres role carries a role-level search_path=mlb,public
+    # (set for mlbmodel), and role settings win over the startup options
+    # through the pooler; a session-level SET wins over both.
+    with dbapi_connection.cursor() as cursor:
+        cursor.execute("SET search_path TO cfb, public")
+
+
 _engine = None
 
 
@@ -62,6 +70,7 @@ def __getattr__(name):
                 database_url,
                 connect_args={"options": "-csearch_path=cfb,public"},
             )
+            event.listens_for(_engine, "connect")(_pin_search_path)
             event.listens_for(_engine, "before_cursor_execute")(
                 _block_unauthorized_writes
             )
