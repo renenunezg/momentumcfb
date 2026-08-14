@@ -23,13 +23,11 @@ from sqlalchemy import text
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 
+# Identity only. Conference and classification are deliberately absent: every
+# consumer already loads team_ratings, which carries both.
 TEAMS_COLUMNS = [
     "team_id",
     "team",
-    "mascot",
-    "abbreviation",
-    "conference",
-    "classification",
     "color",
     "alternate_color",
     "logo_light",
@@ -81,6 +79,7 @@ GAME_PROJECTIONS_COLUMNS = [
     "away_classification",
     "home_missing_input_count",
     "away_missing_input_count",
+    "conference_game",
 ]
 
 MARKET_COMPARISONS_COLUMNS = [
@@ -213,10 +212,6 @@ def load_teams(season: int) -> pd.DataFrame:
         {
             "team_id": pd.to_numeric(raw["id"], errors="coerce").astype("Int64"),
             "team": raw["school"],
-            "mascot": raw["mascot"],
-            "abbreviation": raw["abbreviation"],
-            "conference": raw["conference"],
-            "classification": raw["classification"],
             "color": raw["color"].map(_hex_color),
             "alternate_color": raw["alternate_color"].map(_hex_color),
             "logo_light": raw["logos"].map(lambda v: _logo(v, dark=False)),
@@ -234,7 +229,20 @@ def load_team_ratings(source: str, season: int, week: int) -> pd.DataFrame:
 
 def load_game_projections(source: str, season: int, week: int) -> pd.DataFrame:
     path = _artifact_dir(source, "projections") / f"{season}_{week:02d}.parquet"
-    return _serving_frame(pd.read_parquet(path), GAME_PROJECTIONS_COLUMNS)
+    projections = pd.read_parquet(path)
+    # conference_game is schedule metadata the model never consumes, so it is
+    # absent from the forecast artifact; take it from the same snapshot the
+    # forecast ran against rather than inferring it from matching conference
+    # names, which would call two independents a conference game.
+    schedule_path = RAW_DIR / "preseason" / str(season) / "games.parquet"
+    if schedule_path.exists():
+        schedule = pd.read_parquet(
+            schedule_path, columns=["id", "conference_game"]
+        )
+        projections["conference_game"] = projections["game_id"].map(
+            schedule.set_index("id")["conference_game"]
+        )
+    return _serving_frame(projections, GAME_PROJECTIONS_COLUMNS)
 
 
 def load_market_comparisons(season: int, week: int) -> pd.DataFrame:
