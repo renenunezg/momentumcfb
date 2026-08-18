@@ -199,8 +199,30 @@ def _validate_games(games: pd.DataFrame) -> None:
         raise ValueError("scoring games contain null chronological fields")
 
 
+def fbs_calibration_cohort(games: pd.DataFrame) -> pd.DataFrame:
+    """Return the stable FBS-vs-FBS population used by frozen calibration.
+
+    Production scoring also covers mixed and FCS-only games. Those rows were
+    added after the baseline was frozen and include postseason week labels
+    that do not share the FBS regular-season chronology. This explicit cohort
+    reproduces the original 4,958 IDs instead of silently changing the target.
+    """
+    required = {"home_classification", "away_classification"}
+    missing = sorted(required - set(games.columns))
+    if missing:
+        raise ValueError(
+            "scoring games are missing calibration columns: " + ", ".join(missing)
+        )
+    return games[
+        games["home_classification"].str.lower().eq("fbs")
+        & games["away_classification"].str.lower().eq("fbs")
+    ].copy()
+
+
 def walk_forward_season(
-    games: pd.DataFrame, config: JointScoringConfig
+    games: pd.DataFrame,
+    config: JointScoringConfig,
+    strength_prior_means: dict[int, tuple[float, float]] | None = None,
 ) -> pd.DataFrame:
     """Project each game using completed games from earlier model weeks only."""
     _validate_games(games)
@@ -224,6 +246,7 @@ def walk_forward_season(
             forecast_week=int(forecast_week),
             as_of=as_of.to_pydatetime(),
             config=config,
+            strength_prior_means=strength_prior_means,
         )
         projected = pd.DataFrame(
             projection.to_record() for projection in fitted.project(target)
@@ -595,6 +618,9 @@ def run_calibration(
     candidate_configs: Iterable[JointScoringConfig] = CANDIDATE_CONFIGS,
     development_seasons: tuple[int, ...] = DEVELOPMENT_SEASONS,
     holdout_seasons: tuple[int, ...] = HOLDOUT_SEASONS,
+    strength_priors_by_season: Mapping[
+        int, dict[int, tuple[float, float]]
+    ] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> CalibrationResult:
     required_seasons = set(development_seasons) | set(holdout_seasons)
@@ -605,6 +631,11 @@ def run_calibration(
         )
     if set(development_seasons) & set(holdout_seasons):
         raise ValueError("development and holdout seasons must be disjoint")
+    games_by_season = {
+        season: fbs_calibration_cohort(games)
+        for season, games in games_by_season.items()
+    }
+    strength_priors_by_season = strength_priors_by_season or {}
 
     configs = tuple(candidate_configs)
     if not configs:
@@ -635,7 +666,11 @@ def run_calibration(
             if core_config not in prediction_cache:
                 prediction_cache[core_config] = pd.concat(
                     [
-                        walk_forward_season(games_by_season[season], config)
+                        walk_forward_season(
+                            games_by_season[season],
+                            config,
+                            strength_priors_by_season.get(season),
+                        )
                         for season in development_seasons
                     ],
                     ignore_index=True,
@@ -688,7 +723,11 @@ def run_calibration(
 
     predictions = pd.concat(
         [
-            walk_forward_season(games_by_season[season], selected_config)
+            walk_forward_season(
+                games_by_season[season],
+                selected_config,
+                strength_priors_by_season.get(season),
+            )
             for season in (*development_seasons, *holdout_seasons)
         ],
         ignore_index=True,

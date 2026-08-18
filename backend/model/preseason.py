@@ -10,10 +10,18 @@ from backend.config import PROCESSED_DIR
 from backend.etl import store
 from backend.features.scoring import build_scoring_games
 from backend.model.joint_scoring import DEFAULT_CONFIG, fit_joint_scoring
+from backend.model.market_blend import add_market_informed_margins
 from backend.model.outputs import GameProjection
+from backend.model.unit_ratings import COLUMNS as UNIT_RATING_COLUMNS
+from backend.model.unit_ratings import MODEL_VERSION as UNIT_RATING_MODEL_VERSION
+from backend.model.unit_ratings import UnitRatings, fit_unit_ratings
 from backend.odds.markets import compare_priced_offers, flatten_odds_api_offers
 
-MODEL_VERSION = "preseason_v2"
+MODEL_VERSION = "preseason_v3"
+# Previous-season carryover was promoted on the unchanged 4,958-game FBS
+# cohort. At weight 1.0, holdout margin MAE improved 13.284 to 12.702 and
+# early-history MAE improved 16.472 to 14.051. Larger weights did not improve
+# development MAE, and 1.5 created invalid negative-score projections.
 PREVIOUS_POWER_WEIGHT = 1.00
 PREVIOUS_ENVIRONMENT_WEIGHT = 0.40
 PREVIOUS_PACE_WEIGHT = 0.35
@@ -32,11 +40,103 @@ BASE_OFFSEASON_POWER_SD = 6.05
 @dataclass(frozen=True, slots=True)
 class PreseasonForecastResult:
     ratings: pd.DataFrame
+    unit_ratings: pd.DataFrame
     projections: pd.DataFrame
     schedule_coverage: pd.DataFrame
     market_offers: pd.DataFrame
     market_comparisons: pd.DataFrame
     log_directory: Path
+
+
+def strength_prior_means_from_ratings(
+    ratings: pd.DataFrame,
+) -> dict[int, tuple[float, float]]:
+    """Convert published preseason point ratings into weekly-engine priors.
+
+    The joint engine stores offense and defense strengths per possession,
+    while the preseason artifact publishes their points-per-game equivalents.
+    The average expected possession count recovers the common scale used when
+    those ratings were built. This keeps market data out of the rating state:
+    only the pure preseason team ratings enter the weekly fit.
+    """
+    required = {
+        "team_id",
+        "offense_points",
+        "defense_points",
+        "expected_possessions",
+    }
+    missing = sorted(required - set(ratings.columns))
+    if missing:
+        raise ValueError(
+            "preseason ratings are missing prior columns: " + ", ".join(missing)
+        )
+    if ratings.empty:
+        raise ValueError("preseason ratings must not be empty")
+    base_possessions = float(
+        pd.to_numeric(ratings["expected_possessions"], errors="coerce").mean()
+    )
+    if not np.isfinite(base_possessions) or base_possessions <= 0:
+        raise ValueError("preseason expected possessions must have a positive mean")
+
+    means = {}
+    for row in ratings.itertuples():
+        offense = float(row.offense_points) / base_possessions
+        defense = float(row.defense_points) / base_possessions
+        if np.isfinite(offense) and np.isfinite(defense):
+            means[int(row.team_id)] = (offense, defense)
+    if not means:
+        raise ValueError("preseason ratings contain no finite strength priors")
+    return means
+
+
+def load_preseason_strength_prior_means(
+    season: int, week: int = 1
+) -> dict[int, tuple[float, float]]:
+    ratings = store.read_processed(
+        "preseason", "ratings", f"{season}_{week:02d}.parquet"
+    )
+    return strength_prior_means_from_ratings(ratings)
+
+
+def build_historical_carryover_priors(
+    previous_fit,
+    current_games: pd.DataFrame,
+    power_weight: float = PREVIOUS_POWER_WEIGHT,
+    environment_weight: float = PREVIOUS_ENVIRONMENT_WEIGHT,
+) -> dict[int, tuple[float, float]]:
+    """Leakage-free prior means using only the previous season's final fit.
+
+    This is the historical analogue of the previous-rating component in the
+    richer current preseason model. Team names bridge any season-to-season ID
+    changes; promoted or renamed teams deliberately receive no prior.
+    """
+    home = current_games[["home_team_id", "home_team"]].rename(
+        columns={"home_team_id": "team_id", "home_team": "team"}
+    )
+    away = current_games[["away_team_id", "away_team"]].rename(
+        columns={"away_team_id": "team_id", "away_team": "team"}
+    )
+    current_ids = {
+        row.team: int(row.team_id)
+        for row in pd.concat([home, away], ignore_index=True)
+        .drop_duplicates(["team_id", "team"])
+        .itertuples()
+    }
+    means = {}
+    for team in previous_fit.teams.itertuples():
+        team_id = current_ids.get(team.team)
+        if team_id is None:
+            continue
+        index = previous_fit.team_index[int(team.team_id)]
+        offense = float(previous_fit.offense_ppp[index])
+        defense = float(previous_fit.defense_ppp[index])
+        power = offense + defense
+        environment = offense - defense
+        means[team_id] = (
+            0.5 * (power_weight * power + environment_weight * environment),
+            0.5 * (power_weight * power - environment_weight * environment),
+        )
+    return means
 
 
 def _manifest_time(manifest: pd.DataFrame, source: str) -> pd.Timestamp:
@@ -65,6 +165,62 @@ def _latest_season_fit(season: int):
         + timedelta(seconds=1)
     )
     return fit_joint_scoring(games, forecast_week, as_of)
+
+
+def _latest_unit_ratings(
+    season: int,
+    target_season: int,
+    target_week: int,
+    as_of: datetime,
+) -> pd.DataFrame:
+    games = build_scoring_games(
+        store.read_games(season),
+        store.read_processed("team_games", f"{season}.parquet"),
+    )
+    forecast_week = int(games["model_week"].max()) + 1
+    fitted = fit_unit_ratings(
+        store.read_processed("unit_games", f"{season}.parquet"),
+        games,
+        forecast_week,
+        as_of,
+    )
+    carried = UnitRatings(
+        season=target_season,
+        week=target_week,
+        as_of=as_of,
+        frame=fitted.frame,
+    )
+    return pd.DataFrame(carried.to_records())
+
+
+def _align_preseason_unit_ratings(
+    carried: pd.DataFrame,
+    current_ratings: pd.DataFrame,
+    source_season: int,
+) -> pd.DataFrame:
+    current = current_ratings[["team_id", "team", "classification"]].copy()
+    history = carried[["team", *UNIT_RATING_COLUMNS]].copy()
+    out = current.merge(history, on="team", how="left", validate="one_to_one")
+    out["unit_history_missing"] = out[list(UNIT_RATING_COLUMNS)].isna().any(axis=1)
+    out[list(UNIT_RATING_COLUMNS)] = out[list(UNIT_RATING_COLUMNS)].fillna(0.0)
+    out["season"] = int(current_ratings["season"].iloc[0])
+    out["week"] = int(current_ratings["week"].iloc[0])
+    out["as_of"] = current_ratings["as_of"].iloc[0]
+    out["model_version"] = UNIT_RATING_MODEL_VERSION
+    out["source_season"] = source_season
+    order = [
+        "season",
+        "week",
+        "as_of",
+        "model_version",
+        "source_season",
+        "team_id",
+        "team",
+        "classification",
+        "unit_history_missing",
+        *UNIT_RATING_COLUMNS,
+    ]
+    return out[order].sort_values("team", ignore_index=True)
 
 
 def _previous_ratings(fitted) -> pd.DataFrame:
@@ -843,10 +999,21 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
     )
     forecast_created_at = pd.Timestamp(datetime.now(timezone.utc))
     previous_fit = _latest_season_fit(season - 1)
+    carried_unit_ratings = _latest_unit_ratings(
+        season - 1,
+        season,
+        week,
+        forecast_created_at.to_pydatetime(),
+    )
     ratings = _build_ratings(season, previous_fit, sources)
     ratings["as_of"] = forecast_created_at.isoformat()
     ratings["source_snapshot_as_of"] = source_snapshot_as_of.isoformat()
     ratings["forecast_created_at"] = forecast_created_at.isoformat()
+    unit_ratings = _align_preseason_unit_ratings(
+        carried_unit_ratings,
+        ratings,
+        season - 1,
+    )
     projections, coverage = _project_games(
         season,
         week,
@@ -864,14 +1031,17 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
         offers, odds_match_coverage = flatten_odds_api_offers(
             sources["odds_api"], coverage
         )
+        projections = add_market_informed_margins(projections, offers)
         comparisons = compare_priced_offers(projections, offers)
     else:
         offers = _flatten_market_offers(sources["lines"])
+        projections = add_market_informed_margins(projections, offers)
         comparisons = _market_comparisons(projections, offers)
     comparisons["source_snapshot_as_of"] = source_snapshot_as_of.isoformat()
     comparisons["forecast_created_at"] = forecast_created_at.isoformat()
     outputs = {
         "ratings": ratings,
+        "unit_ratings": unit_ratings,
         "projections": projections,
         "schedule_coverage": coverage,
         "market_offers": offers,
@@ -884,6 +1054,7 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
     )
     return PreseasonForecastResult(
         ratings=ratings,
+        unit_ratings=unit_ratings,
         projections=projections,
         schedule_coverage=coverage,
         market_offers=offers,

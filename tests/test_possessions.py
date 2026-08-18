@@ -6,6 +6,7 @@ from backend.features.possessions import (
     build_team_games,
     classify_plays,
 )
+from backend.features.units import build_unit_games
 
 
 def test_raw_plays_build_deterministic_possession_and_team_game_features():
@@ -214,6 +215,7 @@ def test_raw_plays_build_deterministic_possession_and_team_game_features():
     possessions = build_possessions(raw)
     rebuilt = build_possessions(raw)
     team_games = build_team_games(possessions)
+    unit_games = build_unit_games(raw)
 
     assert_frame_equal(possessions, rebuilt)
     assert classified.loc[classified["id"].eq(3), "play_category"].item() == "administrative"
@@ -233,3 +235,7 @@ def test_raw_plays_build_deterministic_possession_and_team_game_features():
     assert "offense_epa_per_play" in team_games
     assert "defense_epa_per_play_allowed" in team_games
     assert "game_possessions" in team_games
+    a_units = unit_games[unit_games["team"].eq("A")].iloc[0]
+    assert abs(a_units["rush_ppa"] - 0.6) < 1e-9
+    assert a_units["pass_ppa"] == 3.0
+    assert unit_games["rush_plays"].sum() == 3

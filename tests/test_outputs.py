@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 
+import pandas as pd
 import pytest
 
 from backend.model import GameProjection, TeamRating
+from backend.model.market_blend import add_market_informed_margins
 
 
 def test_output_contract_preserves_rating_and_market_conventions():
@@ -44,6 +46,35 @@ def test_output_contract_preserves_rating_and_market_conventions():
     assert projection.to_record()["home_margin"] == 7.5
     assert projection.to_record()["home_spread"] == -7.5
     assert projection.to_record()["model_total"] == 52.5
+
+    blended = add_market_informed_margins(
+        pd.DataFrame([projection.to_record()]),
+        pd.DataFrame(
+            [
+                {
+                    "game_id": 1,
+                    "market": "spreads",
+                    "selection": "home",
+                    "point": -3.5,
+                }
+            ]
+        ),
+    ).iloc[0]
+    assert blended.pure_home_margin == 7.5
+    assert blended.market_informed_home_margin == 5.5
+    assert blended.market_weight == 0.5
+    unpriced = add_market_informed_margins(
+        pd.DataFrame([projection.to_record()]),
+        pd.DataFrame(),
+    ).iloc[0]
+    assert unpriced.market_informed_home_margin == unpriced.pure_home_margin
+    assert unpriced.market_weight == 0.0
+    with pytest.raises(ValueError, match="market weight"):
+        add_market_informed_margins(
+            pd.DataFrame([projection.to_record()]),
+            pd.DataFrame(),
+            weight=0.51,
+        )
 
     with pytest.raises(ValueError, match="neutral-site"):
         GameProjection(
