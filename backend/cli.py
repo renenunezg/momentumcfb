@@ -121,8 +121,8 @@ def parse_args(argv=None):
     market_eval = sub.add_parser(
         "ingame-market-anchor",
         help="rescore the frozen in-game baseline on market closing-line "
-        "anchors — identical play boundaries and parameters, anchor as the "
-        "only variable — and record the adopt-or-reject verdict",
+        "anchors - identical play boundaries and parameters, anchor as the "
+        "only variable - and record the adopt-or-reject verdict",
     )
     market_eval.add_argument(
         "--seasons",
@@ -265,16 +265,20 @@ def main(argv=None):
     elif args.command == "features":
         from backend.etl import store
         from backend.features.possessions import build_possessions, build_team_games
+        from backend.features.units import build_unit_games
 
         for season in args.seasons:
             plays = store.read_season_pbp(season)
             possessions = build_possessions(plays)
             team_games = build_team_games(possessions)
+            unit_games = build_unit_games(plays)
             store.write_processed(possessions, "possessions", f"{season}.parquet")
             store.write_processed(team_games, "team_games", f"{season}.parquet")
+            store.write_processed(unit_games, "unit_games", f"{season}.parquet")
             print(
                 f"{season}: {len(possessions)} possessions, "
-                f"{len(team_games)} team-game rows"
+                f"{len(team_games)} team-game rows, "
+                f"{len(unit_games)} unit-game rows"
             )
 
     elif args.command == "fit":
@@ -285,6 +289,9 @@ def main(argv=None):
         from backend.etl import store
         from backend.features.scoring import build_scoring_games
         from backend.model.joint_scoring import fit_joint_scoring
+        from backend.model.market_blend import add_market_informed_margins
+        from backend.model.preseason import load_preseason_strength_prior_means
+        from backend.model.unit_ratings import fit_unit_ratings
 
         games = build_scoring_games(
             store.read_games(args.season),
@@ -297,21 +304,59 @@ def main(argv=None):
             if not target.empty
             else games["start_date"].max() + timedelta(seconds=1)
         ).to_pydatetime()
-        fitted = fit_joint_scoring(games, forecast_week, as_of)
+        try:
+            strength_prior_means = load_preseason_strength_prior_means(args.season)
+        except FileNotFoundError:
+            strength_prior_means = None
+        fitted = fit_joint_scoring(
+            games,
+            forecast_week,
+            as_of,
+            strength_prior_means=strength_prior_means,
+        )
         ratings = pd.DataFrame(rating.to_record() for rating in fitted.ratings())
         projections = pd.DataFrame(
             projection.to_record() for projection in fitted.project(target)
         )
+        if not projections.empty:
+            projections = add_market_informed_margins(
+                projections,
+                pd.DataFrame(),
+            )
         filename = f"{args.season}_{forecast_week:02d}.parquet"
         store.write_processed(ratings, "ratings", filename)
         store.write_processed(projections, "projections", filename)
+        unit_games = store.read_processed("unit_games", f"{args.season}.parquet")
+        units = fit_unit_ratings(
+            unit_games,
+            games,
+            forecast_week,
+            as_of,
+        )
+        unit_ratings = pd.DataFrame(units.to_records())
+        unit_ratings["source_season"] = args.season
+        unit_ratings["unit_history_missing"] = False
+        store.write_processed(unit_ratings, "unit_ratings", filename)
         print(ratings.head(30).to_string(index=False))
-        print(f"wrote {len(ratings)} ratings and {len(projections)} projections")
+        print(
+            f"wrote {len(ratings)} ratings, {len(projections)} projections, "
+            f"and {len(unit_ratings)} unit ratings"
+        )
 
     elif args.command == "calibrate":
+        from datetime import timedelta
+
+        import pandas as pd
+
         from backend.etl import store
         from backend.features.scoring import build_scoring_games
-        from backend.model.calibration import format_diagnostic, run_calibration
+        from backend.model.calibration import (
+            fbs_calibration_cohort,
+            format_diagnostic,
+            run_calibration,
+        )
+        from backend.model.joint_scoring import fit_joint_scoring
+        from backend.model.preseason import build_historical_carryover_priors
 
         games_by_season = {
             season: build_scoring_games(
@@ -320,7 +365,24 @@ def main(argv=None):
             )
             for season in SEASONS
         }
-        result = run_calibration(games_by_season, progress=print)
+        priors_by_season = {}
+        for season in sorted(games_by_season)[1:]:
+            previous = fbs_calibration_cohort(games_by_season[season - 1])
+            forecast_week = int(previous["model_week"].max()) + 1
+            as_of = (
+                pd.to_datetime(previous["start_date"], utc=True).max()
+                + timedelta(seconds=1)
+            ).to_pydatetime()
+            previous_fit = fit_joint_scoring(previous, forecast_week, as_of)
+            priors_by_season[season] = build_historical_carryover_priors(
+                previous_fit,
+                fbs_calibration_cohort(games_by_season[season]),
+            )
+        result = run_calibration(
+            games_by_season,
+            strength_priors_by_season=priors_by_season,
+            progress=print,
+        )
         store.write_processed(
             result.predictions,
             "calibration",
@@ -370,6 +432,7 @@ def main(argv=None):
         )
         print(
             f"wrote {len(result.ratings)} ratings, "
+            f"{len(result.unit_ratings)} unit ratings, "
             f"{len(result.projections)} projections, and "
             f"{len(result.market_comparisons)} market comparisons"
         )

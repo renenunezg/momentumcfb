@@ -7,7 +7,7 @@ import pandas as pd
 
 from backend.model.outputs import GameProjection, TeamRating
 
-MODEL_VERSION = "joint_scoring_v1"
+MODEL_VERSION = "joint_scoring_v2"
 PACE_PRIOR_SD = 2.0
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
@@ -223,8 +223,14 @@ def fit_joint_scoring(
     forecast_week: int,
     as_of: datetime,
     config: JointScoringConfig = DEFAULT_CONFIG,
+    strength_prior_means: dict[int, tuple[float, float]] | None = None,
 ) -> JointScoringFit:
-    """Fit ratings using only games strictly before the requested model week."""
+    """Fit ratings using only games strictly before the requested model week.
+
+    strength_prior_means optionally maps team ID to offense and defense PPP
+    prior means. Missing FBS teams default to zero, while missing FCS teams use
+    the existing classification fallback learned from the initial fit.
+    """
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
     training = games[games["model_week"] < forecast_week].copy()
@@ -289,6 +295,14 @@ def fit_joint_scoring(
     target = 0.5 * (centered_points + process_points)
     base_possessions = float(np.average(training["game_possessions"]))
     prior_mean = np.zeros(2 * n_teams + 1)
+    teams_with_priors = np.zeros(n_teams, dtype=bool)
+    if strength_prior_means:
+        for team_id, (offense_prior, defense_prior) in strength_prior_means.items():
+            index = team_index.get(team_id)
+            if index is not None:
+                prior_mean[index] = offense_prior
+                prior_mean[n_teams + index] = defense_prior
+                teams_with_priors[index] = True
     prior_mean[-1] = HFA_PRIOR_POINTS / base_possessions
     prior_sd = np.full(2 * n_teams + 1, config.strength_prior_sd_ppp)
     prior_sd[-1] = HFA_PRIOR_SD_POINTS / base_possessions
@@ -301,11 +315,11 @@ def fit_joint_scoring(
     if fbs_mask.any() and fcs_mask.any():
         initial_offense = parameters[:n_teams]
         initial_defense = parameters[n_teams : 2 * n_teams]
-        fcs_indices = np.flatnonzero(fcs_mask)
-        prior_mean[fcs_indices] = (
+        missing_fcs_indices = np.flatnonzero(fcs_mask & ~teams_with_priors)
+        prior_mean[missing_fcs_indices] = (
             initial_offense[fcs_mask].mean() - initial_offense[fbs_mask].mean()
         )
-        prior_mean[n_teams + fcs_indices] = (
+        prior_mean[n_teams + missing_fcs_indices] = (
             initial_defense[fcs_mask].mean() - initial_defense[fbs_mask].mean()
         )
     paired_residuals = np.column_stack(

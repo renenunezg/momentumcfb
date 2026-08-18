@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from backend.model.calibration import fbs_calibration_cohort
 from backend.model.joint_scoring import fit_joint_scoring
 
 
@@ -86,8 +87,18 @@ def test_joint_model_is_leak_free_and_reconciles_outputs():
     classifications = fcs_fit.teams.set_index("team_id")["classification"]
     fcs_ratings["classification"] = fcs_ratings["team_id"].map(classifications)
     assert set(fcs_ratings["classification"]) == {"fbs", "fcs"}
+    assert len(fbs_calibration_cohort(fcs_games)) == 3
     assert abs(
         fcs_ratings.loc[
             fcs_ratings["classification"].eq("fbs"), "power_rating"
         ].mean()
     ) < 1e-10
+
+    prior_fit = fit_joint_scoring(
+        games,
+        forecast_week=3,
+        as_of=as_of,
+        strength_prior_means={1: (0.5, 0.5)},
+    )
+    prior_rating_by_id = {rating.team_id: rating for rating in prior_fit.ratings()}
+    assert prior_rating_by_id[1].power_rating > rating_by_id[1].power_rating

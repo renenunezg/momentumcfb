@@ -1,10 +1,11 @@
 """Publish serving tables to the cfb schema of the momentum Supabase project.
 
 Supabase is the only interface between this model and the website
-(momentumweb); the five tables written here are that API surface:
+(momentumweb); the tables written here are that API surface:
 
 - teams                 team identity dimension (logos, colors), full refresh
 - team_ratings          one row per team per published (season, week)
+- team_unit_ratings     descriptive opponent-adjusted unit companions
 - game_projections      current forecast, one row per game
 - market_comparisons    best priced offer vs model, one row per game
 - backtest_predictions  frozen walk-forward history, full refresh
@@ -52,6 +53,24 @@ TEAM_RATINGS_COLUMNS = [
     "missing_input_count",
 ]
 
+TEAM_UNIT_RATINGS_COLUMNS = [
+    "season",
+    "week",
+    "as_of",
+    "model_version",
+    "source_season",
+    "team_id",
+    "team",
+    "classification",
+    "unit_history_missing",
+    "rush_offense",
+    "pass_offense",
+    "rush_defense",
+    "pass_defense",
+    "pass_block",
+    "run_block",
+]
+
 GAME_PROJECTIONS_COLUMNS = [
     "game_id",
     "season",
@@ -80,6 +99,15 @@ GAME_PROJECTIONS_COLUMNS = [
     "home_missing_input_count",
     "away_missing_input_count",
     "conference_game",
+]
+
+GAME_PROJECTIONS_OPTIONAL_COLUMNS = [
+    "pure_home_margin",
+    "pure_home_spread",
+    "market_home_spread",
+    "market_weight",
+    "market_informed_home_margin",
+    "market_informed_home_spread",
 ]
 
 MARKET_COMPARISONS_COLUMNS = [
@@ -227,6 +255,11 @@ def load_team_ratings(source: str, season: int, week: int) -> pd.DataFrame:
     return _serving_frame(pd.read_parquet(path), TEAM_RATINGS_COLUMNS)
 
 
+def load_team_unit_ratings(source: str, season: int, week: int) -> pd.DataFrame:
+    path = _artifact_dir(source, "unit_ratings") / f"{season}_{week:02d}.parquet"
+    return _serving_frame(pd.read_parquet(path), TEAM_UNIT_RATINGS_COLUMNS)
+
+
 def load_game_projections(source: str, season: int, week: int) -> pd.DataFrame:
     path = _artifact_dir(source, "projections") / f"{season}_{week:02d}.parquet"
     projections = pd.read_parquet(path)
@@ -242,7 +275,30 @@ def load_game_projections(source: str, season: int, week: int) -> pd.DataFrame:
         projections["conference_game"] = projections["game_id"].map(
             schedule.set_index("id")["conference_game"]
         )
-    return _serving_frame(projections, GAME_PROJECTIONS_COLUMNS)
+    return _serving_frame(
+        projections,
+        [*GAME_PROJECTIONS_COLUMNS, *GAME_PROJECTIONS_OPTIONAL_COLUMNS],
+    )
+
+
+def _table_exists(conn, table: str) -> bool:
+    return conn.execute(
+        text("SELECT to_regclass(:table_name)"),
+        {"table_name": table},
+    ).scalar() is not None
+
+
+def _table_columns(conn, table: str) -> set[str]:
+    return {
+        str(row.column_name)
+        for row in conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = :table_name"
+            ),
+            {"table_name": table},
+        )
+    }
 
 
 def load_market_comparisons(season: int, week: int) -> pd.DataFrame:
@@ -271,6 +327,10 @@ def publish(
     # in-season fit publish does not produce; skip it rather than fail.
     teams = load_teams(season) if teams_path(season).exists() else None
     ratings = load_team_ratings(source, season, week)
+    try:
+        unit_ratings = load_team_unit_ratings(source, season, week)
+    except FileNotFoundError:
+        unit_ratings = None
     projections = load_game_projections(source, season, week)
     # Market comparisons are produced only by the preseason forecast; fit
     # artifacts project games without pricing the market.
@@ -294,11 +354,26 @@ def publish(
         )
         ratings.to_sql("team_ratings", con=conn, if_exists="append", index=False)
 
+        if unit_ratings is not None and _table_exists(conn, "team_unit_ratings"):
+            conn.execute(
+                text(
+                    "DELETE FROM team_unit_ratings "
+                    "WHERE season = :s AND week = :w"
+                ),
+                {"s": season, "w": week},
+            )
+            unit_ratings.to_sql(
+                "team_unit_ratings", con=conn, if_exists="append", index=False
+            )
+
         conn.execute(
             text("DELETE FROM game_projections WHERE game_id = ANY(:ids)"),
             {"ids": game_ids},
         )
-        projections.to_sql(
+        projection_columns = _table_columns(conn, "game_projections")
+        projections[[
+            column for column in projections.columns if column in projection_columns
+        ]].to_sql(
             "game_projections", con=conn, if_exists="append", index=False
         )
 
@@ -327,6 +402,8 @@ def publish(
         "backtest_predictions",
     ]
     with engine.connect() as conn:
+        if _table_exists(conn, "team_unit_ratings"):
+            tables.insert(2, "team_unit_ratings")
         return {
             table: int(
                 conn.execute(text(f"SELECT count(*) FROM {table}")).scalar()
