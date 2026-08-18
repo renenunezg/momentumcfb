@@ -117,6 +117,13 @@ def parse_args(argv=None):
         "(weekly fit projections were considered and dropped: the live "
         "model always starts after kickoff, when the closing line is known)",
     )
+    anchors.add_argument(
+        "--market-feed",
+        choices=["cfbd", "live-odds"],
+        default=None,
+        help="market input feed (default: cfbd); live-odds freezes the latest "
+        "stored pregame Odds API snapshot for each game",
+    )
 
     market_eval = sub.add_parser(
         "ingame-market-anchor",
@@ -815,10 +822,16 @@ def main(argv=None):
             serving_anchor_artifact,
         )
 
+        if args.source != "market" and args.market_feed is not None:
+            raise SystemExit("--market-feed requires --source market")
+
+        market_feed = args.market_feed or "cfbd"
+        checked = None
         if args.source == "market":
             from backend.model.ingame import SERVING_ANCHOR_COLUMNS
             from backend.serving.market import (
                 MARKET_ANCHOR_WEEK,
+                build_live_market_anchors,
                 build_market_anchors,
                 cross_check_closing_spreads,
             )
@@ -828,15 +841,23 @@ def main(argv=None):
                     "market anchors cover a whole season; drop --week"
                 )
             try:
-                built = build_market_anchors(args.season)
+                built = (
+                    build_live_market_anchors(args.season)
+                    if market_feed == "live-odds"
+                    else build_market_anchors(args.season)
+                )
             except FileNotFoundError as exc:
                 raise SystemExit(
-                    f"season {args.season} has no stored lines or schedule; "
-                    "run `python -m backend ingest` first"
+                    f"season {args.season} has no stored {market_feed} market "
+                    "data or schedule"
                 ) from exc
             except ValueError as exc:
                 raise SystemExit(str(exc)) from exc
-            checked, problems = cross_check_closing_spreads(built, args.season)
+            checked, problems = (
+                cross_check_closing_spreads(built, args.season)
+                if market_feed == "cfbd"
+                else (None, [])
+            )
             for problem in problems:
                 print(f"PROBLEM: {problem}")
             if problems:
@@ -870,7 +891,12 @@ def main(argv=None):
             )
         weeks = sorted(stored["model_week"].unique())
         source_note = (
-            "the market closing lines" if args.source == "market"
+            (
+                "the latest stored pregame Odds API spreads"
+                if market_feed == "live-odds"
+                else "the CFBD market lines"
+            )
+            if args.source == "market"
             else f"the {args.source} projections"
         )
         print(
@@ -885,12 +911,18 @@ def main(argv=None):
             + f" from {source_note}"
         )
         if args.source == "market":
+            if market_feed == "live-odds":
+                print(
+                    f"froze {built['closing_snapshot_id'].nunique()} latest "
+                    "pregame snapshots; live and post-kickoff offers excluded"
+                )
+            else:
+                print(
+                    f"cross-checked {checked} closing spreads against "
+                    "backtest/predictions_filtered.parquet"
+                    + ("" if checked else " (season absent from the backtest)")
+                )
             sd_note = built["margin_sd_method"].iloc[0]
-            print(
-                f"cross-checked {checked} closing spreads against "
-                "backtest/predictions_filtered.parquet"
-                + ("" if checked else " (season absent from the backtest)")
-            )
             print(
                 f"margin_sd {built['margin_sd'].iloc[0]:.3f} points ({sd_note})"
             )

@@ -8,7 +8,11 @@ from backend.serving.anchors import (
     load_serving_anchors,
     serving_anchor_artifact,
 )
-from backend.serving.market import MARKET_ANCHOR_WEEK, build_market_anchors
+from backend.serving.market import (
+    MARKET_ANCHOR_WEEK,
+    build_market_anchors,
+    flatten_live_closing_lines,
+)
 
 
 @pytest.fixture
@@ -120,3 +124,39 @@ def test_market_anchors_flatten_sign_and_round_trip(processed_dir, monkeypatch):
         "serving", season=2026, week=MARKET_ANCHOR_WEEK
     )
     assert reloaded.equals(anchors[SERVING_ANCHOR_COLUMNS])
+
+
+def test_live_market_anchor_freezes_latest_pregame_snapshot():
+    # A post-kickoff spread reflects game state and must never leak into the
+    # pregame anchor, even when it is the newest captured market observation.
+    kickoff = pd.Timestamp("2026-08-29T16:00:00Z")
+    rows = []
+    for snapshot_id, fetched_at, phase, points in (
+        ("early", kickoff - pd.Timedelta(hours=2), "pregame", [-2.5, -3.5]),
+        ("close", kickoff - pd.Timedelta(minutes=1), "pregame", [-4.0, -5.0]),
+        ("live", kickoff + pd.Timedelta(minutes=1), "live", [-10.0, -11.0]),
+    ):
+        for provider_key, point in zip(("a", "b"), points):
+            rows.append(
+                {
+                    "game_id": 10,
+                    "snapshot_id": snapshot_id,
+                    "fetched_at": fetched_at,
+                    "commence_time": kickoff,
+                    "phase": phase,
+                    "provider_key": provider_key,
+                    "provider_last_update": fetched_at - pd.Timedelta(seconds=15),
+                    "market": "spreads",
+                    "selection": "home",
+                    "point": point,
+                }
+            )
+
+    closing = flatten_live_closing_lines(pd.DataFrame(rows))
+
+    assert closing["closing_snapshot_id"].tolist() == ["close"]
+    assert closing["closing_spread"].tolist() == [-4.5]
+    assert closing["n_spread_offers"].tolist() == [2]
+    assert closing["closing_fetched_at"].tolist() == [
+        kickoff - pd.Timedelta(minutes=1)
+    ]
