@@ -42,6 +42,13 @@ MARKET_ANCHOR_COLUMNS = [
     "closing_spread",
     "n_spread_offers",
     "margin_sd_method",
+    "market_anchor_source",
+]
+
+LIVE_MARKET_PROVENANCE_COLUMNS = [
+    "closing_snapshot_id",
+    "closing_fetched_at",
+    "latest_provider_update",
 ]
 
 
@@ -64,6 +71,93 @@ def flatten_closing_lines(lines: pd.DataFrame) -> pd.DataFrame:
         closing_spread="median", n_spread_offers="size"
     )
     return grouped.reset_index()
+
+
+def flatten_live_closing_lines(offers: pd.DataFrame) -> pd.DataFrame:
+    """Resolve one pregame Odds API spread per game without live leakage.
+
+    Each game uses the latest stored snapshot that the capture classified as
+    pregame. The closing spread is the median home-team spread across the
+    providers in that snapshot. Quotes first observed after kickoff are never
+    eligible, even if no pregame quote was captured for the game.
+    """
+    required = {
+        "game_id",
+        "snapshot_id",
+        "fetched_at",
+        "commence_time",
+        "phase",
+        "provider_key",
+        "provider_last_update",
+        "market",
+        "selection",
+        "point",
+    }
+    missing = sorted(required - set(offers.columns))
+    if missing:
+        raise ValueError(
+            "live odds offers are missing columns: " + ", ".join(missing)
+        )
+
+    spreads = offers[
+        offers["market"].eq("spreads")
+        & offers["selection"].eq("home")
+        & offers["phase"].eq("pregame")
+    ].copy()
+    spreads["point"] = pd.to_numeric(spreads["point"], errors="coerce")
+    spreads["fetched_at"] = pd.to_datetime(
+        spreads["fetched_at"], utc=True, errors="coerce"
+    )
+    spreads["commence_time"] = pd.to_datetime(
+        spreads["commence_time"], utc=True, errors="coerce"
+    )
+    spreads["provider_last_update"] = pd.to_datetime(
+        spreads["provider_last_update"], utc=True, errors="coerce"
+    )
+    spreads = spreads.dropna(
+        subset=[
+            "game_id",
+            "snapshot_id",
+            "fetched_at",
+            "commence_time",
+            "provider_key",
+            "provider_last_update",
+            "point",
+        ]
+    )
+    finite = np.isfinite(spreads["point"].to_numpy(float))
+    spreads = spreads[finite & spreads["fetched_at"].le(spreads["commence_time"])]
+    if spreads.empty:
+        raise ValueError("live odds captures carry no eligible pregame home spreads")
+
+    # A provider should contribute at most one home spread to the consensus.
+    # Keep its most recently updated quote if a payload contains duplicates.
+    spreads = spreads.sort_values("provider_last_update", kind="stable")
+    spreads = spreads.drop_duplicates(
+        ["game_id", "snapshot_id", "provider_key"], keep="last"
+    )
+    snapshots = (
+        spreads.groupby(["game_id", "snapshot_id"], as_index=False)
+        .agg(closing_fetched_at=("fetched_at", "max"))
+        .sort_values(["game_id", "closing_fetched_at"], kind="stable")
+    )
+    latest = snapshots.drop_duplicates("game_id", keep="last")
+    selected = spreads.merge(
+        latest[["game_id", "snapshot_id"]],
+        on=["game_id", "snapshot_id"],
+        how="inner",
+        validate="many_to_one",
+    )
+    return (
+        selected.groupby(["game_id", "snapshot_id"], as_index=False)
+        .agg(
+            closing_spread=("point", "median"),
+            n_spread_offers=("provider_key", "nunique"),
+            closing_fetched_at=("fetched_at", "max"),
+            latest_provider_update=("provider_last_update", "max"),
+        )
+        .rename(columns={"snapshot_id": "closing_snapshot_id"})
+    )
 
 
 def _schedule_model_weeks(season: int) -> pd.DataFrame:
@@ -124,9 +218,9 @@ def fit_market_margin_sd(
     return margin_sd, method
 
 
-def build_market_anchors(season: int) -> pd.DataFrame:
-    """Season-wide market anchors: serving contract plus market provenance."""
-    closing = flatten_closing_lines(store.read_lines(season))
+def _build_market_anchors(
+    closing: pd.DataFrame, season: int, source: str
+) -> pd.DataFrame:
     weeks = _schedule_model_weeks(season)
     anchors = closing.merge(weeks, on="game_id", how="inner", validate="one_to_one")
     if anchors.empty:
@@ -138,11 +232,34 @@ def build_market_anchors(season: int) -> pd.DataFrame:
     anchors["home_margin"] = -anchors["closing_spread"]
     anchors["margin_sd"] = margin_sd
     anchors["margin_sd_method"] = method
+    anchors["market_anchor_source"] = source
+    columns = MARKET_ANCHOR_COLUMNS + [
+        column
+        for column in LIVE_MARKET_PROVENANCE_COLUMNS
+        if column in anchors.columns
+    ]
     return (
-        anchors[MARKET_ANCHOR_COLUMNS]
+        anchors[columns]
         .sort_values(["model_week", "game_id"], kind="stable")
         .reset_index(drop=True)
     )
+
+
+def build_market_anchors(season: int) -> pd.DataFrame:
+    """Build market anchors from CFBD's nested provider line payloads."""
+    closing = flatten_closing_lines(store.read_lines(season))
+    return _build_market_anchors(closing, season, "cfbd_lines")
+
+
+def build_live_market_anchors(season: int) -> pd.DataFrame:
+    """Build market anchors from append-only pregame Odds API captures."""
+    from backend.odds.live import verify_live_snapshots
+
+    problems, frames = verify_live_snapshots(season)
+    if problems:
+        raise ValueError("invalid live odds captures: " + "; ".join(problems))
+    closing = flatten_live_closing_lines(frames["offers"])
+    return _build_market_anchors(closing, season, "odds_api_live_capture")
 
 
 def cross_check_closing_spreads(
