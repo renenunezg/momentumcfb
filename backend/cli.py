@@ -23,6 +23,13 @@ def parse_args(argv=None):
     fit.add_argument("--season", type=int, required=True)
     fit.add_argument("--week", type=int, default=None)
 
+    weekly = sub.add_parser(
+        "weekly-update",
+        help="fit, price, validate, and publish the next in-season week",
+    )
+    weekly.add_argument("--season", type=int, required=True)
+    weekly.add_argument("--week", type=int, default=None)
+
     sub.add_parser(
         "calibrate",
         help="tune and diagnose chronological joint scoring projections",
@@ -242,7 +249,7 @@ def parse_args(argv=None):
         choices=["preseason", "fit"],
         default="preseason",
         help="publish a preseason forecast artifact or an in-season fit "
-        "artifact (fit artifacts carry no market comparisons)",
+        "artifact",
     )
     pub.add_argument(
         "--skip-backtest",
@@ -289,66 +296,73 @@ def main(argv=None):
             )
 
     elif args.command == "fit":
-        from datetime import timedelta
+        from backend.model.weekly import run_weekly_forecast
 
-        import pandas as pd
-
-        from backend.etl import store
-        from backend.features.scoring import build_scoring_games
-        from backend.model.joint_scoring import fit_joint_scoring
-        from backend.model.market_blend import add_market_informed_margins
-        from backend.model.preseason import load_preseason_strength_prior_means
-        from backend.model.unit_ratings import fit_unit_ratings
-
-        games = build_scoring_games(
-            store.read_games(args.season),
-            store.read_processed("team_games", f"{args.season}.parquet"),
-        )
-        forecast_week = args.week or int(games["model_week"].max()) + 1
-        target = games[games["model_week"].eq(forecast_week)]
-        as_of = (
-            target["start_date"].min()
-            if not target.empty
-            else games["start_date"].max() + timedelta(seconds=1)
-        ).to_pydatetime()
-        try:
-            strength_prior_means = load_preseason_strength_prior_means(args.season)
-        except FileNotFoundError:
-            strength_prior_means = None
-        fitted = fit_joint_scoring(
-            games,
-            forecast_week,
-            as_of,
-            strength_prior_means=strength_prior_means,
-        )
-        ratings = pd.DataFrame(rating.to_record() for rating in fitted.ratings())
-        projections = pd.DataFrame(
-            projection.to_record() for projection in fitted.project(target)
-        )
-        if not projections.empty:
-            projections = add_market_informed_margins(
-                projections,
-                pd.DataFrame(),
-            )
-        filename = f"{args.season}_{forecast_week:02d}.parquet"
-        store.write_processed(ratings, "ratings", filename)
-        store.write_processed(projections, "projections", filename)
-        unit_games = store.read_processed("unit_games", f"{args.season}.parquet")
-        units = fit_unit_ratings(
-            unit_games,
-            games,
-            forecast_week,
-            as_of,
-        )
-        unit_ratings = pd.DataFrame(units.to_records())
-        unit_ratings["source_season"] = args.season
-        unit_ratings["unit_history_missing"] = False
-        store.write_processed(unit_ratings, "unit_ratings", filename)
-        print(ratings.head(30).to_string(index=False))
+        result = run_weekly_forecast(args.season, args.week)
+        print(result.ratings.head(30).to_string(index=False))
         print(
-            f"wrote {len(ratings)} ratings, {len(projections)} projections, "
-            f"and {len(unit_ratings)} unit ratings"
+            f"wrote {len(result.ratings)} ratings, "
+            f"{len(result.projections)} projections, and "
+            f"{len(result.unit_ratings)} unit ratings for Week {result.week}"
         )
+        print(f"forecast log: {result.log_directory}")
+
+    elif args.command == "weekly-update":
+        from datetime import datetime, timezone
+
+        from backend.model.joint_scoring import MODEL_VERSION
+        from backend.model.weekly import (
+            WeeklyForecastNotReady,
+            resolve_ready_forecast_week,
+            run_weekly_forecast,
+        )
+        from backend.odds.client import OddsAPIClient
+        from backend.publish import publish, weekly_forecast_is_published
+
+        as_of = datetime.now(timezone.utc)
+        try:
+            forecast_week = resolve_ready_forecast_week(
+                args.season,
+                args.week,
+                as_of,
+            )
+        except WeeklyForecastNotReady as exc:
+            print(f"weekly update not ready: {exc}")
+            return
+        if args.week is None and weekly_forecast_is_published(
+            args.season,
+            forecast_week,
+            MODEL_VERSION,
+        ):
+            print(
+                f"weekly update already published for {args.season} "
+                f"model Week {forecast_week}; no changes made"
+            )
+            return
+        try:
+            result = run_weekly_forecast(
+                args.season,
+                forecast_week,
+                odds_client=OddsAPIClient(),
+                require_market=True,
+                as_of=as_of,
+            )
+        except WeeklyForecastNotReady as exc:
+            print(f"weekly update not ready: {exc}")
+            return
+        totals = publish(
+            args.season,
+            result.week,
+            source="fit",
+            include_backtest=False,
+        )
+        print(
+            f"published Week {result.week}: {len(result.ratings)} ratings, "
+            f"{len(result.projections)} projections, "
+            f"{len(result.market_comparisons)} market comparisons"
+        )
+        print(f"serving totals: {totals}")
+        print(f"forecast log: {result.log_directory}")
 
     elif args.command == "calibrate":
         from datetime import timedelta

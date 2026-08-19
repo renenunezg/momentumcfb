@@ -267,7 +267,11 @@ def load_game_projections(source: str, season: int, week: int) -> pd.DataFrame:
     # absent from the forecast artifact; take it from the same snapshot the
     # forecast ran against rather than inferring it from matching conference
     # names, which would call two independents a conference game.
-    schedule_path = RAW_DIR / "preseason" / str(season) / "games.parquet"
+    schedule_path = (
+        RAW_DIR / "preseason" / str(season) / "games.parquet"
+        if source == "preseason"
+        else RAW_DIR / "games" / f"{season}.parquet"
+    )
     if schedule_path.exists():
         schedule = pd.read_parquet(
             schedule_path, columns=["id", "conference_game"]
@@ -301,17 +305,46 @@ def _table_columns(conn, table: str) -> set[str]:
     }
 
 
-def load_market_comparisons(season: int, week: int) -> pd.DataFrame:
-    path = (
-        _artifact_dir("preseason", "market_comparisons")
-        / f"{season}_{week:02d}.parquet"
-    )
+def load_market_comparisons(
+    source: str, season: int, week: int
+) -> pd.DataFrame:
+    directory = _artifact_dir(source, "market_comparisons")
+    path = directory / f"{season}_{week:02d}.parquet"
     return _serving_frame(pd.read_parquet(path), MARKET_COMPARISONS_COLUMNS)
 
 
 def load_backtest_predictions() -> pd.DataFrame:
     path = PROCESSED_DIR / "backtest" / "predictions_filtered.parquet"
     return _serving_frame(pd.read_parquet(path), BACKTEST_PREDICTIONS_COLUMNS)
+
+
+def weekly_forecast_is_published(
+    season: int,
+    week: int,
+    model_version: str,
+) -> bool:
+    """Return whether this weekly model version already reached serving."""
+    from backend.db import engine
+
+    with engine.connect() as conn:
+        if not _table_exists(conn, "team_ratings"):
+            return False
+        return bool(
+            conn.execute(
+                text(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM team_ratings "
+                    "WHERE season = :season AND week = :week "
+                    "AND model_version = :model_version"
+                    ")"
+                ),
+                {
+                    "season": season,
+                    "week": week,
+                    "model_version": model_version,
+                },
+            ).scalar()
+        )
 
 
 def publish(
@@ -332,9 +365,7 @@ def publish(
     except FileNotFoundError:
         unit_ratings = None
     projections = load_game_projections(source, season, week)
-    # Market comparisons are produced only by the preseason forecast; fit
-    # artifacts project games without pricing the market.
-    market = load_market_comparisons(season, week) if source == "preseason" else None
+    market = load_market_comparisons(source, season, week)
     backtest = load_backtest_predictions() if include_backtest else None
 
     # Delete projections by game id, not by week, so a game that moved weeks

@@ -47,7 +47,7 @@ class OddsAPIClient:
         if not key:
             raise OddsAPIError("ODDS_API_KEY is not set")
         self.api_key = key
-        self.regions = regions or os.getenv("ODDS_API_REGIONS", "us")
+        self.regions = regions or os.getenv("ODDS_API_REGIONS") or "us"
         configured = bookmakers or os.getenv("ODDS_API_BOOKMAKERS", "")
         self.bookmakers = tuple(
             value.strip() for value in configured.split(",") if value.strip()
