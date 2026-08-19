@@ -235,6 +235,8 @@ def fit_unit_ratings(
         raise ValueError("unit ratings require exactly one season")
 
     training = games[games["model_week"] < forecast_week].copy()
+    if "completed" in training:
+        training = training[training["completed"].fillna(False).astype(bool)]
     if training.empty:
         raise ValueError("at least one prior model week is required")
     if "start_date" in training:

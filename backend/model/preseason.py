@@ -89,13 +89,37 @@ def strength_prior_means_from_ratings(
     return means
 
 
-def load_preseason_strength_prior_means(
+def load_preseason_ratings(
     season: int, week: int = 1
-) -> dict[int, tuple[float, float]]:
-    ratings = store.read_processed(
-        "preseason", "ratings", f"{season}_{week:02d}.parquet"
-    )
-    return strength_prior_means_from_ratings(ratings)
+) -> tuple[pd.DataFrame, str]:
+    """Load the pure preseason prior locally or from the serving database."""
+    try:
+        ratings = store.read_processed(
+            "preseason", "ratings", f"{season}_{week:02d}.parquet"
+        )
+        return ratings, "local_preseason_artifact"
+    except FileNotFoundError:
+        from sqlalchemy import text
+
+        from backend.db import engine
+
+        query = text(
+            "SELECT team_id, team, conference, classification, "
+            "offense_points, defense_points, expected_possessions, "
+            "missing_input_count FROM team_ratings "
+            "WHERE season = :season AND week = :week"
+        )
+        with engine.connect() as connection:
+            ratings = pd.read_sql(
+                query,
+                connection,
+                params={"season": season, "week": week},
+            )
+        if ratings.empty:
+            raise FileNotFoundError(
+                f"no published preseason ratings for {season} Week {week}"
+            )
+        return ratings, "published_team_ratings"
 
 
 def build_historical_carryover_priors(

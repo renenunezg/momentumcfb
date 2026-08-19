@@ -234,6 +234,17 @@ def fit_joint_scoring(
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
     training = games[games["model_week"] < forecast_week].copy()
+    if "completed" in training:
+        training = training[training["completed"].fillna(False).astype(bool)]
+    training = training.dropna(
+        subset=[
+            "home_points",
+            "away_points",
+            "game_possessions",
+            "home_epa_per_possession",
+            "away_epa_per_possession",
+        ]
+    )
     if training.empty:
         raise ValueError("at least one prior model week is required")
     if "start_date" in training:

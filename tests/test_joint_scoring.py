@@ -1,9 +1,18 @@
 from datetime import datetime, timezone
 
 import pandas as pd
+import pytest
 
+from backend.features.scoring import (
+    build_scoring_games,
+    build_weekly_scoring_games,
+)
 from backend.model.calibration import fbs_calibration_cohort
 from backend.model.joint_scoring import fit_joint_scoring
+from backend.model.weekly import (
+    WeeklyForecastNotReady,
+    resolve_forecast_week,
+)
 
 
 def _mini_season() -> pd.DataFrame:
@@ -102,3 +111,76 @@ def test_joint_model_is_leak_free_and_reconciles_outputs():
     )
     prior_rating_by_id = {rating.team_id: rating for rating in prior_fit.ratings()}
     assert prior_rating_by_id[1].power_rating > rating_by_id[1].power_rating
+
+
+def test_weekly_frame_retains_future_games_without_training_on_them():
+    games = _mini_season()
+    games["completed"] = games["model_week"].lt(3)
+    games["season_type"] = "regular"
+    games["start_date"] = pd.to_datetime(
+        [f"2026-09-{week * 7:02d}T18:00:00Z" for week in games["week"]],
+        utc=True,
+    )
+    schedule = games.rename(
+        columns={
+            "game_id": "id",
+            "home_team_id": "home_id",
+            "away_team_id": "away_id",
+        }
+    )
+    team_game_rows = []
+    for game in games[games["completed"]].itertuples():
+        for team, epa in (
+            (game.home_team, game.home_epa_per_possession),
+            (game.away_team, game.away_epa_per_possession),
+        ):
+            team_game_rows.append(
+                {
+                    "game_id": game.game_id,
+                    "team": team,
+                    "offense_possessions": game.game_possessions,
+                    "offense_epa_total": epa * game.game_possessions,
+                    "game_possessions": game.game_possessions,
+                }
+            )
+    team_games = pd.DataFrame(team_game_rows)
+
+    weekly = build_weekly_scoring_games(schedule, team_games)
+    completed = build_scoring_games(schedule, team_games)
+    target = weekly[weekly["model_week"].eq(3)]
+
+    assert len(weekly) == 6
+    assert len(completed) == 4
+    assert len(target) == 2
+    assert target["game_possessions"].isna().all()
+
+    as_of = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    fitted = fit_joint_scoring(weekly, forecast_week=3, as_of=as_of)
+    assert len(fitted.project(target)) == 2
+
+    opening_schedule = schedule.copy()
+    opening_schedule["completed"] = False
+    opening_schedule.loc[opening_schedule.index[0], "completed"] = True
+    opening_schedule["start_date"] = pd.to_datetime(
+        [
+            "2026-08-30T02:00:00Z",
+            "2026-09-03T04:00:00Z",
+            "2026-09-10T23:00:00Z",
+            "2026-09-11T00:00:00Z",
+            "2026-09-17T23:00:00Z",
+            "2026-09-18T00:00:00Z",
+        ],
+        utc=True,
+    )
+    opening = build_weekly_scoring_games(opening_schedule, team_games)
+    source_week_one = opening[opening["week"].eq(1)].sort_values("start_date")
+
+    assert source_week_one["model_week"].tolist() == [0, 1]
+    gap_as_of = datetime(2026, 8, 31, 18, 17, tzinfo=timezone.utc)
+    assert resolve_forecast_week(opening, None, gap_as_of) == 1
+    with pytest.raises(WeeklyForecastNotReady, match="has started"):
+        resolve_forecast_week(
+            opening,
+            None,
+            datetime(2026, 9, 3, 5, tzinfo=timezone.utc),
+        )
