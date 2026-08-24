@@ -6,14 +6,20 @@ from backend.config import PROCESSED_DIR, RAW_DIR
 
 def read_season_pbp(season: int) -> pd.DataFrame:
     season_dir = RAW_DIR / "pbp" / str(season)
-    canonical = season_dir / "canonical.parquet"
-    if canonical.exists():
-        return pd.read_parquet(canonical)
-
-    files = sorted(season_dir.glob("*.parquet"))
+    files = sorted(season_dir.glob("regular_*.parquet"))
+    files.extend(sorted(season_dir.glob("postseason_*.parquet")))
     if not files:
         raise FileNotFoundError(f"no pbp parquet for {season}, run ingest first")
-    return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+
+    frames = []
+    for path in files:
+        frame = pd.read_parquet(path)
+        if "pbp_source" not in frame:
+            frame["pbp_source"] = "cfbd"
+        elif not frame["pbp_source"].fillna("").eq("cfbd").all():
+            raise ValueError(f"non-CFBD PBP rows found in {path}")
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True)
 
 
 def read_games(season: int) -> pd.DataFrame:

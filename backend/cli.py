@@ -7,14 +7,9 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="backend")
     sub = p.add_subparsers(dest="command", required=True)
 
-    ing = sub.add_parser("ingest", help="pull source data into raw parquet")
+    ing = sub.add_parser("ingest", help="pull CFBD data into raw parquet")
     ing.add_argument("--seasons", type=int, nargs="+", default=SEASONS)
     ing.add_argument("--week", type=int, default=None)
-    ing.add_argument(
-        "--pbp-source",
-        choices=["sportsdataverse", "cfbd"],
-        default="sportsdataverse",
-    )
 
     feat = sub.add_parser("features", help="build possession and team-game features")
     feat.add_argument("--seasons", type=int, nargs="+", default=SEASONS)
@@ -316,12 +311,7 @@ def main(argv=None):
 
         client = CFBDClient()
         for season in args.seasons:
-            ingest_season(
-                client,
-                season,
-                only_week=args.week,
-                pbp_source=args.pbp_source,
-            )
+            ingest_season(client, season, only_week=args.week)
 
     elif args.command == "features":
         from backend.etl import store
