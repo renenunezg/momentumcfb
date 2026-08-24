@@ -225,6 +225,53 @@ def parse_args(argv=None):
         help="stop polling after this many consecutive failed polls",
     )
 
+    kickoff_commands = (
+        (
+            "kickoff-check",
+            "run the read-only, fail-closed readiness gate for the next "
+            "market-covered kickoff window",
+        ),
+        (
+            "kickoff-run",
+            "poll across one kickoff window, prove the closing snapshot is "
+            "pregame, and rebuild market serving anchors",
+        ),
+    )
+    for name, description in kickoff_commands:
+        kickoff = sub.add_parser(name, help=description)
+        kickoff.add_argument("--season", type=int, required=True)
+        kickoff.add_argument("--week", type=int, default=1)
+        kickoff.add_argument(
+            "--game-id",
+            type=int,
+            nargs="+",
+            default=None,
+            help="target explicit games; otherwise use the next stored "
+            "market-covered kickoff cluster",
+        )
+        kickoff.add_argument("--cluster-minutes", type=float, default=15.0)
+        kickoff.add_argument("--lead-minutes", type=float, default=5.0)
+        kickoff.add_argument("--post-minutes", type=float, default=5.0)
+        kickoff.add_argument("--interval-seconds", type=float, default=60.0)
+        kickoff.add_argument("--min-quota", type=int, default=50)
+        kickoff.add_argument(
+            "--max-forecast-age-hours", type=float, default=48.0
+        )
+        kickoff.add_argument("--max-source-age-hours", type=float, default=48.0)
+        kickoff.add_argument(
+            "--max-offer-staleness-seconds", type=float, default=300.0
+        )
+        kickoff.add_argument("--min-providers", type=int, default=2)
+        if name == "kickoff-check":
+            kickoff.add_argument(
+                "--max-poll-age-minutes", type=float, default=15.0
+            )
+        else:
+            kickoff.add_argument("--lookback-hours", type=float, default=1.0)
+            kickoff.add_argument("--lookahead-hours", type=float, default=2.0)
+            kickoff.add_argument("--max-failures", type=int, default=3)
+            kickoff.add_argument("--max-wait-hours", type=float, default=2.0)
+
     replay = sub.add_parser(
         "live-replay",
         help="verify stored live odds snapshots and replay a point in time",
@@ -1152,6 +1199,64 @@ def main(argv=None):
             )
         if problems:
             raise SystemExit(1)
+
+    elif args.command == "kickoff-check":
+        from backend.odds.kickoff import (
+            check_kickoff_readiness,
+            format_readiness,
+        )
+
+        result = check_kickoff_readiness(
+            args.season,
+            args.week,
+            game_ids=args.game_id,
+            cluster_minutes=args.cluster_minutes,
+            lead_minutes=args.lead_minutes,
+            post_minutes=args.post_minutes,
+            interval_seconds=args.interval_seconds,
+            min_quota=args.min_quota,
+            max_forecast_age_hours=args.max_forecast_age_hours,
+            max_source_age_hours=args.max_source_age_hours,
+            max_poll_age_minutes=args.max_poll_age_minutes,
+            max_offer_staleness_seconds=args.max_offer_staleness_seconds,
+            min_providers=args.min_providers,
+        )
+        print(format_readiness(result))
+        if not result.ready:
+            raise SystemExit(1)
+
+    elif args.command == "kickoff-run":
+        from backend.odds.kickoff import run_kickoff_window
+
+        try:
+            result = run_kickoff_window(
+                args.season,
+                args.week,
+                game_ids=args.game_id,
+                cluster_minutes=args.cluster_minutes,
+                lead_minutes=args.lead_minutes,
+                post_minutes=args.post_minutes,
+                interval_seconds=args.interval_seconds,
+                lookback_hours=args.lookback_hours,
+                lookahead_hours=args.lookahead_hours,
+                min_quota=args.min_quota,
+                max_failures=args.max_failures,
+                max_wait_hours=args.max_wait_hours,
+                max_forecast_age_hours=args.max_forecast_age_hours,
+                max_source_age_hours=args.max_source_age_hours,
+                max_offer_staleness_seconds=args.max_offer_staleness_seconds,
+                min_providers=args.min_providers,
+            )
+        except ValueError as exc:
+            print(f"NOT READY\nBLOCKER: {exc}")
+            raise SystemExit(1) from exc
+        print("READY")
+        for detail in result.target_details:
+            print(f"OK: {detail}")
+        print(
+            f"OK: wrote {result.anchor_count} market anchors after "
+            f"{result.plan.polls} verified polls"
+        )
 
     elif args.command == "live-odds":
         from backend.odds.live import load_division_one_schedule, run_live_polling

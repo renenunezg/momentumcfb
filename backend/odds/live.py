@@ -210,11 +210,16 @@ def resolve_phase(commence_time, completed, as_of: datetime) -> str:
 
 
 def load_division_one_schedule(season: int) -> pd.DataFrame:
-    """Season schedule for game-id joining, falling back to the preseason snapshot."""
+    """Load the freshest local schedule for game-id joining."""
     from backend.etl import store
 
     games_path = RAW_DIR / "games" / f"{season}.parquet"
-    if games_path.exists():
+    preseason_path = RAW_DIR / "preseason" / str(season) / "games.parquet"
+    candidates = [path for path in (games_path, preseason_path) if path.exists()]
+    if not candidates:
+        raise FileNotFoundError(f"season {season} has no stored schedule")
+    freshest = max(candidates, key=lambda path: path.stat().st_mtime_ns)
+    if freshest == games_path:
         games = store.read_games(season)
     else:
         games = store.read_preseason_source(season, "games")
