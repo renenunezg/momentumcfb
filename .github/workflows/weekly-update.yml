@@ -85,7 +85,7 @@ jobs:
       - name: Run weekly regression gate
         run: poetry run pytest tests/test_joint_scoring.py -q
 
-      - name: Refresh season data
+      - name: Refresh season data from CFBD
         run: poetry run python -m backend ingest --seasons "$SEASON"
 
       - name: Rebuild features
