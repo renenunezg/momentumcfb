@@ -29,7 +29,8 @@ from backend.odds.markets import match_event
 PHASES = ("pregame", "live", "final", "unknown")
 DIVISION_ONE = {"fbs", "fcs"}
 LIVE_MARKETS = ("spreads",)
-LIVE_ODDS_COST = 1
+CLOSING_MARKETS = ("spreads", "totals")
+SUPPORTED_LIVE_MARKETS = frozenset(CLOSING_MARKETS)
 SCORES_COST = 1
 
 POLL_COLUMNS = [
@@ -43,6 +44,7 @@ POLL_COLUMNS = [
     "commence_to",
     "days_from",
     "configured_bookmakers",
+    "requested_markets",
     "odds_request_cost",
     "odds_requests_used",
     "odds_requests_remaining",
@@ -120,6 +122,7 @@ POLL_DTYPES = {
     "commence_to": "datetime64[ns, UTC]",
     "days_from": "Int64",
     "configured_bookmakers": "string",
+    "requested_markets": "string",
     "odds_request_cost": "Int64",
     "odds_requests_used": "Int64",
     "odds_requests_remaining": "Int64",
@@ -225,6 +228,28 @@ def snapshot_id_for(fetched_at: datetime) -> str:
     return fetched_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
+def normalize_live_markets(markets: tuple[str, ...]) -> tuple[str, ...]:
+    normalized = tuple(dict.fromkeys(str(market) for market in markets))
+    if not normalized:
+        raise ValueError("live odds capture requires at least one market")
+    unsupported = sorted(set(normalized) - SUPPORTED_LIVE_MARKETS)
+    if unsupported:
+        raise ValueError(
+            "unsupported live odds markets: " + ", ".join(unsupported)
+        )
+    if "spreads" not in normalized:
+        raise ValueError("live odds capture requires the spreads market")
+    return normalized
+
+
+def live_poll_quota_cost(
+    markets: tuple[str, ...], days_from: int | None = None
+) -> int:
+    """Maximum one-region cost for one odds and scores capture cycle."""
+    scores_cost = 2 if days_from is not None else SCORES_COST
+    return len(normalize_live_markets(markets)) + scores_cost
+
+
 def resolve_phase(commence_time, completed, as_of: datetime) -> str:
     """Provider-backed phase; events absent from the scores feed stay unknown."""
     if completed is None:
@@ -294,7 +319,9 @@ def build_live_snapshot(
     schedule: pd.DataFrame,
     query_window: tuple[datetime, datetime],
     days_from: int | None,
+    requested_markets: tuple[str, ...] = LIVE_MARKETS,
 ) -> LiveSnapshot:
+    requested_markets = normalize_live_markets(requested_markets)
     fetched_at = odds.fetched_at
     snapshot_id = snapshot_id_for(fetched_at)
     scoreboard_by_id = {event.get("id"): event for event in scoreboard.events}
@@ -433,6 +460,7 @@ def build_live_snapshot(
                 "configured_bookmakers": json.dumps(
                     list(odds.configured_bookmakers)
                 ),
+                "requested_markets": json.dumps(list(requested_markets)),
                 "odds_request_cost": odds.request_cost,
                 "odds_requests_used": odds.requests_used,
                 "odds_requests_remaining": odds.requests_remaining,
@@ -490,9 +518,11 @@ def record_failed_poll(
     error: str,
     query_window: tuple[datetime, datetime],
     days_from: int | None,
+    requested_markets: tuple[str, ...] = LIVE_MARKETS,
     odds: OddsSnapshot | None = None,
     scoreboard: ScoreboardSnapshot | None = None,
 ) -> str:
+    requested_markets = normalize_live_markets(requested_markets)
     failed_at = datetime.now(timezone.utc)
     snapshot_id = snapshot_id_for(failed_at)
     row = {column: None for column in POLL_COLUMNS}
@@ -506,6 +536,7 @@ def record_failed_poll(
             "commence_from": query_window[0],
             "commence_to": query_window[1],
             "days_from": days_from,
+            "requested_markets": json.dumps(list(requested_markets)),
         }
     )
     if odds is not None:
@@ -546,11 +577,14 @@ def capture_live_snapshot(
     lookahead_hours: float,
     days_from: int | None,
     min_quota: int,
-    polls_remaining: int = 1,
     required_game_ids: tuple[int, ...] | None = None,
+    markets: tuple[str, ...] = LIVE_MARKETS,
+    future_poll_markets: tuple[tuple[str, ...], ...] = (),
 ) -> LiveSnapshot:
-    if polls_remaining < 1:
-        raise ValueError("polls_remaining must be positive")
+    markets = normalize_live_markets(markets)
+    future_poll_markets = tuple(
+        normalize_live_markets(planned) for planned in future_poll_markets
+    )
     now = datetime.now(timezone.utc)
     window = (
         now - timedelta(hours=lookback_hours),
@@ -600,22 +634,30 @@ def capture_live_snapshot(
         )
 
     scores_cost = 2 if days_from is not None else SCORES_COST
-    planned_cost = LIVE_ODDS_COST + scores_cost
+    current_odds_cost = len(markets)
+    future_cost = sum(
+        live_poll_quota_cost(planned, days_from)
+        for planned in future_poll_markets
+    )
     remaining = discovery.requests_remaining
-    reserved_cost = polls_remaining * planned_cost
+    reserved_cost = current_odds_cost + scores_cost + future_cost
     if remaining - reserved_cost < min_quota:
         raise QuotaFloorReached(
-            f"{remaining} credits remain; {polls_remaining} remaining live "
+            f"{remaining} credits remain; {1 + len(future_poll_markets)} "
+            "remaining live "
             f"cycles reserve {reserved_cost} credits and would cross the "
             f"{min_quota}-credit floor"
         )
 
     odds = client.get_ncaaf_odds(
         *window,
-        markets=LIVE_MARKETS,
+        markets=markets,
         event_ids=tuple(relevant_event_ids),
     )
-    if odds.request_cost is None or not 0 <= odds.request_cost <= LIVE_ODDS_COST:
+    if (
+        odds.request_cost is None
+        or not 0 <= odds.request_cost <= current_odds_cost
+    ):
         raise PartialPaidPollError(
             "odds response returned missing or unexpected request cost", odds
         )
@@ -667,7 +709,7 @@ def capture_live_snapshot(
         request_cost=odds.request_cost,
         configured_bookmakers=odds.configured_bookmakers,
     )
-    future_reserved_cost = scores_cost + (polls_remaining - 1) * planned_cost
+    future_reserved_cost = scores_cost + future_cost
     if odds.requests_remaining - future_reserved_cost < min_quota:
         raise QuotaFloorReached(
             f"{odds.requests_remaining} credits remain after odds; a "
@@ -689,7 +731,6 @@ def capture_live_snapshot(
             odds,
             scoreboard,
         )
-    future_cost = (polls_remaining - 1) * planned_cost
     if scoreboard.requests_remaining - future_cost < min_quota:
         raise PartialPaidPollError(
             f"{scoreboard.requests_remaining} credits remain after scores; "
@@ -707,7 +748,13 @@ def capture_live_snapshot(
         request_cost=scoreboard.request_cost,
     )
     snapshot = build_live_snapshot(
-        season, odds, scoreboard, schedule, window, days_from
+        season,
+        odds,
+        scoreboard,
+        schedule,
+        window,
+        days_from,
+        requested_markets=markets,
     )
     write_live_snapshot(season, snapshot)
     return snapshot
@@ -732,6 +779,7 @@ def _poll_summary(snapshot: LiveSnapshot) -> str:
         f"{poll['dropped_unmatched_offer_count']} dropped unmatched, "
         f"{poll['dropped_untimestamped_offer_count']} dropped untimestamped) | "
         f"staleness {staleness} | "
+        f"markets {poll['requested_markets']} | "
         f"quota cost {poll['odds_request_cost']}+{poll['scores_request_cost']}, "
         f"{poll['odds_requests_remaining']} remaining"
     )
@@ -748,8 +796,10 @@ def run_live_polling(
     min_quota: int,
     max_failures: int,
     required_game_ids: tuple[int, ...] | None = None,
+    poll_markets: tuple[tuple[str, ...], ...] | None = None,
     progress=print,
     sleep=time.sleep,
+    monotonic=time.monotonic,
 ) -> int:
     if polls < 1:
         raise ValueError("--polls must be at least 1")
@@ -757,11 +807,24 @@ def run_live_polling(
         raise ValueError("--max-failures must be at least 1")
     if min_quota < 0:
         raise ValueError("--min-quota must be nonnegative")
+    if poll_markets is None:
+        market_plan = (LIVE_MARKETS,) * polls
+    else:
+        if len(poll_markets) != polls:
+            raise ValueError("poll market plan must contain one entry per poll")
+        market_plan = tuple(
+            normalize_live_markets(markets) for markets in poll_markets
+        )
     client = OddsAPIClient()
     client.ensure_single_quota_region()
     consecutive_failures = 0
     completed = 0
+    started_at = monotonic()
     for poll_index in range(polls):
+        if poll_index:
+            due_at = started_at + poll_index * interval_seconds
+            sleep(max(0.0, due_at - monotonic()))
+        markets = market_plan[poll_index]
         try:
             snapshot = capture_live_snapshot(
                 client,
@@ -771,8 +834,9 @@ def run_live_polling(
                 lookahead_hours,
                 days_from,
                 min_quota,
-                polls_remaining=polls - poll_index,
                 required_game_ids=required_game_ids,
+                markets=markets,
+                future_poll_markets=market_plan[poll_index + 1 :],
             )
         except QuotaFloorReached as exc:
             if exc.odds is None:
@@ -788,6 +852,7 @@ def run_live_polling(
                     str(exc),
                     window,
                     days_from,
+                    requested_markets=markets,
                     odds=exc.odds,
                 )
                 progress(f"{snapshot_id}: stopping after paid odds: {exc}")
@@ -812,6 +877,7 @@ def run_live_polling(
                 str(exc),
                 window,
                 days_from,
+                requested_markets=markets,
                 odds=exc.odds,
                 scoreboard=exc.scoreboard,
             )
@@ -829,7 +895,13 @@ def run_live_polling(
                 now - timedelta(hours=lookback_hours),
                 now + timedelta(hours=lookahead_hours),
             )
-            snapshot_id = record_failed_poll(season, str(exc), window, days_from)
+            snapshot_id = record_failed_poll(
+                season,
+                str(exc),
+                window,
+                days_from,
+                requested_markets=markets,
+            )
             progress(
                 f"{snapshot_id}: poll failed "
                 f"({consecutive_failures}/{max_failures} consecutive): {exc}"
@@ -841,8 +913,6 @@ def run_live_polling(
             consecutive_failures = 0
             completed += 1
             progress(_poll_summary(snapshot))
-        if poll_index < polls - 1:
-            sleep(interval_seconds)
     return completed
 
 

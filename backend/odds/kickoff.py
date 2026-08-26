@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from math import ceil
+from math import ceil, isfinite
 
 import pandas as pd
 
@@ -14,8 +14,9 @@ from backend.etl import store
 from backend.model.ingame import SERVING_ANCHOR_COLUMNS
 from backend.odds.client import OddsAPIClient, OddsAPIError
 from backend.odds.live import (
-    LIVE_ODDS_COST,
-    SCORES_COST,
+    CLOSING_MARKETS,
+    LIVE_MARKETS,
+    live_poll_quota_cost,
     load_division_one_schedule,
     run_live_polling,
     verify_live_snapshots,
@@ -49,6 +50,7 @@ class KickoffTarget:
     first_kickoff: pd.Timestamp
     last_kickoff: pd.Timestamp
     labels: tuple[str, ...]
+    kickoffs: tuple[pd.Timestamp, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +326,7 @@ def resolve_kickoff_target(
         first_kickoff=first_kickoff,
         last_kickoff=last_kickoff,
         labels=labels,
+        kickoffs=tuple(selected["kickoff"]),
     )
 
 
@@ -358,6 +361,45 @@ def plan_kickoff_window(
     )
 
 
+def plan_kickoff_poll_markets(
+    target: KickoffTarget,
+    plan: KickoffWindowPlan,
+    interval_seconds: float,
+) -> tuple[tuple[str, ...], ...]:
+    """Request totals only in each game's final scheduled pregame poll."""
+    if interval_seconds <= 0:
+        raise ValueError("--interval-seconds must be positive")
+    if target.kickoffs:
+        if len(target.kickoffs) != len(target.game_ids):
+            raise ValueError("target kickoff timestamps do not match target games")
+        kickoffs = tuple(_utc(value) for value in target.kickoffs)
+    elif len(target.game_ids) == 1:
+        kickoffs = (target.first_kickoff,)
+    else:
+        raise ValueError("multi-game target lacks per-game kickoff timestamps")
+
+    poll_times = tuple(
+        plan.starts_at + pd.Timedelta(seconds=index * interval_seconds)
+        for index in range(plan.polls)
+    )
+    totals_polls: set[int] = set()
+    for kickoff in kickoffs:
+        eligible = [
+            index
+            for index, poll_time in enumerate(poll_times)
+            if poll_time < kickoff
+        ]
+        if not eligible:
+            raise ValueError(
+                f"no scheduled poll occurs before kickoff {kickoff.isoformat()}"
+            )
+        totals_polls.add(eligible[-1])
+    return tuple(
+        CLOSING_MARKETS if index in totals_polls else LIVE_MARKETS
+        for index in range(plan.polls)
+    )
+
+
 def _latest_successful_poll(
     frames: dict[str, pd.DataFrame],
 ) -> tuple[pd.Series | None, pd.DataFrame]:
@@ -384,7 +426,9 @@ def _latest_successful_poll(
 
 
 def _quota_problems(
-    frames: dict[str, pd.DataFrame], planned_polls: int, min_quota: int
+    frames: dict[str, pd.DataFrame],
+    planned_markets: tuple[tuple[str, ...], ...],
+    min_quota: int,
 ) -> tuple[list[str], list[str]]:
     latest, _ = _latest_successful_poll(frames)
     if latest is None:
@@ -400,12 +444,15 @@ def _quota_problems(
     if not remaining_values:
         return ["latest Odds API poll lacks quota provenance"], []
     remaining = min(remaining_values)
-    cycle_cost = LIVE_ODDS_COST + SCORES_COST
-    expected_after = remaining - planned_polls * cycle_cost
+    planned_cost = sum(
+        live_poll_quota_cost(markets) for markets in planned_markets
+    )
+    totals_polls = sum("totals" in markets for markets in planned_markets)
+    expected_after = remaining - planned_cost
     details = [
         f"last stored Odds API quota: {remaining} remaining, about "
-        f"{cycle_cost} per poll, {expected_after} after "
-        f"{planned_polls} planned polls"
+        f"{planned_cost} for {len(planned_markets)} planned polls including "
+        f"{totals_polls} closing-total pull(s), {expected_after} after"
     ]
     if expected_after < min_quota:
         return [
@@ -420,7 +467,7 @@ def check_live_preflight(
     target: KickoffTarget,
     *,
     as_of=None,
-    planned_polls: int,
+    planned_markets: tuple[tuple[str, ...], ...],
     min_quota: int = 50,
     max_poll_age_minutes: float = 15.0,
     max_offer_staleness_seconds: float = 300.0,
@@ -448,7 +495,7 @@ def check_live_preflight(
     )
 
     quota_problems, quota_details = _quota_problems(
-        frames, planned_polls, min_quota
+        frames, planned_markets, min_quota
     )
     problems.extend(quota_problems)
     details.extend(quota_details)
@@ -562,6 +609,9 @@ def check_kickoff_readiness(
             post_minutes=post_minutes,
             interval_seconds=interval_seconds,
         )
+        market_plan = plan_kickoff_poll_markets(
+            target, plan, interval_seconds
+        )
     except ValueError as exc:
         problems.append(str(exc))
     else:
@@ -578,7 +628,7 @@ def check_kickoff_readiness(
                 frames,
                 target,
                 as_of=now,
-                planned_polls=plan.polls,
+                planned_markets=market_plan,
                 min_quota=min_quota,
                 max_poll_age_minutes=max_poll_age_minutes,
                 max_offer_staleness_seconds=max_offer_staleness_seconds,
@@ -604,6 +654,51 @@ def format_readiness(result: KickoffReadiness) -> str:
     lines.extend(f"WARNING: {warning}" for warning in result.warnings)
     lines.extend(f"BLOCKER: {problem}" for problem in result.problems)
     return "\n".join(lines)
+
+
+def _paired_total_provider_updates(
+    totals: pd.DataFrame, spread_providers: set[str]
+) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
+    required = {
+        "provider_key",
+        "provider_last_update",
+        "selection",
+        "point",
+        "price",
+    }
+    if totals.empty or not required.issubset(totals.columns):
+        return {}
+    valid: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
+    for provider, group in totals.groupby("provider_key", dropna=True):
+        provider_key = str(provider)
+        if provider_key not in spread_providers:
+            continue
+        candidate = group.copy()
+        candidate["provider_last_update"] = pd.to_datetime(
+            candidate["provider_last_update"], utc=True, errors="coerce"
+        )
+        candidate["point"] = pd.to_numeric(candidate["point"], errors="coerce")
+        candidate["price"] = pd.to_numeric(candidate["price"], errors="coerce")
+        candidate = candidate.dropna(
+            subset=["provider_last_update", "selection", "point", "price"]
+        )
+        candidate = candidate[
+            candidate["point"].map(lambda value: isfinite(float(value)))
+            & candidate["price"].map(lambda value: isfinite(float(value)))
+        ]
+        candidate = candidate.sort_values(
+            "provider_last_update", kind="stable"
+        ).drop_duplicates("selection", keep="last")
+        paired = candidate[candidate["selection"].isin(["over", "under"])]
+        if set(paired["selection"]) != {"over", "under"}:
+            continue
+        if paired["point"].nunique() != 1:
+            continue
+        valid[provider_key] = (
+            paired["provider_last_update"].min(),
+            paired["provider_last_update"].max(),
+        )
+    return valid
 
 
 def validate_completed_window(
@@ -673,13 +768,52 @@ def validate_completed_window(
             staleness = None
         else:
             staleness = (kickoff - provider_updates.min()).total_seconds()
-        if staleness is not None and staleness < 0:
-            problems.append(f"{label} selected a provider update after kickoff")
-        elif staleness is not None and staleness > max_offer_staleness_seconds:
+            if provider_updates.ge(kickoff).any():
+                problems.append(
+                    f"{label} selected a provider update at or after kickoff"
+                )
+        if staleness is not None and staleness > max_offer_staleness_seconds:
             problems.append(
                 f"{label} closing provider update is {staleness:.0f}s before "
                 f"kickoff; maximum is {max_offer_staleness_seconds:.0f}s"
             )
+        closing_totals = offers[
+            offers["game_id"].eq(game_id)
+            & offers["snapshot_id"].eq(anchor["closing_snapshot_id"])
+            & offers["market"].eq("totals")
+            & offers["phase"].eq("pregame")
+        ]
+        paired_total_updates = _paired_total_provider_updates(
+            closing_totals,
+            set(selected["provider_key"].dropna().astype(str)),
+        )
+        total_providers = len(paired_total_updates)
+        if total_providers < min_providers:
+            problems.append(
+                f"{label} closing snapshot has {total_providers} paired "
+                f"spread/total providers; minimum is {min_providers}"
+            )
+        if paired_total_updates:
+            oldest_total_update = min(
+                oldest for oldest, _ in paired_total_updates.values()
+            )
+            newest_total_update = max(
+                newest for _, newest in paired_total_updates.values()
+            )
+            total_staleness = (
+                kickoff - oldest_total_update
+            ).total_seconds()
+            if newest_total_update >= kickoff:
+                problems.append(
+                    f"{label} selected a total provider update at or after "
+                    "kickoff"
+                )
+            if total_staleness > max_offer_staleness_seconds:
+                problems.append(
+                    f"{label} closing total provider update is "
+                    f"{total_staleness:.0f}s before kickoff; maximum is "
+                    f"{max_offer_staleness_seconds:.0f}s"
+                )
         post_kickoff = events[
             events["game_id"].eq(game_id)
             & events["fetched_at"].ge(kickoff)
@@ -699,7 +833,8 @@ def validate_completed_window(
             )
             details.append(
                 f"{label}: froze {anchor['closing_snapshot_id']} at "
-                f"{closing_fetched_at.isoformat()} from {providers} providers; "
+                f"{closing_fetched_at.isoformat()} from {providers} spread and "
+                f"{total_providers} paired-total providers; "
                 f"ignored {live_offers} live offers"
             )
     return problems, details
@@ -778,8 +913,9 @@ def run_kickoff_window(
         post_minutes=post_minutes,
         interval_seconds=interval_seconds,
     )
+    market_plan = plan_kickoff_poll_markets(target, plan, interval_seconds)
     quota_problems, quota_details = _quota_problems(
-        frames, plan.polls, min_quota
+        frames, market_plan, min_quota
     )
     if quota_problems:
         raise ValueError("; ".join(quota_problems))
@@ -813,6 +949,9 @@ def run_kickoff_window(
         post_minutes=post_minutes,
         interval_seconds=interval_seconds,
     )
+    active_market_plan = plan_kickoff_poll_markets(
+        target, active_plan, interval_seconds
+    )
     completed = run_live_polling(
         season,
         load_division_one_schedule(season),
@@ -824,6 +963,7 @@ def run_kickoff_window(
         min_quota=min_quota,
         max_failures=max_failures,
         required_game_ids=target.game_ids,
+        poll_markets=active_market_plan,
         progress=progress,
         sleep=sleep,
     )
