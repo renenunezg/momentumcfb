@@ -41,6 +41,12 @@ def parse_args(argv=None):
         action="store_true",
         help="refresh the source snapshot from CFBD before forecasting",
     )
+    preseason.add_argument(
+        "--with-odds-api",
+        action="store_true",
+        help="also buy a two-market Odds API snapshot; routine refreshes use "
+        "the CFBD lines feed",
+    )
 
     ingame = sub.add_parser(
         "ingame-baseline",
@@ -187,7 +193,7 @@ def parse_args(argv=None):
         default=1,
         help="maximum number of poll cycles before stopping",
     )
-    live.add_argument("--interval-seconds", type=float, default=60.0)
+    live.add_argument("--interval-seconds", type=float, default=120.0)
     live.add_argument(
         "--lookback-hours",
         type=float,
@@ -247,7 +253,7 @@ def parse_args(argv=None):
         kickoff.add_argument("--cluster-minutes", type=float, default=15.0)
         kickoff.add_argument("--lead-minutes", type=float, default=5.0)
         kickoff.add_argument("--post-minutes", type=float, default=5.0)
-        kickoff.add_argument("--interval-seconds", type=float, default=60.0)
+        kickoff.add_argument("--interval-seconds", type=float, default=120.0)
         kickoff.add_argument("--min-quota", type=int, default=50)
         kickoff.add_argument(
             "--max-forecast-age-hours", type=float, default=48.0
@@ -319,7 +325,14 @@ def main(argv=None):
         from backend.features.units import build_unit_games
 
         for season in args.seasons:
-            plays = store.read_season_pbp(season)
+            try:
+                plays = store.read_season_pbp(season)
+            except FileNotFoundError:
+                print(
+                    f"{season}: no CFBD play-by-play is available; "
+                    "no features to rebuild"
+                )
+                continue
             possessions = build_possessions(plays)
             team_games = build_team_games(possessions)
             unit_games = build_unit_games(plays)
@@ -463,12 +476,15 @@ def main(argv=None):
         from backend.model.preseason import run_preseason_forecast
         from backend.odds.client import OddsAPIClient, OddsAPIError
 
+        if args.with_odds_api and not args.refresh:
+            raise SystemExit("--with-odds-api requires --refresh")
         if args.refresh:
-            try:
-                odds_client = OddsAPIClient()
-            except OddsAPIError as exc:
-                odds_client = None
-                print(f"WARNING: {exc}; retaining unpriced CFBD market fallback")
+            odds_client = None
+            if args.with_odds_api:
+                try:
+                    odds_client = OddsAPIClient()
+                except OddsAPIError as exc:
+                    raise SystemExit(str(exc)) from exc
             ingest_preseason_sources(
                 CFBDClient(), args.season, odds_client=odds_client
             )
@@ -1264,6 +1280,8 @@ def main(argv=None):
             max_failures=args.max_failures,
         )
         print(f"completed {completed} of {args.polls} polls")
+        if completed != args.polls:
+            raise SystemExit(1)
 
     elif args.command == "live-replay":
         import pandas as pd

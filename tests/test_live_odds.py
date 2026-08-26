@@ -5,7 +5,13 @@ import pandas as pd
 import pytest
 
 from backend.odds import kickoff, live
-from backend.odds.client import OddsSnapshot, ScoreboardSnapshot
+from backend.odds.client import (
+    EventsSnapshot,
+    OddsAPIClient,
+    OddsAPIError,
+    OddsSnapshot,
+    ScoreboardSnapshot,
+)
 
 NOW = datetime(2026, 9, 5, 20, 0, 0, tzinfo=timezone.utc)
 
@@ -148,6 +154,410 @@ def test_snapshot_offers_carry_required_provenance():
     unmatched = snapshot.events[snapshot.events["odds_api_event_id"].eq("ev-unmatched")]
     assert unmatched["phase"].eq("unknown").all()
     assert not unmatched["matched"].any()
+
+
+class _QuotaAwareClient:
+    def __init__(self, discovery, odds=None, scoreboard=None):
+        self.discovery = discovery
+        self.odds = odds
+        self.scoreboard = scoreboard
+        self.calls = []
+
+    def ensure_single_quota_region(self):
+        return None
+
+    def get_ncaaf_events(self, commence_from, commence_to):
+        self.calls.append(("events", commence_from, commence_to))
+        return self.discovery
+
+    def get_ncaaf_odds(self, commence_from, commence_to, *, markets, event_ids):
+        self.calls.append(("odds", markets, event_ids))
+        if self.odds is None:
+            raise AssertionError("paid odds should not have been requested")
+        return self.odds
+
+    def get_ncaaf_scores(self, days_from):
+        self.calls.append(("scores", days_from))
+        if self.scoreboard is None:
+            raise AssertionError("scores should not have been requested")
+        return self.scoreboard
+
+
+def _events_snapshot(events, remaining=78):
+    return EventsSnapshot(
+        events=events,
+        fetched_at=NOW,
+        requests_remaining=remaining,
+        requests_used=422,
+        request_cost=0,
+    )
+
+
+def test_live_capture_discovers_for_free_then_buys_only_spreads(
+    monkeypatch,
+):
+    commence = (NOW + timedelta(hours=3)).isoformat()
+    update = (NOW - timedelta(seconds=30)).isoformat()
+    event = _odds_event("ev-pre", "Montana", "Idaho", commence, update)
+    event["bookmakers"][0]["markets"] = event["bookmakers"][0]["markets"][:1]
+    odds = OddsSnapshot(
+        events=[event],
+        fetched_at=NOW,
+        requests_remaining=77,
+        requests_used=423,
+        request_cost=1,
+        configured_bookmakers=("draftkings",),
+    )
+    scoreboard = ScoreboardSnapshot(
+        events=[
+            {
+                "id": "ev-pre",
+                "commence_time": commence,
+                "completed": False,
+                "home_team": "Montana",
+                "away_team": "Idaho",
+                "scores": None,
+                "last_update": None,
+            },
+            {
+                "id": "unrelated",
+                "commence_time": commence,
+                "completed": False,
+                "home_team": "Other",
+                "away_team": "Else",
+            },
+        ],
+        fetched_at=NOW,
+        requests_remaining=76,
+        requests_used=424,
+        request_cost=1,
+    )
+    client = _QuotaAwareClient(_events_snapshot([event]), odds, scoreboard)
+    monkeypatch.setattr(live, "write_live_snapshot", lambda season, snapshot: None)
+
+    snapshot = live.capture_live_snapshot(
+        client,
+        2026,
+        _schedule(),
+        lookback_hours=8,
+        lookahead_hours=6,
+        days_from=None,
+        min_quota=50,
+    )
+
+    assert [call[0] for call in client.calls] == ["events", "odds", "scores"]
+    assert client.calls[1][1:] == (("spreads",), ("ev-pre",))
+    assert snapshot.events["odds_api_event_id"].tolist() == ["ev-pre"]
+    assert set(snapshot.offers["market"]) == {"spreads"}
+    assert snapshot.poll.iloc[0]["odds_request_cost"] == 1
+    assert snapshot.poll.iloc[0]["scores_request_cost"] == 1
+
+
+def test_live_capture_spends_nothing_without_relevant_events():
+    commence = (NOW + timedelta(hours=3)).isoformat()
+    irrelevant = {
+        "id": "other",
+        "commence_time": commence,
+        "home_team": "Nobody State",
+        "away_team": "Anywhere Tech",
+    }
+    client = _QuotaAwareClient(_events_snapshot([irrelevant]))
+
+    with pytest.raises(live.LivePollSkipped, match="free event discovery"):
+        live.capture_live_snapshot(
+            client,
+            2026,
+            _schedule(),
+            lookback_hours=8,
+            lookahead_hours=6,
+            days_from=None,
+            min_quota=50,
+        )
+
+    assert [call[0] for call in client.calls] == ["events"]
+
+
+def test_live_capture_requires_the_requested_kickoff_target():
+    commence = (NOW + timedelta(hours=3)).isoformat()
+    other_game = {
+        "id": "ev-pre",
+        "commence_time": commence,
+        "home_team": "Montana",
+        "away_team": "Idaho",
+    }
+    client = _QuotaAwareClient(_events_snapshot([other_game]))
+
+    with pytest.raises(live.LivePollSkipped, match="missing target games: 101"):
+        live.capture_live_snapshot(
+            client,
+            2026,
+            _schedule(),
+            lookback_hours=8,
+            lookahead_hours=6,
+            days_from=None,
+            min_quota=50,
+            required_game_ids=(101,),
+        )
+
+    assert [call[0] for call in client.calls] == ["events"]
+
+
+def test_postkick_score_is_captured_when_books_pull_the_spread(monkeypatch):
+    current = datetime.now(timezone.utc)
+    commence = (current - timedelta(minutes=1)).isoformat()
+    event = {
+        "id": "ev-live",
+        "commence_time": commence,
+        "home_team": "Montana",
+        "away_team": "Idaho",
+    }
+    odds = OddsSnapshot(
+        events=[],
+        fetched_at=current,
+        requests_remaining=78,
+        requests_used=422,
+        request_cost=0,
+        configured_bookmakers=("draftkings",),
+    )
+    scoreboard = ScoreboardSnapshot(
+        events=[
+            {
+                **event,
+                "completed": False,
+                "scores": [
+                    {"name": "Montana", "score": "0"},
+                    {"name": "Idaho", "score": "0"},
+                ],
+                "last_update": current.isoformat(),
+            }
+        ],
+        fetched_at=current,
+        requests_remaining=77,
+        requests_used=423,
+        request_cost=1,
+    )
+    schedule = pd.DataFrame(
+        {
+            "game_id": [501],
+            "start_date": [commence],
+            "home_team": ["Montana"],
+            "away_team": ["Idaho"],
+        }
+    )
+    client = _QuotaAwareClient(
+        _events_snapshot([event], remaining=78), odds, scoreboard
+    )
+    monkeypatch.setattr(live, "write_live_snapshot", lambda season, snapshot: None)
+
+    snapshot = live.capture_live_snapshot(
+        client,
+        2026,
+        schedule,
+        lookback_hours=1,
+        lookahead_hours=1,
+        days_from=None,
+        min_quota=50,
+        required_game_ids=(501,),
+    )
+
+    assert [call[0] for call in client.calls] == ["events", "odds", "scores"]
+    assert snapshot.offers.empty
+    assert snapshot.events["phase"].tolist() == ["live"]
+    assert snapshot.poll.iloc[0]["odds_request_cost"] == 0
+    assert snapshot.poll.iloc[0]["scores_request_cost"] == 1
+
+
+def test_live_capture_checks_shared_quota_before_paid_calls():
+    commence = (NOW + timedelta(hours=3)).isoformat()
+    event = {
+        "id": "ev-pre",
+        "commence_time": commence,
+        "home_team": "Montana",
+        "away_team": "Idaho",
+    }
+    client = _QuotaAwareClient(_events_snapshot([event], remaining=61))
+
+    with pytest.raises(live.QuotaFloorReached, match="would cross"):
+        live.capture_live_snapshot(
+            client,
+            2026,
+            _schedule(),
+            lookback_hours=8,
+            lookahead_hours=6,
+            days_from=None,
+            min_quota=50,
+            polls_remaining=6,
+        )
+
+    assert [call[0] for call in client.calls] == ["events"]
+
+
+def test_paid_partial_failure_preserves_quota_provenance(tmp_path, monkeypatch):
+    commence = (NOW + timedelta(hours=3)).isoformat()
+    update = (NOW - timedelta(seconds=30)).isoformat()
+    event = _odds_event("ev-pre", "Montana", "Idaho", commence, update)
+    event["bookmakers"][0]["markets"] = event["bookmakers"][0]["markets"][:1]
+    odds = OddsSnapshot(
+        events=[event],
+        fetched_at=NOW,
+        requests_remaining=77,
+        requests_used=423,
+        request_cost=1,
+        configured_bookmakers=("draftkings",),
+    )
+
+    class Client(_QuotaAwareClient):
+        def get_ncaaf_scores(self, days_from):
+            self.calls.append(("scores", days_from))
+            raise OddsAPIError("score provider unavailable")
+
+    client = Client(_events_snapshot([event]), odds)
+    monkeypatch.setattr(live, "OddsAPIClient", lambda: client)
+    monkeypatch.setattr(live, "RAW_DIR", tmp_path)
+
+    completed = live.run_live_polling(
+        2026,
+        _schedule(),
+        polls=1,
+        interval_seconds=0,
+        lookback_hours=8,
+        lookahead_hours=6,
+        days_from=None,
+        min_quota=50,
+        max_failures=1,
+        progress=lambda message: None,
+    )
+
+    polls = live.read_live_frames(2026)["polls"]
+    assert completed == 0
+    assert polls["poll_status"].tolist() == ["error"]
+    assert polls["odds_request_cost"].tolist() == [1]
+    assert polls["odds_requests_remaining"].tolist() == [77]
+    assert polls["scores_request_cost"].isna().all()
+
+
+def test_post_scores_quota_change_fails_closed(monkeypatch):
+    commence = (NOW + timedelta(hours=3)).isoformat()
+    update = (NOW - timedelta(seconds=30)).isoformat()
+    event = _odds_event("ev-pre", "Montana", "Idaho", commence, update)
+    event["bookmakers"][0]["markets"] = event["bookmakers"][0]["markets"][:1]
+    odds = OddsSnapshot(
+        events=[event],
+        fetched_at=NOW,
+        requests_remaining=69,
+        requests_used=431,
+        request_cost=1,
+        configured_bookmakers=("draftkings",),
+    )
+    scoreboard = ScoreboardSnapshot(
+        events=[],
+        fetched_at=NOW,
+        requests_remaining=59,
+        requests_used=441,
+        request_cost=1,
+    )
+    client = _QuotaAwareClient(
+        _events_snapshot([event], remaining=70), odds, scoreboard
+    )
+    monkeypatch.setattr(live, "write_live_snapshot", lambda season, snapshot: None)
+
+    with pytest.raises(live.PartialPaidPollError, match="reserved for future"):
+        live.capture_live_snapshot(
+            client,
+            2026,
+            _schedule(),
+            lookback_hours=8,
+            lookahead_hours=6,
+            days_from=None,
+            min_quota=50,
+            polls_remaining=6,
+        )
+
+
+def test_polling_passes_full_window_reserve_and_required_targets(monkeypatch):
+    client = _QuotaAwareClient(_events_snapshot([]))
+    monkeypatch.setattr(live, "OddsAPIClient", lambda: client)
+    calls = []
+
+    def capture(
+        client,
+        season,
+        schedule,
+        lookback_hours,
+        lookahead_hours,
+        days_from,
+        min_quota,
+        polls_remaining,
+        required_game_ids,
+    ):
+        calls.append((polls_remaining, required_game_ids))
+        return _snapshot()
+
+    monkeypatch.setattr(live, "capture_live_snapshot", capture)
+
+    completed = live.run_live_polling(
+        2026,
+        _schedule(),
+        polls=3,
+        interval_seconds=0,
+        lookback_hours=8,
+        lookahead_hours=6,
+        days_from=None,
+        min_quota=50,
+        max_failures=1,
+        required_game_ids=(101,),
+        progress=lambda message: None,
+        sleep=lambda seconds: None,
+    )
+
+    assert completed == 3
+    assert calls == [(3, (101,)), (2, (101,)), (1, (101,))]
+
+
+def test_live_odds_rejects_multi_region_quota_configuration():
+    assert OddsAPIClient(api_key="test", regions="us").quota_region_units == 1
+    client = OddsAPIClient(api_key="test", regions="us,us2")
+
+    with pytest.raises(OddsAPIError, match="would charge 2x"):
+        client.ensure_single_quota_region()
+
+
+def test_events_endpoint_uses_the_free_filtered_discovery_route():
+    class Response:
+        status_code = 200
+        text = ""
+        headers = {
+            "x-requests-remaining": "78",
+            "x-requests-used": "422",
+            "x-requests-last": "0",
+        }
+
+        @staticmethod
+        def json():
+            return []
+
+    class Session:
+        def __init__(self):
+            self.request = None
+
+        def get(self, url, params, timeout):
+            self.request = (url, params, timeout)
+            return Response()
+
+    client = OddsAPIClient(api_key="test", regions="us")
+    client.session = Session()
+    snapshot = client.get_ncaaf_events(
+        NOW - timedelta(hours=1), NOW + timedelta(hours=1)
+    )
+
+    url, params, timeout = client.session.request
+    assert url.endswith("/sports/americanfootball_ncaaf/events")
+    assert params["commenceTimeFrom"] == "2026-09-05T19:00:00Z"
+    assert params["commenceTimeTo"] == "2026-09-05T21:00:00Z"
+    assert "markets" not in params
+    assert timeout == 60
+    assert snapshot.request_cost == 0
+    assert snapshot.requests_remaining == 78
 
 
 def test_snapshots_are_append_only_and_replayable(tmp_path, monkeypatch):
@@ -329,3 +739,26 @@ def test_flatten_offers_survives_parquet_nested_arrays(tmp_path):
     assert coverage["matched"].all()
     assert len(offers) == 4  # two spreads outcomes + over + under
     assert set(offers["market"]) == {"spreads", "totals"}
+
+
+def test_odds_team_alias_matches_the_canonical_cfbd_game():
+    from backend.odds.markets import match_event
+
+    schedule = pd.DataFrame(
+        {
+            "game_id": [401856769],
+            "start_date": ["2026-09-05T00:00:00Z"],
+            "home_team": ["Kansas"],
+            "away_team": ["Long Island University"],
+        }
+    )
+
+    game_id, score = match_event(
+        "2026-09-05T00:00:00Z",
+        "Kansas Jayhawks",
+        "LIU Sharks",
+        schedule,
+    )
+
+    assert game_id == 401856769
+    assert score == 1.0

@@ -37,7 +37,18 @@ class WeeklyForecastResult:
 def load_weekly_games(season: int) -> pd.DataFrame:
     """Load the current schedule plus completed-game scoring features."""
     raw_games = store.read_games(season)
-    team_games = store.read_processed("team_games", f"{season}.parquet")
+    try:
+        team_games = store.read_processed("team_games", f"{season}.parquet")
+    except FileNotFoundError:
+        team_games = pd.DataFrame(
+            columns=[
+                "game_id",
+                "team",
+                "offense_possessions",
+                "offense_epa_total",
+                "game_possessions",
+            ]
+        )
     return build_weekly_scoring_games(raw_games, team_games)
 
 
