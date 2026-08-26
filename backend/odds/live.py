@@ -28,6 +28,9 @@ from backend.odds.markets import match_event
 
 PHASES = ("pregame", "live", "final", "unknown")
 DIVISION_ONE = {"fbs", "fcs"}
+LIVE_MARKETS = ("spreads",)
+LIVE_ODDS_COST = 1
+SCORES_COST = 1
 
 POLL_COLUMNS = [
     "snapshot_id",
@@ -188,6 +191,30 @@ class LiveSnapshot:
     poll: pd.DataFrame
     events: pd.DataFrame
     offers: pd.DataFrame
+
+
+class LivePollSkipped(RuntimeError):
+    def __init__(self, reason: str, requests_remaining: int | None):
+        super().__init__(reason)
+        self.requests_remaining = requests_remaining
+
+
+class QuotaFloorReached(RuntimeError):
+    def __init__(self, reason: str, odds: OddsSnapshot | None = None):
+        super().__init__(reason)
+        self.odds = odds
+
+
+class PartialPaidPollError(OddsAPIError):
+    def __init__(
+        self,
+        reason: str,
+        odds: OddsSnapshot,
+        scoreboard: ScoreboardSnapshot | None = None,
+    ):
+        super().__init__(reason)
+        self.odds = odds
+        self.scoreboard = scoreboard
 
 
 def live_odds_dir(season: int):
@@ -463,6 +490,8 @@ def record_failed_poll(
     error: str,
     query_window: tuple[datetime, datetime],
     days_from: int | None,
+    odds: OddsSnapshot | None = None,
+    scoreboard: ScoreboardSnapshot | None = None,
 ) -> str:
     failed_at = datetime.now(timezone.utc)
     snapshot_id = snapshot_id_for(failed_at)
@@ -479,6 +508,27 @@ def record_failed_poll(
             "days_from": days_from,
         }
     )
+    if odds is not None:
+        row.update(
+            {
+                "odds_fetched_at": odds.fetched_at,
+                "configured_bookmakers": json.dumps(
+                    list(odds.configured_bookmakers)
+                ),
+                "odds_request_cost": odds.request_cost,
+                "odds_requests_used": odds.requests_used,
+                "odds_requests_remaining": odds.requests_remaining,
+            }
+        )
+    if scoreboard is not None:
+        row.update(
+            {
+                "scores_fetched_at": scoreboard.fetched_at,
+                "scores_request_cost": scoreboard.request_cost,
+                "scores_requests_used": scoreboard.requests_used,
+                "scores_requests_remaining": scoreboard.requests_remaining,
+            }
+        )
     path = live_odds_dir(season) / "polls" / f"{snapshot_id}.parquet"
     if path.exists():
         raise FileExistsError(f"live snapshot {snapshot_id} already exists at {path}")
@@ -495,14 +545,167 @@ def capture_live_snapshot(
     lookback_hours: float,
     lookahead_hours: float,
     days_from: int | None,
+    min_quota: int,
+    polls_remaining: int = 1,
+    required_game_ids: tuple[int, ...] | None = None,
 ) -> LiveSnapshot:
+    if polls_remaining < 1:
+        raise ValueError("polls_remaining must be positive")
     now = datetime.now(timezone.utc)
     window = (
         now - timedelta(hours=lookback_hours),
         now + timedelta(hours=lookahead_hours),
     )
-    scoreboard = client.get_ncaaf_scores(days_from)
-    odds = client.get_ncaaf_odds(*window)
+    discovery = client.get_ncaaf_events(*window)
+    if discovery.request_cost != 0:
+        raise OddsAPIError(
+            "free event discovery returned missing or nonzero request cost"
+        )
+    if discovery.requests_remaining is None:
+        raise OddsAPIError("free event discovery lacked quota provenance")
+
+    event_id_by_game = {}
+    commence_by_event_id = {}
+    for event in discovery.events:
+        game_id, _ = match_event(
+            event.get("commence_time"),
+            event.get("home_team", ""),
+            event.get("away_team", ""),
+            schedule,
+        )
+        event_id = event.get("id")
+        if game_id is not None and event_id:
+            event_id = str(event_id)
+            event_id_by_game.setdefault(int(game_id), event_id)
+            commence_by_event_id[event_id] = event.get("commence_time")
+    required = tuple(dict.fromkeys(required_game_ids or ()))
+    missing_discovery = [
+        game_id for game_id in required if game_id not in event_id_by_game
+    ]
+    if missing_discovery:
+        raise LivePollSkipped(
+            "free event discovery is missing target games: "
+            + ", ".join(str(game_id) for game_id in missing_discovery),
+            discovery.requests_remaining,
+        )
+    relevant_event_ids = (
+        [event_id_by_game[game_id] for game_id in required]
+        if required
+        else list(event_id_by_game.values())
+    )
+    if not relevant_event_ids:
+        raise LivePollSkipped(
+            "free event discovery found no matching Division I games",
+            discovery.requests_remaining,
+        )
+
+    scores_cost = 2 if days_from is not None else SCORES_COST
+    planned_cost = LIVE_ODDS_COST + scores_cost
+    remaining = discovery.requests_remaining
+    reserved_cost = polls_remaining * planned_cost
+    if remaining - reserved_cost < min_quota:
+        raise QuotaFloorReached(
+            f"{remaining} credits remain; {polls_remaining} remaining live "
+            f"cycles reserve {reserved_cost} credits and would cross the "
+            f"{min_quota}-credit floor"
+        )
+
+    odds = client.get_ncaaf_odds(
+        *window,
+        markets=LIVE_MARKETS,
+        event_ids=tuple(relevant_event_ids),
+    )
+    if odds.request_cost is None or not 0 <= odds.request_cost <= LIVE_ODDS_COST:
+        raise PartialPaidPollError(
+            "odds response returned missing or unexpected request cost", odds
+        )
+    if odds.requests_remaining is None:
+        raise PartialPaidPollError("odds response lacked quota provenance", odds)
+
+    def has_spread(event: dict) -> bool:
+        return any(
+            market.get("key") == "spreads"
+            for bookmaker in event.get("bookmakers") or []
+            for market in bookmaker.get("markets") or []
+        )
+
+    selected_ids = set(relevant_event_ids)
+    returned = [
+        event
+        for event in odds.events
+        if event.get("id") in selected_ids and has_spread(event)
+    ]
+    returned_ids = {str(event.get("id")) for event in returned}
+    missing_odds = [
+        event_id for event_id in relevant_event_ids if event_id not in returned_ids
+    ]
+    if missing_odds:
+        reason = "spread odds are missing discovered target events: " + ", ".join(
+            missing_odds
+        )
+        missing_have_started = all(
+            pd.to_datetime(
+                commence_by_event_id.get(event_id), utc=True, errors="coerce"
+            )
+            <= pd.Timestamp(now)
+            for event_id in missing_odds
+        )
+        if not required or not missing_have_started:
+            if odds.request_cost:
+                raise PartialPaidPollError(reason, odds)
+            raise LivePollSkipped(reason, odds.requests_remaining)
+    if not returned and not missing_odds:
+        raise LivePollSkipped(
+            "no spread odds were returned for the discovered games",
+            odds.requests_remaining,
+        )
+    odds = OddsSnapshot(
+        events=returned,
+        fetched_at=odds.fetched_at,
+        requests_remaining=odds.requests_remaining,
+        requests_used=odds.requests_used,
+        request_cost=odds.request_cost,
+        configured_bookmakers=odds.configured_bookmakers,
+    )
+    future_reserved_cost = scores_cost + (polls_remaining - 1) * planned_cost
+    if odds.requests_remaining - future_reserved_cost < min_quota:
+        raise QuotaFloorReached(
+            f"{odds.requests_remaining} credits remain after odds; a "
+            f"{future_reserved_cost}-credit reserve for scores and future "
+            f"cycles would cross the {min_quota}-credit floor",
+            odds,
+        )
+
+    try:
+        scoreboard = client.get_ncaaf_scores(days_from)
+    except (OddsAPIError, requests.RequestException) as exc:
+        raise PartialPaidPollError(str(exc), odds) from exc
+    if (
+        scoreboard.request_cost != scores_cost
+        or scoreboard.requests_remaining is None
+    ):
+        raise PartialPaidPollError(
+            "scores response returned missing or unexpected quota provenance",
+            odds,
+            scoreboard,
+        )
+    future_cost = (polls_remaining - 1) * planned_cost
+    if scoreboard.requests_remaining - future_cost < min_quota:
+        raise PartialPaidPollError(
+            f"{scoreboard.requests_remaining} credits remain after scores; "
+            f"{future_cost} credits are reserved for future cycles and would "
+            f"cross the {min_quota}-credit floor",
+            odds,
+            scoreboard,
+        )
+    relevant = set(relevant_event_ids)
+    scoreboard = ScoreboardSnapshot(
+        events=[event for event in scoreboard.events if event.get("id") in relevant],
+        fetched_at=scoreboard.fetched_at,
+        requests_remaining=scoreboard.requests_remaining,
+        requests_used=scoreboard.requests_used,
+        request_cost=scoreboard.request_cost,
+    )
     snapshot = build_live_snapshot(
         season, odds, scoreboard, schedule, window, days_from
     )
@@ -544,6 +747,7 @@ def run_live_polling(
     days_from: int | None,
     min_quota: int,
     max_failures: int,
+    required_game_ids: tuple[int, ...] | None = None,
     progress=print,
     sleep=time.sleep,
 ) -> int:
@@ -551,17 +755,13 @@ def run_live_polling(
         raise ValueError("--polls must be at least 1")
     if max_failures < 1:
         raise ValueError("--max-failures must be at least 1")
+    if min_quota < 0:
+        raise ValueError("--min-quota must be nonnegative")
     client = OddsAPIClient()
+    client.ensure_single_quota_region()
     consecutive_failures = 0
-    quota_remaining: int | None = None
     completed = 0
     for poll_index in range(polls):
-        if quota_remaining is not None and quota_remaining < min_quota:
-            progress(
-                f"stopping: {quota_remaining} requests remaining is below "
-                f"--min-quota {min_quota}"
-            )
-            break
         try:
             snapshot = capture_live_snapshot(
                 client,
@@ -570,7 +770,58 @@ def run_live_polling(
                 lookback_hours,
                 lookahead_hours,
                 days_from,
+                min_quota,
+                polls_remaining=polls - poll_index,
+                required_game_ids=required_game_ids,
             )
+        except QuotaFloorReached as exc:
+            if exc.odds is None:
+                progress(f"stopping: {exc}")
+            else:
+                now = datetime.now(timezone.utc)
+                window = (
+                    now - timedelta(hours=lookback_hours),
+                    now + timedelta(hours=lookahead_hours),
+                )
+                snapshot_id = record_failed_poll(
+                    season,
+                    str(exc),
+                    window,
+                    days_from,
+                    odds=exc.odds,
+                )
+                progress(f"{snapshot_id}: stopping after paid odds: {exc}")
+            break
+        except LivePollSkipped as exc:
+            consecutive_failures = 0
+            remaining = (
+                ""
+                if exc.requests_remaining is None
+                else f" ({exc.requests_remaining} credits remain)"
+            )
+            progress(f"skipping paid capture: {exc}{remaining}")
+        except PartialPaidPollError as exc:
+            consecutive_failures += 1
+            now = datetime.now(timezone.utc)
+            window = (
+                now - timedelta(hours=lookback_hours),
+                now + timedelta(hours=lookahead_hours),
+            )
+            snapshot_id = record_failed_poll(
+                season,
+                str(exc),
+                window,
+                days_from,
+                odds=exc.odds,
+                scoreboard=exc.scoreboard,
+            )
+            progress(
+                f"{snapshot_id}: paid poll failed "
+                f"({consecutive_failures}/{max_failures} consecutive): {exc}"
+            )
+            if consecutive_failures >= max_failures:
+                progress("stopping: consecutive failure limit reached")
+                break
         except (OddsAPIError, requests.RequestException) as exc:
             consecutive_failures += 1
             now = datetime.now(timezone.utc)
@@ -589,17 +840,6 @@ def run_live_polling(
         else:
             consecutive_failures = 0
             completed += 1
-            poll = snapshot.poll.iloc[0]
-            remaining = [
-                value
-                for value in (
-                    poll["odds_requests_remaining"],
-                    poll["scores_requests_remaining"],
-                )
-                if pd.notna(value)
-            ]
-            if remaining:
-                quota_remaining = int(min(remaining))
             progress(_poll_summary(snapshot))
         if poll_index < polls - 1:
             sleep(interval_seconds)

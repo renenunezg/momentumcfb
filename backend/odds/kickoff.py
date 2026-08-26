@@ -12,7 +12,10 @@ import pandas as pd
 
 from backend.etl import store
 from backend.model.ingame import SERVING_ANCHOR_COLUMNS
+from backend.odds.client import OddsAPIClient, OddsAPIError
 from backend.odds.live import (
+    LIVE_ODDS_COST,
+    SCORES_COST,
     load_division_one_schedule,
     run_live_polling,
     verify_live_snapshots,
@@ -35,7 +38,6 @@ REQUIRED_PRESEASON_SOURCES = frozenset(
         "lines",
         "prior_coaches",
         "prior_talent",
-        "odds_api",
     }
 )
 ALLOWED_EMPTY_SOURCES = frozenset({"talent"})
@@ -154,6 +156,11 @@ def check_preseason_readiness(
                         warnings.append(
                             f"source {source} is empty; the documented neutral "
                             "fallback remains active"
+                        )
+                    elif source not in REQUIRED_PRESEASON_SOURCES:
+                        warnings.append(
+                            f"optional source {source} is empty; required CFBD "
+                            "sources remain available"
                         )
                     else:
                         problems.append(f"required source {source} is empty")
@@ -326,7 +333,7 @@ def plan_kickoff_window(
     as_of=None,
     lead_minutes: float = 5.0,
     post_minutes: float = 5.0,
-    interval_seconds: float = 60.0,
+    interval_seconds: float = 120.0,
 ) -> KickoffWindowPlan:
     if lead_minutes <= 0:
         raise ValueError("--lead-minutes must be positive")
@@ -390,22 +397,15 @@ def _quota_problems(
         )
         if pd.notna(value)
     ]
-    cost_values = [
-        int(value)
-        for value in (
-            latest.get("odds_request_cost"),
-            latest.get("scores_request_cost"),
-        )
-        if pd.notna(value)
-    ]
-    if not remaining_values or not cost_values:
+    if not remaining_values:
         return ["latest Odds API poll lacks quota provenance"], []
     remaining = min(remaining_values)
-    cycle_cost = sum(cost_values)
+    cycle_cost = LIVE_ODDS_COST + SCORES_COST
     expected_after = remaining - planned_polls * cycle_cost
     details = [
-        f"Odds API quota: {remaining} remaining, about {cycle_cost} per poll, "
-        f"{expected_after} after {planned_polls} planned polls"
+        f"last stored Odds API quota: {remaining} remaining, about "
+        f"{cycle_cost} per poll, {expected_after} after "
+        f"{planned_polls} planned polls"
     ]
     if expected_after < min_quota:
         return [
@@ -523,7 +523,7 @@ def check_kickoff_readiness(
     cluster_minutes: float = 15.0,
     lead_minutes: float = 5.0,
     post_minutes: float = 5.0,
-    interval_seconds: float = 60.0,
+    interval_seconds: float = 120.0,
     min_quota: int = 50,
     max_forecast_age_hours: float = 48.0,
     max_source_age_hours: float = 48.0,
@@ -540,6 +540,10 @@ def check_kickoff_readiness(
         max_forecast_age_hours=max_forecast_age_hours,
         max_source_age_hours=max_source_age_hours,
     )
+    try:
+        OddsAPIClient().ensure_single_quota_region()
+    except OddsAPIError as exc:
+        problems.append(str(exc))
     live_problems, frames = verify_live_snapshots(season)
     problems.extend(live_problems)
     target = None
@@ -723,7 +727,7 @@ def run_kickoff_window(
     cluster_minutes: float = 15.0,
     lead_minutes: float = 5.0,
     post_minutes: float = 5.0,
-    interval_seconds: float = 60.0,
+    interval_seconds: float = 120.0,
     lookback_hours: float = 1.0,
     lookahead_hours: float = 2.0,
     min_quota: int = 50,
@@ -738,6 +742,10 @@ def run_kickoff_window(
     sleep=time.sleep,
 ) -> KickoffRunResult:
     """Wait for one window, poll across kickoff, validate, and write anchors."""
+    try:
+        OddsAPIClient().ensure_single_quota_region()
+    except OddsAPIError as exc:
+        raise ValueError(str(exc)) from exc
     current = _utc(now())
     problems, warnings, details = check_preseason_readiness(
         season,
@@ -815,6 +823,7 @@ def run_kickoff_window(
         days_from=None,
         min_quota=min_quota,
         max_failures=max_failures,
+        required_game_ids=target.game_ids,
         progress=progress,
         sleep=sleep,
     )

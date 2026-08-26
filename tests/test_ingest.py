@@ -1,5 +1,6 @@
 import pandas as pd
 
+from backend import cli
 from backend.etl import ingest, store
 
 
@@ -66,3 +67,39 @@ def test_read_season_pbp_combines_only_cfbd_weekly_snapshots(tmp_path, monkeypat
 
     assert loaded["id"].tolist() == [1, 2]
     assert loaded["pbp_source"].tolist() == ["cfbd", "cfbd"]
+
+
+def test_preseason_weekly_commands_noop_without_cfbd_plays(
+    tmp_path, monkeypatch, capsys
+):
+    raw_dir = tmp_path / "raw"
+    processed_dir = tmp_path / "processed"
+    games_dir = raw_dir / "games"
+    games_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "id": 401752794,
+                "season": 2026,
+                "week": 1,
+                "season_type": "regular",
+                "start_date": "2026-08-29T18:00:00Z",
+                "completed": False,
+                "home_id": 194,
+                "home_team": "Ohio State",
+                "home_classification": "fbs",
+                "away_id": 164,
+                "away_team": "Rutgers",
+                "away_classification": "fbs",
+            }
+        ]
+    ).to_parquet(games_dir / "2026.parquet", index=False)
+    monkeypatch.setattr(store, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(store, "PROCESSED_DIR", processed_dir)
+
+    cli.main(["features", "--seasons", "2026"])
+    cli.main(["weekly-update", "--season", "2026"])
+
+    output = capsys.readouterr().out
+    assert "2026: no CFBD play-by-play is available" in output
+    assert "weekly update not ready: no completed D1 games are available" in output

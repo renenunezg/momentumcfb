@@ -6,10 +6,15 @@ import numpy as np
 import pandas as pd
 from scipy.stats import t as student_t
 
+TEAM_NAME_ALIASES = {
+    "liusharks": "longislanduniversity",
+}
+
 
 def _normalized_name(value: str) -> str:
     ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore")
-    return re.sub(r"[^a-z0-9]", "", ascii_value.decode().lower())
+    normalized = re.sub(r"[^a-z0-9]", "", ascii_value.decode().lower())
+    return TEAM_NAME_ALIASES.get(normalized, normalized)
 
 
 def _name_score(left: str, right: str) -> float:
