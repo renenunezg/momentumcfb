@@ -118,6 +118,7 @@ def _snapshot():
         _schedule(),
         (NOW - timedelta(hours=8), NOW + timedelta(hours=6)),
         None,
+        requested_markets=live.CLOSING_MARKETS,
     )
 
 
@@ -193,19 +194,18 @@ def _events_snapshot(events, remaining=78):
     )
 
 
-def test_live_capture_discovers_for_free_then_buys_only_spreads(
+def test_live_capture_discovers_for_free_then_buys_requested_markets(
     monkeypatch,
 ):
     commence = (NOW + timedelta(hours=3)).isoformat()
     update = (NOW - timedelta(seconds=30)).isoformat()
     event = _odds_event("ev-pre", "Montana", "Idaho", commence, update)
-    event["bookmakers"][0]["markets"] = event["bookmakers"][0]["markets"][:1]
     odds = OddsSnapshot(
         events=[event],
         fetched_at=NOW,
-        requests_remaining=77,
-        requests_used=423,
-        request_cost=1,
+        requests_remaining=76,
+        requests_used=424,
+        request_cost=2,
         configured_bookmakers=("draftkings",),
     )
     scoreboard = ScoreboardSnapshot(
@@ -228,12 +228,17 @@ def test_live_capture_discovers_for_free_then_buys_only_spreads(
             },
         ],
         fetched_at=NOW,
-        requests_remaining=76,
-        requests_used=424,
+        requests_remaining=75,
+        requests_used=425,
         request_cost=1,
     )
     client = _QuotaAwareClient(_events_snapshot([event]), odds, scoreboard)
-    monkeypatch.setattr(live, "write_live_snapshot", lambda season, snapshot: None)
+    written = []
+    monkeypatch.setattr(
+        live,
+        "write_live_snapshot",
+        lambda season, snapshot: written.append(snapshot),
+    )
 
     snapshot = live.capture_live_snapshot(
         client,
@@ -243,14 +248,45 @@ def test_live_capture_discovers_for_free_then_buys_only_spreads(
         lookahead_hours=6,
         days_from=None,
         min_quota=50,
+        markets=live.CLOSING_MARKETS,
     )
 
     assert [call[0] for call in client.calls] == ["events", "odds", "scores"]
-    assert client.calls[1][1:] == (("spreads",), ("ev-pre",))
+    assert client.calls[1][1:] == (live.CLOSING_MARKETS, ("ev-pre",))
     assert snapshot.events["odds_api_event_id"].tolist() == ["ev-pre"]
-    assert set(snapshot.offers["market"]) == {"spreads"}
-    assert snapshot.poll.iloc[0]["odds_request_cost"] == 1
+    assert set(snapshot.offers["market"]) == {"spreads", "totals"}
+    assert snapshot.poll.iloc[0]["requested_markets"] == '["spreads", "totals"]'
+    assert snapshot.poll.iloc[0]["odds_request_cost"] == 2
     assert snapshot.poll.iloc[0]["scores_request_cost"] == 1
+    assert written == [snapshot]
+
+    spread_only_event = _odds_event(
+        "ev-pre", "Montana", "Idaho", commence, update
+    )
+    spread_only_event["bookmakers"][0]["markets"] = spread_only_event[
+        "bookmakers"
+    ][0]["markets"][:1]
+    spread_only_odds = OddsSnapshot(
+        events=[spread_only_event],
+        fetched_at=NOW,
+        requests_remaining=77,
+        requests_used=423,
+        request_cost=1,
+        configured_bookmakers=("draftkings",),
+    )
+    partial = live.capture_live_snapshot(
+        _QuotaAwareClient(_events_snapshot([event]), spread_only_odds, scoreboard),
+        2026,
+        _schedule(),
+        lookback_hours=8,
+        lookahead_hours=6,
+        days_from=None,
+        min_quota=50,
+        markets=live.CLOSING_MARKETS,
+    )
+    assert set(partial.offers["market"]) == {"spreads"}
+    assert partial.poll.iloc[0]["requested_markets"] == '["spreads", "totals"]'
+    assert written[-1] is partial
 
 
 def test_live_capture_spends_nothing_without_relevant_events():
@@ -367,7 +403,7 @@ def test_postkick_score_is_captured_when_books_pull_the_spread(monkeypatch):
     assert snapshot.poll.iloc[0]["scores_request_cost"] == 1
 
 
-def test_live_capture_checks_shared_quota_before_paid_calls():
+def test_live_capture_checks_shared_quota_before_paid_calls(monkeypatch):
     commence = (NOW + timedelta(hours=3)).isoformat()
     event = {
         "id": "ev-pre",
@@ -375,7 +411,14 @@ def test_live_capture_checks_shared_quota_before_paid_calls():
         "home_team": "Montana",
         "away_team": "Idaho",
     }
-    client = _QuotaAwareClient(_events_snapshot([event], remaining=61))
+    client = _QuotaAwareClient(_events_snapshot([event], remaining=62))
+    future_markets = (
+        live.LIVE_MARKETS,
+        live.CLOSING_MARKETS,
+        live.LIVE_MARKETS,
+        live.LIVE_MARKETS,
+        live.LIVE_MARKETS,
+    )
 
     with pytest.raises(live.QuotaFloorReached, match="would cross"):
         live.capture_live_snapshot(
@@ -386,10 +429,49 @@ def test_live_capture_checks_shared_quota_before_paid_calls():
             lookahead_hours=6,
             days_from=None,
             min_quota=50,
-            polls_remaining=6,
+            future_poll_markets=future_markets,
         )
 
     assert [call[0] for call in client.calls] == ["events"]
+
+    update = (NOW - timedelta(seconds=30)).isoformat()
+    priced_event = _odds_event(
+        "ev-pre", "Montana", "Idaho", commence, update
+    )
+    priced_event["bookmakers"][0]["markets"] = priced_event["bookmakers"][0][
+        "markets"
+    ][:1]
+    odds = OddsSnapshot(
+        events=[priced_event],
+        fetched_at=NOW,
+        requests_remaining=62,
+        requests_used=438,
+        request_cost=1,
+        configured_bookmakers=("draftkings",),
+    )
+    scoreboard = ScoreboardSnapshot(
+        events=[{**event, "completed": False, "scores": None}],
+        fetched_at=NOW,
+        requests_remaining=61,
+        requests_used=439,
+        request_cost=1,
+    )
+    exact_floor = _QuotaAwareClient(
+        _events_snapshot([event], remaining=63), odds, scoreboard
+    )
+    monkeypatch.setattr(live, "write_live_snapshot", lambda season, snapshot: None)
+    snapshot = live.capture_live_snapshot(
+        exact_floor,
+        2026,
+        _schedule(),
+        lookback_hours=8,
+        lookahead_hours=6,
+        days_from=None,
+        min_quota=50,
+        future_poll_markets=future_markets,
+    )
+    assert snapshot.poll.iloc[0]["scores_requests_remaining"] == 61
+    assert [call[0] for call in exact_floor.calls] == ["events", "odds", "scores"]
 
 
 def test_paid_partial_failure_preserves_quota_provenance(tmp_path, monkeypatch):
@@ -470,7 +552,13 @@ def test_post_scores_quota_change_fails_closed(monkeypatch):
             lookahead_hours=6,
             days_from=None,
             min_quota=50,
-            polls_remaining=6,
+            future_poll_markets=(
+                live.LIVE_MARKETS,
+                live.CLOSING_MARKETS,
+                live.LIVE_MARKETS,
+                live.LIVE_MARKETS,
+                live.LIVE_MARKETS,
+            ),
         )
 
 
@@ -478,6 +566,8 @@ def test_polling_passes_full_window_reserve_and_required_targets(monkeypatch):
     client = _QuotaAwareClient(_events_snapshot([]))
     monkeypatch.setattr(live, "OddsAPIClient", lambda: client)
     calls = []
+    clock = [0.0]
+    sleeps = []
 
     def capture(
         client,
@@ -487,31 +577,117 @@ def test_polling_passes_full_window_reserve_and_required_targets(monkeypatch):
         lookahead_hours,
         days_from,
         min_quota,
-        polls_remaining,
         required_game_ids,
+        markets,
+        future_poll_markets,
     ):
-        calls.append((polls_remaining, required_game_ids))
+        calls.append((markets, future_poll_markets, required_game_ids))
+        clock[0] += 0.5
         return _snapshot()
+
+    def advance(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
 
     monkeypatch.setattr(live, "capture_live_snapshot", capture)
 
+    market_plan = (
+        live.LIVE_MARKETS,
+        live.CLOSING_MARKETS,
+        live.LIVE_MARKETS,
+    )
     completed = live.run_live_polling(
         2026,
         _schedule(),
         polls=3,
-        interval_seconds=0,
+        interval_seconds=2,
         lookback_hours=8,
         lookahead_hours=6,
         days_from=None,
         min_quota=50,
         max_failures=1,
         required_game_ids=(101,),
+        poll_markets=market_plan,
         progress=lambda message: None,
-        sleep=lambda seconds: None,
+        sleep=advance,
+        monotonic=lambda: clock[0],
     )
 
     assert completed == 3
-    assert calls == [(3, (101,)), (2, (101,)), (1, (101,))]
+    assert calls == [
+        (live.LIVE_MARKETS, market_plan[1:], (101,)),
+        (live.CLOSING_MARKETS, market_plan[2:], (101,)),
+        (live.LIVE_MARKETS, (), (101,)),
+    ]
+    assert sleeps == [1.5, 1.5]
+
+    kickoff_at = pd.Timestamp("2026-08-29T16:00:00Z")
+    target = kickoff.KickoffTarget(
+        game_ids=(101,),
+        first_kickoff=kickoff_at,
+        last_kickoff=kickoff_at,
+        labels=("North Carolina at TCU (101)",),
+        kickoffs=(kickoff_at,),
+    )
+    window = kickoff.plan_kickoff_window(
+        target,
+        as_of=kickoff_at - pd.Timedelta(minutes=5),
+        interval_seconds=120,
+    )
+    planned = kickoff.plan_kickoff_poll_markets(target, window, 120)
+    assert planned == (
+        live.LIVE_MARKETS,
+        live.LIVE_MARKETS,
+        live.CLOSING_MARKETS,
+        live.LIVE_MARKETS,
+        live.LIVE_MARKETS,
+        live.LIVE_MARKETS,
+    )
+    assert sum(live.live_poll_quota_cost(markets) for markets in planned) == 13
+
+    boundary_window = kickoff.plan_kickoff_window(
+        target,
+        as_of=kickoff_at - pd.Timedelta(minutes=5),
+        interval_seconds=300,
+    )
+    assert kickoff.plan_kickoff_poll_markets(target, boundary_window, 300) == (
+        live.CLOSING_MARKETS,
+        live.LIVE_MARKETS,
+        live.LIVE_MARKETS,
+    )
+
+    same_time = kickoff.KickoffTarget(
+        game_ids=(101, 102),
+        first_kickoff=kickoff_at,
+        last_kickoff=kickoff_at,
+        labels=("Game one", "Game two"),
+        kickoffs=(kickoff_at, kickoff_at),
+    )
+    same_time_plan = kickoff.plan_kickoff_poll_markets(
+        same_time, window, 120
+    )
+    assert sum("totals" in markets for markets in same_time_plan) == 1
+
+    later = kickoff_at + pd.Timedelta(minutes=5)
+    staggered = kickoff.KickoffTarget(
+        game_ids=(101, 102),
+        first_kickoff=kickoff_at,
+        last_kickoff=later,
+        labels=("Game one", "Game two"),
+        kickoffs=(kickoff_at, later),
+    )
+    staggered_window = kickoff.plan_kickoff_window(
+        staggered,
+        as_of=kickoff_at - pd.Timedelta(minutes=5),
+        interval_seconds=120,
+    )
+    staggered_plan = kickoff.plan_kickoff_poll_markets(
+        staggered, staggered_window, 120
+    )
+    assert [
+        index for index, markets in enumerate(staggered_plan)
+        if "totals" in markets
+    ] == [2, 4]
 
 
 def test_live_odds_rejects_multi_region_quota_configuration():
@@ -663,18 +839,40 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
         ),
         "offers": pd.DataFrame(
             {
-                "game_id": [101, 101, 101],
-                "snapshot_id": ["close", "close", "live"],
-                "fetched_at": [pregame, pregame, live_at],
-                "phase": ["pregame", "pregame", "live"],
-                "market": ["spreads", "spreads", "spreads"],
-                "selection": ["home", "home", "home"],
-                "provider_key": ["a", "b", "a"],
+                "game_id": [101] * 7,
+                "snapshot_id": ["close"] * 6 + ["live"],
+                "fetched_at": [pregame] * 6 + [live_at],
+                "phase": ["pregame"] * 6 + ["live"],
+                "market": [
+                    "spreads",
+                    "spreads",
+                    "totals",
+                    "totals",
+                    "totals",
+                    "totals",
+                    "spreads",
+                ],
+                "selection": [
+                    "home",
+                    "home",
+                    "over",
+                    "under",
+                    "over",
+                    "under",
+                    "home",
+                ],
+                "provider_key": ["a", "b", "a", "a", "b", "b", "a"],
                 "provider_last_update": [
                     starts_at - pd.Timedelta(seconds=30),
                     starts_at - pd.Timedelta(seconds=45),
+                    starts_at - pd.Timedelta(seconds=25),
+                    starts_at - pd.Timedelta(seconds=25),
+                    starts_at - pd.Timedelta(seconds=40),
+                    starts_at - pd.Timedelta(seconds=40),
                     live_at,
                 ],
+                "point": [-3.5, -3.5, 51.5, 51.5, 51.5, 51.5, -4.0],
+                "price": [-110, -110, -105, -115, -108, -112, -110],
             }
         ),
     }
@@ -695,6 +893,36 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     )
     assert problems == []
     assert "ignored 1 live offers" in details[0]
+
+    without_totals = {
+        **frames,
+        "offers": frames["offers"][frames["offers"]["market"].ne("totals")],
+    }
+    problems, _ = kickoff.validate_completed_window(
+        target, without_totals, anchors
+    )
+    assert any("0 paired spread/total providers" in problem for problem in problems)
+
+    postkick_provider = {**frames, "offers": frames["offers"].copy()}
+    postkick_provider["offers"].loc[
+        postkick_provider["offers"]["market"].eq("totals")
+        & postkick_provider["offers"]["provider_key"].eq("b"),
+        "provider_last_update",
+    ] = live_at
+    problems, _ = kickoff.validate_completed_window(
+        target, postkick_provider, anchors
+    )
+    assert any("total provider update at or after" in problem for problem in problems)
+
+    split_pair = {**frames, "offers": frames["offers"].copy()}
+    split_pair["offers"].loc[
+        split_pair["offers"]["market"].eq("totals")
+        & split_pair["offers"]["provider_key"].eq("a")
+        & split_pair["offers"]["selection"].eq("under"),
+        "provider_last_update",
+    ] = live_at
+    problems, _ = kickoff.validate_completed_window(target, split_pair, anchors)
+    assert any("total provider update at or after" in problem for problem in problems)
 
     leaked = anchors.assign(
         closing_snapshot_id="live", closing_fetched_at=live_at
