@@ -104,44 +104,33 @@ def _game_weights(
 def _pass_block_values(frame: pd.DataFrame) -> pd.Series:
     """Sack PPA relative to the weighted per-dropback baseline."""
     valid = frame["pass_plays"].gt(0)
-    weighted_dropbacks = frame.loc[valid, "pass_plays"] * frame.loc[
-        valid, "weight"
-    ]
+    weighted_dropbacks = frame.loc[valid, "pass_plays"] * frame.loc[valid, "weight"]
     denominator = float(weighted_dropbacks.sum())
     if denominator <= 0:
         return pd.Series(np.nan, index=frame.index, dtype=float)
     baseline = float(
-        (
-            frame.loc[valid, "protection_ppa_allowed"]
-            * frame.loc[valid, "weight"]
-        ).sum()
+        (frame.loc[valid, "protection_ppa_allowed"] * frame.loc[valid, "weight"]).sum()
         / denominator
     )
-    values = (
-        frame["protection_ppa_allowed"] - baseline * frame["pass_plays"]
-    )
+    values = frame["protection_ppa_allowed"] - baseline * frame["pass_plays"]
     return values.where(valid)
 
 
 def _run_block_values(frame: pd.DataFrame) -> pd.Series:
     """Convert adjusted line yards over baseline to PPA-equivalent value."""
     valid = frame["line_yard_carries"].gt(0)
-    weighted_carries = frame.loc[valid, "line_yard_carries"] * frame.loc[
-        valid, "weight"
-    ]
+    weighted_carries = (
+        frame.loc[valid, "line_yard_carries"] * frame.loc[valid, "weight"]
+    )
     denominator = float(weighted_carries.sum())
     if denominator <= 0:
         return pd.Series(np.nan, index=frame.index, dtype=float)
     baseline = float(
-        (
-            frame.loc[valid, "adjusted_line_yards"]
-            * frame.loc[valid, "weight"]
-        ).sum()
+        (frame.loc[valid, "adjusted_line_yards"] * frame.loc[valid, "weight"]).sum()
         / denominator
     )
     line_yard_residual = (
-        frame["adjusted_line_yards"]
-        - baseline * frame["line_yard_carries"]
+        frame["adjusted_line_yards"] - baseline * frame["line_yard_carries"]
     )
     weighted_rushes = frame.loc[valid, "rush_plays"] * frame.loc[valid, "weight"]
     rush_denominator = float(weighted_rushes.sum())
@@ -153,10 +142,7 @@ def _run_block_values(frame: pd.DataFrame) -> pd.Series:
     )
     rush_ppa_residual = frame["rush_ppa"] - rush_baseline * frame["rush_plays"]
     scale_denominator = float(
-        (
-            frame.loc[valid, "weight"]
-            * np.square(line_yard_residual.loc[valid])
-        ).sum()
+        (frame.loc[valid, "weight"] * np.square(line_yard_residual.loc[valid])).sum()
     )
     if scale_denominator <= 0:
         return pd.Series(np.nan, index=frame.index, dtype=float)
@@ -253,12 +239,8 @@ def fit_unit_ratings(
     game_ids = set(training["game_id"])
     window = unit_games[unit_games["game_id"].isin(game_ids)].copy()
     window["weight"] = _game_weights(window["game_id"], recency_by_game)
-    window["rush_value"] = window["rush_ppa"].where(
-        window["rush_plays"].gt(0)
-    )
-    window["pass_value"] = window["pass_ppa"].where(
-        window["pass_plays"].gt(0)
-    )
+    window["rush_value"] = window["rush_ppa"].where(window["rush_plays"].gt(0))
+    window["pass_value"] = window["pass_ppa"].where(window["pass_plays"].gt(0))
     window["pass_block_value"] = _pass_block_values(window)
     window["run_block_value"] = _run_block_values(window)
 

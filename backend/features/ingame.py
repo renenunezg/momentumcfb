@@ -201,9 +201,7 @@ def build_process_evidence(plays: pd.DataFrame) -> pd.DataFrame:
     # special-teams rows too so punts and kicks share the filter.
     threshold = classified["period"].map(GARBAGE_MARGIN).fillna(GARBAGE_MARGIN_LATE)
     lopsided = (
-        (classified["offense_score"] - classified["defense_score"])
-        .abs()
-        .gt(threshold)
+        (classified["offense_score"] - classified["defense_score"]).abs().gt(threshold)
     )
 
     epa = classified["epa"].where(classified["is_competitive"], 0.0).fillna(0.0)
@@ -264,11 +262,7 @@ def build_process_evidence(plays: pd.DataFrame) -> pd.DataFrame:
     # lambda ** (scrimmage plays run since play i), evaluated pre-snap, via an
     # exact scaled cumulative sum so truncated-prefix replays match bit-for-bit.
     decay_source = contributions[
-        [
-            f"{side}_{family}"
-            for family in DECAYED_FAMILIES
-            for side in ("home", "away")
-        ]
+        [f"{side}_{family}" for family in DECAYED_FAMILIES for side in ("home", "away")]
         + ["evidence_plays", "scrimmage_plays_before"]
     ].copy()
     elapsed = classified.groupby("game_id", sort=False)[
@@ -303,8 +297,7 @@ def build_process_evidence(plays: pd.DataFrame) -> pd.DataFrame:
             "elapsed_seconds": f"elapsed_seconds_decayed_hl{half_life}",
         }
         decayed.columns = [
-            renamed.get(column, f"{column}_hl{half_life}")
-            for column in decayed.columns
+            renamed.get(column, f"{column}_hl{half_life}") for column in decayed.columns
         ]
         decayed_frames.append(decayed)
 
@@ -345,7 +338,10 @@ def leakage_problems(
             problems.append(f"game {game_id}: no plays to verify")
             continue
         cuts = sorted(
-            {max(1, round(total * step / checkpoints)) for step in range(1, checkpoints)}
+            {
+                max(1, round(total * step / checkpoints))
+                for step in range(1, checkpoints)
+            }
             | {1, total}
         )
         for cut in cuts:
@@ -353,7 +349,9 @@ def leakage_problems(
             truncated = builder(
                 game_plays[game_plays["id"].astype("string").isin(set(kept))]
             )
-            if len(truncated) != cut or not truncated.equals(full.iloc[:cut].reset_index(drop=True)):
+            if len(truncated) != cut or not truncated.equals(
+                full.iloc[:cut].reset_index(drop=True)
+            ):
                 problems.append(
                     f"game {game_id}: states for plays 1..{cut} change when "
                     "later plays are removed"

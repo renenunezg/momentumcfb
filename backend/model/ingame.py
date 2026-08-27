@@ -57,9 +57,7 @@ class IngameBaselineParams:
         }
 
 
-def build_serving_inputs(
-    states: pd.DataFrame, anchors: pd.DataFrame
-) -> pd.DataFrame:
+def build_serving_inputs(states: pd.DataFrame, anchors: pd.DataFrame) -> pd.DataFrame:
     """Join play-boundary states to chronological pregame projections.
 
     This is the live serving contract: only play states and the pregame
@@ -93,9 +91,7 @@ def build_serving_inputs(
     return merged.reset_index(drop=True)
 
 
-def build_baseline_inputs(
-    states: pd.DataFrame, anchors: pd.DataFrame
-) -> pd.DataFrame:
+def build_baseline_inputs(states: pd.DataFrame, anchors: pd.DataFrame) -> pd.DataFrame:
     """Serving inputs plus the outcome labels backtests fit and score on.
 
     Layers the home_win label and the tie filter from actual final scores on
@@ -114,9 +110,7 @@ def build_baseline_inputs(
     merged = merged[
         merged["actual_home_points"].ne(merged["actual_away_points"])
     ].copy()
-    merged["home_win"] = merged["actual_home_points"].gt(
-        merged["actual_away_points"]
-    )
+    merged["home_win"] = merged["actual_home_points"].gt(merged["actual_away_points"])
     # Stored baseline_predictions keep the pre-split column layout, with the
     # outcome labels between the anchor and derived serving columns.
     tail = [
@@ -157,9 +151,7 @@ def margin_distribution(
     return mean, np.sqrt(variance)
 
 
-def win_probability(
-    inputs: pd.DataFrame, params: IngameBaselineParams
-) -> np.ndarray:
+def win_probability(inputs: pd.DataFrame, params: IngameBaselineParams) -> np.ndarray:
     mean, sd = margin_distribution(inputs, params)
     return norm.cdf(mean / sd)
 
@@ -202,7 +194,9 @@ def fit_baseline(inputs: pd.DataFrame) -> IngameBaselineParams:
 
 def _phase(inputs: pd.DataFrame) -> pd.Series:
     return pd.Series(
-        np.where(inputs["is_overtime"], "OT", "Q" + inputs["period"].astype(int).astype(str)),
+        np.where(
+            inputs["is_overtime"], "OT", "Q" + inputs["period"].astype(int).astype(str)
+        ),
         index=inputs.index,
     )
 
@@ -245,12 +239,12 @@ def _group_row(
     # States within a game share one outcome, so the binomial tolerance uses
     # the game count, not the play count.
     rate = row["empirical_rate"]
-    tolerance = max(0.02, 1.96 * np.sqrt(max(rate * (1.0 - rate), 1e-4) / max(n_games, 1)))
+    tolerance = max(
+        0.02, 1.96 * np.sqrt(max(rate * (1.0 - rate), 1e-4) / max(n_games, 1))
+    )
     if abs(row["gap"]) <= tolerance:
         row["calibration_status"] = "calibrated"
-        row["diagnostic"] = (
-            f"calibrated: gap {row['gap']:+.1%} within ±{tolerance:.1%}"
-        )
+        row["diagnostic"] = f"calibrated: gap {row['gap']:+.1%} within ±{tolerance:.1%}"
     else:
         row["calibration_status"] = "not_calibrated"
         row["diagnostic"] = (
@@ -278,9 +272,7 @@ def evaluate_baseline(
     for partition, part in partitions.items():
         if part.empty:
             continue
-        rows.append(
-            _group_row(part, partition, "overall", "all", assess_status=True)
-        )
+        rows.append(_group_row(part, partition, "overall", "all", assess_status=True))
     holdout = partitions["holdout"]
     segment_specs = (
         ("phase", ["phase"]),

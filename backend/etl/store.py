@@ -39,9 +39,7 @@ def read_returning(season: int) -> pd.DataFrame:
 
 
 def read_preseason_source(season: int, source: str) -> pd.DataFrame:
-    return pd.read_parquet(
-        RAW_DIR / "preseason" / str(season) / f"{source}.parquet"
-    )
+    return pd.read_parquet(RAW_DIR / "preseason" / str(season) / f"{source}.parquet")
 
 
 def write_processed(df: pd.DataFrame, *parts: str) -> None:
@@ -50,9 +48,7 @@ def write_processed(df: pd.DataFrame, *parts: str) -> None:
     df.to_parquet(path, index=False)
 
 
-def read_processed(
-    *parts: str, columns: list[str] | None = None
-) -> pd.DataFrame:
+def read_processed(*parts: str, columns: list[str] | None = None) -> pd.DataFrame:
     return pd.read_parquet(PROCESSED_DIR.joinpath(*parts), columns=columns)
 
 
@@ -66,6 +62,4 @@ def processed_names(*parts: str) -> list[str]:
 
 def processed_columns(*parts: str) -> list[str]:
     """Column names of a processed artifact, from parquet metadata only."""
-    return list(
-        pyarrow.parquet.read_schema(PROCESSED_DIR.joinpath(*parts)).names
-    )
+    return list(pyarrow.parquet.read_schema(PROCESSED_DIR.joinpath(*parts)).names)

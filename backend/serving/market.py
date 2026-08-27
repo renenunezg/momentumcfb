@@ -95,9 +95,7 @@ def flatten_live_closing_lines(offers: pd.DataFrame) -> pd.DataFrame:
     }
     missing = sorted(required - set(offers.columns))
     if missing:
-        raise ValueError(
-            "live odds offers are missing columns: " + ", ".join(missing)
-        )
+        raise ValueError("live odds offers are missing columns: " + ", ".join(missing))
 
     spreads = offers[
         offers["market"].eq("spreads")
@@ -234,9 +232,7 @@ def _build_market_anchors(
     anchors["margin_sd_method"] = method
     anchors["market_anchor_source"] = source
     columns = MARKET_ANCHOR_COLUMNS + [
-        column
-        for column in LIVE_MARKET_PROVENANCE_COLUMNS
-        if column in anchors.columns
+        column for column in LIVE_MARKET_PROVENANCE_COLUMNS if column in anchors.columns
     ]
     return (
         anchors[columns]

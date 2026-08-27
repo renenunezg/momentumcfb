@@ -218,8 +218,14 @@ def test_raw_plays_build_deterministic_possession_and_team_game_features():
     unit_games = build_unit_games(raw)
 
     assert_frame_equal(possessions, rebuilt)
-    assert classified.loc[classified["id"].eq(3), "play_category"].item() == "administrative"
-    assert classified.loc[classified["id"].eq(9), "play_category"].item() == "clock_management"
+    assert (
+        classified.loc[classified["id"].eq(3), "play_category"].item()
+        == "administrative"
+    )
+    assert (
+        classified.loc[classified["id"].eq(9), "play_category"].item()
+        == "clock_management"
+    )
     assert possessions["possession_id"].is_unique
     assert len(possessions) == 3
     assert possessions["competitive_plays"].sum() == 4

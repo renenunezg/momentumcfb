@@ -39,9 +39,7 @@ def _projections(**overrides):
 
 
 def test_projection_anchors_derive_model_week_and_round_trip(processed_dir):
-    store.write_processed(
-        _projections(), "preseason", "projections", "2026_01.parquet"
-    )
+    store.write_processed(_projections(), "preseason", "projections", "2026_01.parquet")
     anchors = load_serving_anchors("preseason", season=2026, week=1)
     assert list(anchors.columns) == [
         "game_id",
@@ -69,9 +67,7 @@ def test_loader_rejects_contract_violations(processed_dir):
         ),
     ]
     for frame, message in cases:
-        store.write_processed(
-            frame, "preseason", "projections", "2026_01.parquet"
-        )
+        store.write_processed(frame, "preseason", "projections", "2026_01.parquet")
         with pytest.raises(ValueError, match=message):
             load_serving_anchors("preseason", season=2026, week=1)
 
@@ -117,12 +113,8 @@ def test_market_anchors_flatten_sign_and_round_trip(processed_dir, monkeypatch):
     assert (anchors["margin_sd"] > 0).all()
     assert anchors["margin_sd_method"].str.contains("development seasons").all()
 
-    store.write_processed(
-        anchors, *serving_anchor_artifact(2026, MARKET_ANCHOR_WEEK)
-    )
-    reloaded = load_serving_anchors(
-        "serving", season=2026, week=MARKET_ANCHOR_WEEK
-    )
+    store.write_processed(anchors, *serving_anchor_artifact(2026, MARKET_ANCHOR_WEEK))
+    reloaded = load_serving_anchors("serving", season=2026, week=MARKET_ANCHOR_WEEK)
     assert reloaded.equals(anchors[SERVING_ANCHOR_COLUMNS])
 
 
@@ -157,6 +149,4 @@ def test_live_market_anchor_freezes_latest_pregame_snapshot():
     assert closing["closing_snapshot_id"].tolist() == ["close"]
     assert closing["closing_spread"].tolist() == [-4.5]
     assert closing["n_spread_offers"].tolist() == [2]
-    assert closing["closing_fetched_at"].tolist() == [
-        kickoff - pd.Timedelta(minutes=1)
-    ]
+    assert closing["closing_fetched_at"].tolist() == [kickoff - pd.Timedelta(minutes=1)]

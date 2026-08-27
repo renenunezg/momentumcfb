@@ -61,15 +61,29 @@ def test_streamed_probabilities_equal_batch_and_skip_filtered_rows():
             _play(1, 1, 15, 0, HOME, "Kickoff"),
             _play(2, 1, 14, 30, AWAY, "Rush", drive_number=2),
             _play(
-                3, 1, 13, 50, AWAY, "Passing Touchdown",
-                drive_number=2, offense_score=7, scoring=True,
+                3,
+                1,
+                13,
+                50,
+                AWAY,
+                "Passing Touchdown",
+                drive_number=2,
+                offense_score=7,
+                scoring=True,
             ),
             # Null clock inside regulation: the batch drops this boundary, so
             # the stream must produce an event without a probability.
             _play(4, 2, 0, 0, HOME, "Rush", drive_number=3, clock=None),
             _play(
-                5, 3, 10, 0, HOME, "Timeout",
-                drive_number=4, defense_score=7, offense_timeouts=2,
+                5,
+                3,
+                10,
+                0,
+                HOME,
+                "Timeout",
+                drive_number=4,
+                defense_score=7,
+                offense_timeouts=2,
             ),
             _play(6, 4, 0, 30, HOME, "Rush", drive_number=5, defense_score=7),
             _play(7, 5, 0, 0, HOME, "Rush", drive_number=6, defense_score=7),
@@ -92,12 +106,8 @@ def test_streamed_probabilities_equal_batch_and_skip_filtered_rows():
 
     # The serving path must score without knowing the result: stream from an
     # anchor that carries only the pregame projection columns.
-    serving_anchor = anchor.drop(
-        columns=["actual_home_points", "actual_away_points"]
-    )
-    events = replay_game(
-        plays.sample(frac=1, random_state=7), serving_anchor, PARAMS
-    )
+    serving_anchor = anchor.drop(columns=["actual_home_points", "actual_away_points"])
+    events = replay_game(plays.sample(frac=1, random_state=7), serving_anchor, PARAMS)
 
     assert stream_problems(events, stored) == []
     assert len(events) == len(plays)
@@ -186,9 +196,7 @@ def test_serve_game_reads_no_outcome_bearing_data(tmp_path, monkeypatch):
         for column in columns
         if column in OUTCOME_COLUMNS
     ]
-    assert not [
-        column for column in events.columns if column in OUTCOME_COLUMNS
-    ]
+    assert not [column for column in events.columns if column in OUTCOME_COLUMNS]
     assert int(events["emitted"].sum()) == len(plays)
 
     # An anchored game with no feed is the ordinary pregame state, not an error

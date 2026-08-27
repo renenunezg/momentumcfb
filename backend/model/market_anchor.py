@@ -142,8 +142,7 @@ def format_market_anchor_diagnostic(summary: pd.DataFrame) -> str:
     for scope in ("phase", "margin"):
         for row in evaluation[evaluation["scope"].eq(scope)].itertuples():
             lines.append(
-                f"- {scope} {row.group_value}: {row.diagnostic} "
-                f"({row.n_games} games)"
+                f"- {scope} {row.group_value}: {row.diagnostic} ({row.n_games} games)"
             )
     verdict = summary[summary["summary_type"].eq("verdict")].iloc[0]
     lines.append(f"verdict: {verdict['diagnostic']}")

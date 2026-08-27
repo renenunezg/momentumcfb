@@ -123,12 +123,22 @@ def _snapshot():
 
 
 def test_phase_comes_only_from_provider_status():
-    assert live.resolve_phase((NOW + timedelta(hours=3)).isoformat(), False, NOW) == "pregame"
-    assert live.resolve_phase((NOW - timedelta(hours=1)).isoformat(), False, NOW) == "live"
-    assert live.resolve_phase((NOW - timedelta(hours=4)).isoformat(), True, NOW) == "final"
+    assert (
+        live.resolve_phase((NOW + timedelta(hours=3)).isoformat(), False, NOW)
+        == "pregame"
+    )
+    assert (
+        live.resolve_phase((NOW - timedelta(hours=1)).isoformat(), False, NOW) == "live"
+    )
+    assert (
+        live.resolve_phase((NOW - timedelta(hours=4)).isoformat(), True, NOW) == "final"
+    )
     # An event absent from the scores feed must never be guessed live,
     # even if it commenced in the past and its lines are moving.
-    assert live.resolve_phase((NOW - timedelta(hours=1)).isoformat(), None, NOW) == "unknown"
+    assert (
+        live.resolve_phase((NOW - timedelta(hours=1)).isoformat(), None, NOW)
+        == "unknown"
+    )
 
 
 def test_snapshot_offers_carry_required_provenance():
@@ -260,12 +270,10 @@ def test_live_capture_discovers_for_free_then_buys_requested_markets(
     assert snapshot.poll.iloc[0]["scores_request_cost"] == 1
     assert written == [snapshot]
 
-    spread_only_event = _odds_event(
-        "ev-pre", "Montana", "Idaho", commence, update
-    )
-    spread_only_event["bookmakers"][0]["markets"] = spread_only_event[
-        "bookmakers"
-    ][0]["markets"][:1]
+    spread_only_event = _odds_event("ev-pre", "Montana", "Idaho", commence, update)
+    spread_only_event["bookmakers"][0]["markets"] = spread_only_event["bookmakers"][0][
+        "markets"
+    ][:1]
     spread_only_odds = OddsSnapshot(
         events=[spread_only_event],
         fetched_at=NOW,
@@ -435,12 +443,10 @@ def test_live_capture_checks_shared_quota_before_paid_calls(monkeypatch):
     assert [call[0] for call in client.calls] == ["events"]
 
     update = (NOW - timedelta(seconds=30)).isoformat()
-    priced_event = _odds_event(
-        "ev-pre", "Montana", "Idaho", commence, update
-    )
-    priced_event["bookmakers"][0]["markets"] = priced_event["bookmakers"][0][
-        "markets"
-    ][:1]
+    priced_event = _odds_event("ev-pre", "Montana", "Idaho", commence, update)
+    priced_event["bookmakers"][0]["markets"] = priced_event["bookmakers"][0]["markets"][
+        :1
+    ]
     odds = OddsSnapshot(
         events=[priced_event],
         fetched_at=NOW,
@@ -663,9 +669,7 @@ def test_polling_passes_full_window_reserve_and_required_targets(monkeypatch):
         labels=("Game one", "Game two"),
         kickoffs=(kickoff_at, kickoff_at),
     )
-    same_time_plan = kickoff.plan_kickoff_poll_markets(
-        same_time, window, 120
-    )
+    same_time_plan = kickoff.plan_kickoff_poll_markets(same_time, window, 120)
     assert sum("totals" in markets for markets in same_time_plan) == 1
 
     later = kickoff_at + pd.Timedelta(minutes=5)
@@ -681,12 +685,9 @@ def test_polling_passes_full_window_reserve_and_required_targets(monkeypatch):
         as_of=kickoff_at - pd.Timedelta(minutes=5),
         interval_seconds=120,
     )
-    staggered_plan = kickoff.plan_kickoff_poll_markets(
-        staggered, staggered_window, 120
-    )
+    staggered_plan = kickoff.plan_kickoff_poll_markets(staggered, staggered_window, 120)
     assert [
-        index for index, markets in enumerate(staggered_plan)
-        if "totals" in markets
+        index for index, markets in enumerate(staggered_plan) if "totals" in markets
     ] == [2, 4]
 
 
@@ -784,9 +785,7 @@ def test_live_schedule_uses_the_freshest_stored_snapshot(tmp_path, monkeypatch):
             "away_classification": ["fbs"],
         }
     )
-    preseason = raw.assign(
-        id=2, home_team="Fresh State", away_team="Fresh Tech"
-    )
+    preseason = raw.assign(id=2, home_team="Fresh State", away_team="Fresh Tech")
     monkeypatch.setattr(live, "RAW_DIR", tmp_path)
     monkeypatch.setattr("backend.etl.store.read_games", lambda season: raw)
     monkeypatch.setattr(
@@ -882,15 +881,11 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
             "season": [2026],
             "closing_snapshot_id": ["close"],
             "closing_fetched_at": [pregame],
-            "latest_provider_update": [
-                starts_at - pd.Timedelta(seconds=30)
-            ],
+            "latest_provider_update": [starts_at - pd.Timedelta(seconds=30)],
         }
     )
 
-    problems, details = kickoff.validate_completed_window(
-        target, frames, anchors
-    )
+    problems, details = kickoff.validate_completed_window(target, frames, anchors)
     assert problems == []
     assert "ignored 1 live offers" in details[0]
 
@@ -898,9 +893,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
         **frames,
         "offers": frames["offers"][frames["offers"]["market"].ne("totals")],
     }
-    problems, _ = kickoff.validate_completed_window(
-        target, without_totals, anchors
-    )
+    problems, _ = kickoff.validate_completed_window(target, without_totals, anchors)
     assert any("0 paired spread/total providers" in problem for problem in problems)
 
     postkick_provider = {**frames, "offers": frames["offers"].copy()}
@@ -909,9 +902,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
         & postkick_provider["offers"]["provider_key"].eq("b"),
         "provider_last_update",
     ] = live_at
-    problems, _ = kickoff.validate_completed_window(
-        target, postkick_provider, anchors
-    )
+    problems, _ = kickoff.validate_completed_window(target, postkick_provider, anchors)
     assert any("total provider update at or after" in problem for problem in problems)
 
     split_pair = {**frames, "offers": frames["offers"].copy()}
@@ -924,9 +915,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     problems, _ = kickoff.validate_completed_window(target, split_pair, anchors)
     assert any("total provider update at or after" in problem for problem in problems)
 
-    leaked = anchors.assign(
-        closing_snapshot_id="live", closing_fetched_at=live_at
-    )
+    leaked = anchors.assign(closing_snapshot_id="live", closing_fetched_at=live_at)
     problems, _ = kickoff.validate_completed_window(target, frames, leaked)
     assert any("post-kickoff snapshot" in problem for problem in problems)
     assert any("closing snapshot has 0 providers" in problem for problem in problems)

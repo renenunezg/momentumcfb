@@ -89,9 +89,7 @@ def _utc(value=None) -> pd.Timestamp:
 
 
 def _artifact_frame(season: int, week: int, name: str) -> pd.DataFrame:
-    return store.read_processed(
-        "preseason", name, f"{season}_{week:02d}.parquet"
-    )
+    return store.read_processed("preseason", name, f"{season}_{week:02d}.parquet")
 
 
 def check_preseason_readiness(
@@ -150,9 +148,7 @@ def check_preseason_readiness(
                 row_count = int(row.row_count)
                 is_empty = bool(row.is_empty)
                 if is_empty != (row_count == 0):
-                    problems.append(
-                        f"source {source} row_count and is_empty disagree"
-                    )
+                    problems.append(f"source {source} row_count and is_empty disagree")
                 if is_empty:
                     if source in ALLOWED_EMPTY_SOURCES:
                         warnings.append(
@@ -182,8 +178,7 @@ def check_preseason_readiness(
                         f"maximum is {max_source_age_hours:.1f}h"
                     )
                 details.append(
-                    f"preseason sources: {len(manifest)} rows, oldest "
-                    f"{age_hours:.1f}h"
+                    f"preseason sources: {len(manifest)} rows, oldest {age_hours:.1f}h"
                 )
 
     projections = frames.get("projections")
@@ -228,18 +223,12 @@ def check_preseason_readiness(
 
     comparisons = frames.get("market_comparisons")
     if projections is not None and comparisons is not None:
-        if set(projections.get("game_id", [])) != set(
-            comparisons.get("game_id", [])
-        ):
-            problems.append(
-                "projections and market comparisons cover different games"
-            )
+        if set(projections.get("game_id", [])) != set(comparisons.get("game_id", [])):
+            problems.append("projections and market comparisons cover different games")
 
     if projections is not None and not projections.empty:
         try:
-            anchors = load_serving_anchors(
-                "serving", season=season, week=week
-            )
+            anchors = load_serving_anchors("serving", season=season, week=week)
         except (FileNotFoundError, ValueError) as exc:
             problems.append(f"preseason serving anchors are not loadable: {exc}")
         else:
@@ -303,17 +292,13 @@ def resolve_kickoff_target(
             raise ValueError("no future market-covered kickoff remains in the schedule")
         first = upcoming["kickoff"].min()
         selected = upcoming[
-            upcoming["kickoff"].le(
-                first + pd.Timedelta(minutes=cluster_minutes)
-            )
+            upcoming["kickoff"].le(first + pd.Timedelta(minutes=cluster_minutes))
         ].copy()
 
     selected = selected.sort_values(["kickoff", "game_id"], kind="stable")
     first_kickoff = selected["kickoff"].min()
     last_kickoff = selected["kickoff"].max()
-    if (
-        last_kickoff - first_kickoff
-    ).total_seconds() > cluster_minutes * 60:
+    if (last_kickoff - first_kickoff).total_seconds() > cluster_minutes * 60:
         raise ValueError(
             "target games span more than --cluster-minutes; run separate windows"
         )
@@ -385,9 +370,7 @@ def plan_kickoff_poll_markets(
     totals_polls: set[int] = set()
     for kickoff in kickoffs:
         eligible = [
-            index
-            for index, poll_time in enumerate(poll_times)
-            if poll_time < kickoff
+            index for index, poll_time in enumerate(poll_times) if poll_time < kickoff
         ]
         if not eligible:
             raise ValueError(
@@ -444,9 +427,7 @@ def _quota_problems(
     if not remaining_values:
         return ["latest Odds API poll lacks quota provenance"], []
     remaining = min(remaining_values)
-    planned_cost = sum(
-        live_poll_quota_cost(markets) for markets in planned_markets
-    )
+    planned_cost = sum(live_poll_quota_cost(markets) for markets in planned_markets)
     totals_polls = sum("totals" in markets for markets in planned_markets)
     expected_after = remaining - planned_cost
     details = [
@@ -494,9 +475,7 @@ def check_live_preflight(
         f"latest Odds API poll: {fetched_at.isoformat()} ({age_minutes:.1f}m old)"
     )
 
-    quota_problems, quota_details = _quota_problems(
-        frames, planned_markets, min_quota
-    )
+    quota_problems, quota_details = _quota_problems(frames, planned_markets, min_quota)
     problems.extend(quota_problems)
     details.extend(quota_details)
 
@@ -519,9 +498,7 @@ def check_live_preflight(
         "provider_key",
         "staleness_seconds",
     }
-    missing_offer_columns = sorted(
-        required_offer_columns - set(latest_offers.columns)
-    )
+    missing_offer_columns = sorted(required_offer_columns - set(latest_offers.columns))
     if missing_offer_columns:
         problems.append(
             "latest poll has no usable offers: missing "
@@ -539,9 +516,7 @@ def check_live_preflight(
             problems.append(f"latest poll has no pregame home spread for {label}")
             continue
         providers = int(game["provider_key"].nunique())
-        staleness = pd.to_numeric(
-            game["staleness_seconds"], errors="coerce"
-        ).max()
+        staleness = pd.to_numeric(game["staleness_seconds"], errors="coerce").max()
         if providers < min_providers:
             problems.append(
                 f"{label} has {providers} spread providers; minimum is {min_providers}"
@@ -609,9 +584,7 @@ def check_kickoff_readiness(
             post_minutes=post_minutes,
             interval_seconds=interval_seconds,
         )
-        market_plan = plan_kickoff_poll_markets(
-            target, plan, interval_seconds
-        )
+        market_plan = plan_kickoff_poll_markets(target, plan, interval_seconds)
     except ValueError as exc:
         problems.append(str(exc))
     else:
@@ -800,13 +773,10 @@ def validate_completed_window(
             newest_total_update = max(
                 newest for _, newest in paired_total_updates.values()
             )
-            total_staleness = (
-                kickoff - oldest_total_update
-            ).total_seconds()
+            total_staleness = (kickoff - oldest_total_update).total_seconds()
             if newest_total_update >= kickoff:
                 problems.append(
-                    f"{label} selected a total provider update at or after "
-                    "kickoff"
+                    f"{label} selected a total provider update at or after kickoff"
                 )
             if total_staleness > max_offer_staleness_seconds:
                 problems.append(
@@ -844,9 +814,7 @@ def _write_market_anchors(season: int, built: pd.DataFrame) -> None:
     expected = built[SERVING_ANCHOR_COLUMNS].reset_index(drop=True)
     artifact = serving_anchor_artifact(season, MARKET_ANCHOR_WEEK)
     store.write_processed(built, *artifact)
-    stored = load_serving_anchors(
-        "serving", season=season, week=MARKET_ANCHOR_WEEK
-    )
+    stored = load_serving_anchors("serving", season=season, week=MARKET_ANCHOR_WEEK)
     if not stored.equals(expected):
         raise ValueError(
             f"stored {'/'.join(artifact)} does not round-trip through the "
@@ -914,9 +882,7 @@ def run_kickoff_window(
         interval_seconds=interval_seconds,
     )
     market_plan = plan_kickoff_poll_markets(target, plan, interval_seconds)
-    quota_problems, quota_details = _quota_problems(
-        frames, market_plan, min_quota
-    )
+    quota_problems, quota_details = _quota_problems(frames, market_plan, min_quota)
     if quota_problems:
         raise ValueError("; ".join(quota_problems))
     for detail in quota_details:
@@ -986,8 +952,7 @@ def run_kickoff_window(
     )
     if validation_problems:
         raise ValueError(
-            "; ".join(validation_problems)
-            + "; market anchors were not changed"
+            "; ".join(validation_problems) + "; market anchors were not changed"
         )
     _write_market_anchors(season, built)
     return KickoffRunResult(

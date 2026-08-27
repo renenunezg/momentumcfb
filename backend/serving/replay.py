@@ -48,12 +48,14 @@ def chronological_plays(game_plays: pd.DataFrame) -> pd.DataFrame:
     order = build_game_states(raw)["source_play_id"]
     if not order.is_unique:
         raise ValueError("duplicate source play ids; cannot form a play feed")
-    position = raw["id"].astype("string").map(
-        {play_id: index for index, play_id in enumerate(order)}
+    position = (
+        raw["id"]
+        .astype("string")
+        .map({play_id: index for index, play_id in enumerate(order)})
     )
-    return raw.iloc[
-        np.argsort(position.to_numpy(), kind="stable")
-    ].reset_index(drop=True)
+    return raw.iloc[np.argsort(position.to_numpy(), kind="stable")].reset_index(
+        drop=True
+    )
 
 
 def replay_game(
@@ -79,9 +81,7 @@ def replay_game(
         boundary = build_game_states(prefix).iloc[[-1]]
         inputs = build_serving_inputs(boundary, anchor)
         emitted = bool(len(inputs))
-        probability = (
-            float(win_probability(inputs, params)[0]) if emitted else np.nan
-        )
+        probability = float(win_probability(inputs, params)[0]) if emitted else np.nan
         latency = perf_counter() - started
         rows.append(
             {
@@ -105,11 +105,13 @@ def stream_problems(events: pd.DataFrame, stored: pd.DataFrame) -> list[str]:
             f"game {game_id}: streamed {len(streamed)} probabilities but the "
             f"batch stored {len(stored)}"
         ]
-    if not np.array_equal(
-        streamed["play_index"].to_numpy(int), stored["play_index"].to_numpy(int)
-    ) or streamed["source_play_id"].astype(str).tolist() != stored[
-        "source_play_id"
-    ].astype(str).tolist():
+    if (
+        not np.array_equal(
+            streamed["play_index"].to_numpy(int), stored["play_index"].to_numpy(int)
+        )
+        or streamed["source_play_id"].astype(str).tolist()
+        != stored["source_play_id"].astype(str).tolist()
+    ):
         return [
             f"game {game_id}: streamed events do not line up with the stored "
             "play boundaries"

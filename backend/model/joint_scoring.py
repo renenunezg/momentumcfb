@@ -24,10 +24,7 @@ class JointScoringConfig:
     def __post_init__(self) -> None:
         if isnan(self.rating_half_life_weeks) or self.rating_half_life_weeks <= 0:
             raise ValueError("rating_half_life_weeks must be positive")
-        if (
-            not isfinite(self.strength_prior_sd_ppp)
-            or self.strength_prior_sd_ppp <= 0
-        ):
+        if not isfinite(self.strength_prior_sd_ppp) or self.strength_prior_sd_ppp <= 0:
             raise ValueError("strength_prior_sd_ppp must be positive")
         if not 0 <= self.covariance_shrinkage < 1:
             raise ValueError("covariance_shrinkage must be in [0, 1)")
@@ -76,18 +73,14 @@ def _regularized_covariance(
 
 
 def _team_catalog(games: pd.DataFrame) -> pd.DataFrame:
-    home = games[
-        ["home_team_id", "home_team", "home_classification"]
-    ].rename(
+    home = games[["home_team_id", "home_team", "home_classification"]].rename(
         columns={
             "home_team_id": "team_id",
             "home_team": "team",
             "home_classification": "classification",
         }
     )
-    away = games[
-        ["away_team_id", "away_team", "away_classification"]
-    ].rename(
+    away = games[["away_team_id", "away_team", "away_classification"]].rename(
         columns={
             "away_team_id": "team_id",
             "away_team": "team",
@@ -123,8 +116,7 @@ class JointScoringFit:
     @property
     def team_index(self) -> dict[int, int]:
         return {
-            int(team_id): index
-            for index, team_id in enumerate(self.teams["team_id"])
+            int(team_id): index for index, team_id in enumerate(self.teams["team_id"])
         }
 
     def ratings(self) -> list[TeamRating]:
@@ -143,8 +135,12 @@ class JointScoringFit:
                     model_version=MODEL_VERSION,
                     team_id=int(row.team_id),
                     team=row.team,
-                    offense_points=float(self.base_possessions * self.offense_ppp[index]),
-                    defense_points=float(self.base_possessions * self.defense_ppp[index]),
+                    offense_points=float(
+                        self.base_possessions * self.offense_ppp[index]
+                    ),
+                    defense_points=float(
+                        self.base_possessions * self.defense_ppp[index]
+                    ),
                     expected_possessions=float(
                         self.base_possessions + 0.5 * self.pace[index]
                     ),
@@ -160,8 +156,10 @@ class JointScoringFit:
         for game in schedule.itertuples():
             home = index[int(game.home_team_id)]
             away = index[int(game.away_team_id)]
-            home_field = 0.0 if bool(game.neutral_site) else (
-                self.base_possessions * self.hfa_ppp
+            home_field = (
+                0.0
+                if bool(game.neutral_site)
+                else (self.base_possessions * self.hfa_ppp)
             )
             possessions = self.base_possessions + 0.5 * (
                 self.pace[home] + self.pace[away]
@@ -182,7 +180,10 @@ class JointScoringFit:
             score_design[1, away] = self.base_possessions
             score_design[1, n_teams + home] = -self.base_possessions
             if not bool(game.neutral_site):
-                score_design[:, -1] = [0.5 * self.base_possessions, -0.5 * self.base_possessions]
+                score_design[:, -1] = [
+                    0.5 * self.base_possessions,
+                    -0.5 * self.base_possessions,
+                ]
             score_covariance = self.score_residual_covariance + (
                 score_design @ self.parameter_covariance @ score_design.T
             )
@@ -191,9 +192,7 @@ class JointScoringFit:
             margin_total_covariance = transform @ score_covariance @ transform.T
             margin_sd = float(np.sqrt(margin_total_covariance[0, 0]))
             total_sd = float(np.sqrt(margin_total_covariance[1, 1]))
-            correlation = float(
-                margin_total_covariance[0, 1] / (margin_sd * total_sd)
-            )
+            correlation = float(margin_total_covariance[0, 1] / (margin_sd * total_sd))
             projections.append(
                 GameProjection(
                     season=int(game.season),
@@ -290,9 +289,7 @@ def fit_joint_scoring(
 
     base_ppp = float(np.average(points_per_possession, weights=recency))
     centered_points = points_per_possession - base_ppp
-    centered_epa = epa_per_possession - np.average(
-        epa_per_possession, weights=recency
-    )
+    centered_epa = epa_per_possession - np.average(epa_per_possession, weights=recency)
     epa_variance = np.average(np.square(centered_epa), weights=recency)
     epa_scale = float(
         np.clip(
@@ -317,9 +314,7 @@ def fit_joint_scoring(
     prior_mean[-1] = HFA_PRIOR_POINTS / base_possessions
     prior_sd = np.full(2 * n_teams + 1, config.strength_prior_sd_ppp)
     prior_sd[-1] = HFA_PRIOR_SD_POINTS / base_possessions
-    parameters, covariance = _solve_ridge(
-        design, target, recency, prior_mean, prior_sd
-    )
+    parameters, covariance = _solve_ridge(design, target, recency, prior_mean, prior_sd)
     classifications = catalog["classification"].fillna("").str.lower()
     fbs_mask = classifications.eq("fbs").to_numpy()
     fcs_mask = classifications.eq("fcs").to_numpy()

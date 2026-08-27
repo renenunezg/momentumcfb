@@ -135,11 +135,7 @@ def _joint_student_t_nll(predictions: pd.DataFrame) -> np.ndarray:
     one_minus_rho_squared = 1.0 - np.square(correlation)
     covariance_mahalanobis = (
         np.square(margin_error / margin_sd)
-        - 2.0
-        * correlation
-        * margin_error
-        * total_error
-        / (margin_sd * total_sd)
+        - 2.0 * correlation * margin_error * total_error / (margin_sd * total_sd)
         + np.square(total_error / total_sd)
     ) / one_minus_rho_squared
     covariance_to_scale = (degrees_of_freedom - 2.0) / degrees_of_freedom
@@ -300,9 +296,7 @@ def walk_forward_season(
         projected["rating_half_life_weeks"] = config.rating_half_life_weeks
         projected["strength_prior_sd_ppp"] = config.strength_prior_sd_ppp
         projected["covariance_shrinkage"] = config.covariance_shrinkage
-        projected["student_t_degrees_of_freedom"] = (
-            config.student_t_degrees_of_freedom
-        )
+        projected["student_t_degrees_of_freedom"] = config.student_t_degrees_of_freedom
         projected["score_covariance_scale"] = config.score_covariance_scale
 
         projected["actual_margin"] = (
@@ -320,9 +314,7 @@ def walk_forward_season(
         projected["margin_error"] = (
             projected["home_margin"] - projected["actual_margin"]
         )
-        projected["total_error"] = (
-            projected["model_total"] - projected["actual_total"]
-        )
+        projected["total_error"] = projected["model_total"] - projected["actual_total"]
         frames.append(projected)
 
     if not frames:
@@ -357,11 +349,7 @@ def _joint_calibration_values(predictions: pd.DataFrame) -> dict[str, float]:
     one_minus_rho_squared = 1.0 - np.square(correlation)
     covariance_mahalanobis = (
         np.square(margin_error / margin_sd)
-        - 2.0
-        * correlation
-        * margin_error
-        * total_error
-        / (margin_sd * total_sd)
+        - 2.0 * correlation * margin_error * total_error / (margin_sd * total_sd)
         + np.square(total_error / total_sd)
     ) / one_minus_rho_squared
 
@@ -403,9 +391,7 @@ def _coverage_status(row: dict[str, object], include_covariance: bool) -> None:
             1.96 * np.sqrt(level * (1.0 - level) / n_games),
         )
         if abs(coverage - level) > tolerance:
-            failures.append(
-                f"{int(level * 100)}% coverage is {coverage:.1%}"
-            )
+            failures.append(f"{int(level * 100)}% coverage is {coverage:.1%}")
     if include_covariance:
         first_variance = float(row["standardized_variance_1"])
         second_variance = float(row["standardized_variance_2"])
@@ -565,7 +551,9 @@ def _candidate_row(
                     "margin_nll",
                     "total_nll",
                 ]
-            ].to_numpy(float).mean()
+            ]
+            .to_numpy(float)
+            .mean()
         ),
         "candidate_status": "valid",
         "diagnostic": "valid chronological predictions",
@@ -618,9 +606,8 @@ def run_calibration(
     candidate_configs: Iterable[JointScoringConfig] = CANDIDATE_CONFIGS,
     development_seasons: tuple[int, ...] = DEVELOPMENT_SEASONS,
     holdout_seasons: tuple[int, ...] = HOLDOUT_SEASONS,
-    strength_priors_by_season: Mapping[
-        int, dict[int, tuple[float, float]]
-    ] | None = None,
+    strength_priors_by_season: Mapping[int, dict[int, tuple[float, float]]]
+    | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> CalibrationResult:
     required_seasons = set(development_seasons) | set(holdout_seasons)
@@ -755,8 +742,7 @@ def run_calibration(
 
 def format_diagnostic(summary: pd.DataFrame) -> str:
     selected = summary[
-        summary["summary_type"].eq("hyperparameter")
-        & summary["selected"].eq(True)
+        summary["summary_type"].eq("hyperparameter") & summary["selected"].eq(True)
     ].iloc[0]
     holdout = summary[
         summary["summary_type"].eq("evaluation")
@@ -764,8 +750,7 @@ def format_diagnostic(summary: pd.DataFrame) -> str:
         & summary["scope"].eq("overall")
     ]
     lines = [
-        "Selected on 2019-2022 joint Student-t log loss: "
-        f"{selected['config_id']}.",
+        f"Selected on 2019-2022 joint Student-t log loss: {selected['config_id']}.",
         "Untouched 2023-2025 calibration:",
     ]
     for row in holdout.itertuples():

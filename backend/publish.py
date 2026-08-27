@@ -296,9 +296,7 @@ def load_game_projections(source: str, season: int, week: int) -> pd.DataFrame:
         else RAW_DIR / "games" / f"{season}.parquet"
     )
     if schedule_path.exists():
-        schedule = pd.read_parquet(
-            schedule_path, columns=["id", "conference_game"]
-        )
+        schedule = pd.read_parquet(schedule_path, columns=["id", "conference_game"])
         projections["conference_game"] = projections["game_id"].map(
             schedule.set_index("id")["conference_game"]
         )
@@ -309,10 +307,13 @@ def load_game_projections(source: str, season: int, week: int) -> pd.DataFrame:
 
 
 def _table_exists(conn, table: str) -> bool:
-    return conn.execute(
-        text("SELECT to_regclass(:table_name)"),
-        {"table_name": table},
-    ).scalar() is not None
+    return (
+        conn.execute(
+            text("SELECT to_regclass(:table_name)"),
+            {"table_name": table},
+        ).scalar()
+        is not None
+    )
 
 
 def _table_columns(conn, table: str) -> set[str]:
@@ -328,9 +329,7 @@ def _table_columns(conn, table: str) -> set[str]:
     }
 
 
-def load_market_comparisons(
-    source: str, season: int, week: int
-) -> pd.DataFrame:
+def load_market_comparisons(source: str, season: int, week: int) -> pd.DataFrame:
     directory = _artifact_dir(source, "market_comparisons")
     path = directory / f"{season}_{week:02d}.parquet"
     return _serving_frame(pd.read_parquet(path), MARKET_COMPARISONS_COLUMNS)
@@ -364,10 +363,7 @@ def publish_serving_anchors(season: int, anchor_week: int) -> int:
 
     with engine.begin() as conn:
         conn.execute(
-            text(
-                "DELETE FROM serving_anchors "
-                "WHERE season = :s AND anchor_week = :w"
-            ),
+            text("DELETE FROM serving_anchors WHERE season = :s AND anchor_week = :w"),
             {"s": season, "w": anchor_week},
         )
         rows.to_sql("serving_anchors", con=conn, if_exists="append", index=False)
@@ -486,10 +482,7 @@ def publish(
 
         if unit_ratings is not None and _table_exists(conn, "team_unit_ratings"):
             conn.execute(
-                text(
-                    "DELETE FROM team_unit_ratings "
-                    "WHERE season = :s AND week = :w"
-                ),
+                text("DELETE FROM team_unit_ratings WHERE season = :s AND week = :w"),
                 {"s": season, "w": week},
             )
             unit_ratings.to_sql(
@@ -501,11 +494,9 @@ def publish(
             {"ids": game_ids},
         )
         projection_columns = _table_columns(conn, "game_projections")
-        projections[[
-            column for column in projections.columns if column in projection_columns
-        ]].to_sql(
-            "game_projections", con=conn, if_exists="append", index=False
-        )
+        projections[
+            [column for column in projections.columns if column in projection_columns]
+        ].to_sql("game_projections", con=conn, if_exists="append", index=False)
 
         if market is not None:
             conn.execute(
@@ -535,8 +526,6 @@ def publish(
         if _table_exists(conn, "team_unit_ratings"):
             tables.insert(2, "team_unit_ratings")
         return {
-            table: int(
-                conn.execute(text(f"SELECT count(*) FROM {table}")).scalar()
-            )
+            table: int(conn.execute(text(f"SELECT count(*) FROM {table}")).scalar())
             for table in tables
         }

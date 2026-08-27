@@ -88,8 +88,7 @@ def load_play_feed(season: int, game_id: int) -> pd.DataFrame:
         plays = store.read_season_pbp(season)
     except FileNotFoundError as exc:
         raise MissingPlayFeed(
-            f"no play feed for game {game_id}: season {season} has no stored "
-            "plays yet"
+            f"no play feed for game {game_id}: season {season} has no stored plays yet"
         ) from exc
     feed = plays[plays["game_id"].eq(game_id)]
     if feed.empty:
@@ -117,9 +116,7 @@ def serve_game(
     anchor = anchors[anchors["game_id"].eq(game_id)]
     if anchor.empty:
         where = f"season {season}" + (f" week {week}" if week is not None else "")
-        raise ValueError(
-            f"no {source} serving anchor for game {game_id} in {where}"
-        )
+        raise ValueError(f"no {source} serving anchor for game {game_id} in {where}")
     params = load_frozen_params()
     feed = load_play_feed(season, game_id)
     events = replay_game(feed, anchor, params)

@@ -89,9 +89,7 @@ def strength_prior_means_from_ratings(
     return means
 
 
-def load_preseason_ratings(
-    season: int, week: int = 1
-) -> tuple[pd.DataFrame, str]:
+def load_preseason_ratings(season: int, week: int = 1) -> tuple[pd.DataFrame, str]:
     """Load the pure preseason prior locally or from the serving database."""
     try:
         ratings = store.read_processed(
@@ -184,10 +182,9 @@ def _latest_season_fit(season: int):
         store.read_processed("team_games", f"{season}.parquet"),
     )
     forecast_week = int(games["model_week"].max()) + 1
-    as_of = (
-        pd.to_datetime(games["start_date"], utc=True).max().to_pydatetime()
-        + timedelta(seconds=1)
-    )
+    as_of = pd.to_datetime(
+        games["start_date"], utc=True
+    ).max().to_pydatetime() + timedelta(seconds=1)
     return fit_joint_scoring(games, forecast_week, as_of)
 
 
@@ -252,9 +249,7 @@ def _previous_ratings(fitted) -> pd.DataFrame:
     classifications = fitted.teams[["team", "classification"]].rename(
         columns={"classification": "previous_classification"}
     )
-    frame = frame.merge(
-        classifications, on="team", how="left", validate="one_to_one"
-    )
+    frame = frame.merge(classifications, on="team", how="left", validate="one_to_one")
     return frame.rename(
         columns={
             "as_of": "previous_rating_as_of",
@@ -285,9 +280,7 @@ def _division_one_team_catalog(
 ) -> pd.DataFrame:
     source = teams.rename(columns={"school": "team", "id": "team_id"}).copy()
     source_columns = ["team_id", "team", "conference", "classification"]
-    source = source[
-        [column for column in source_columns if column in source.columns]
-    ]
+    source = source[[column for column in source_columns if column in source.columns]]
     for column in source_columns:
         if column not in source:
             source[column] = pd.NA
@@ -419,7 +412,9 @@ def _coach_continuity(
     return continuity
 
 
-def _build_ratings(season: int, previous_fit, sources: dict[str, pd.DataFrame]) -> pd.DataFrame:
+def _build_ratings(
+    season: int, previous_fit, sources: dict[str, pd.DataFrame]
+) -> pd.DataFrame:
     manifest = sources["manifest"]
     teams = _division_one_team_catalog(sources["teams"], sources["games"])
     if teams.empty:
@@ -428,9 +423,7 @@ def _build_ratings(season: int, previous_fit, sources: dict[str, pd.DataFrame]) 
     previous = _previous_ratings(previous_fit)
     ratings = teams.merge(previous, on="team", how="left")
     ratings["previous_rating_missing"] = ratings["previous_power_rating"].isna()
-    previous_means = previous.groupby("previous_classification").mean(
-        numeric_only=True
-    )
+    previous_means = previous.groupby("previous_classification").mean(numeric_only=True)
     for column in (
         "previous_offense_points",
         "previous_defense_points",
@@ -440,9 +433,7 @@ def _build_ratings(season: int, previous_fit, sources: dict[str, pd.DataFrame]) 
         classification_fallback = ratings["classification"].map(
             previous_means[column] if column in previous_means else {}
         )
-        ratings[column] = (
-            ratings[column].fillna(classification_fallback).fillna(0.0)
-        )
+        ratings[column] = ratings[column].fillna(classification_fallback).fillna(0.0)
     ratings["previous_expected_possessions"] = (
         ratings["previous_expected_possessions"]
         .fillna(
@@ -497,7 +488,8 @@ def _build_ratings(season: int, previous_fit, sources: dict[str, pd.DataFrame]) 
     }
     if "team" in returning:
         available = [
-            "team", *(column for column in returning_columns if column in returning)
+            "team",
+            *(column for column in returning_columns if column in returning),
         ]
         returning = returning[available].rename(columns=returning_columns)
     else:
@@ -515,7 +507,9 @@ def _build_ratings(season: int, previous_fit, sources: dict[str, pd.DataFrame]) 
         "qb_continuity", pd.Series(index=ratings.index, dtype=float)
     ).isna()
     ratings["returning_percent_ppa_z"] = _neutral_zscore(
-        ratings.get("returning_percent_ppa", pd.Series(index=ratings.index, dtype=float))
+        ratings.get(
+            "returning_percent_ppa", pd.Series(index=ratings.index, dtype=float)
+        )
     )
     ratings["qb_continuity_z"] = _neutral_zscore(
         ratings.get("qb_continuity", pd.Series(index=ratings.index, dtype=float))
@@ -555,15 +549,10 @@ def _build_ratings(season: int, previous_fit, sources: dict[str, pd.DataFrame]) 
         ratings[column] = ratings[column].fillna(0.0)
         ratings[f"{column}_z"] = _neutral_zscore(ratings[column])
 
-    coaches = _coach_continuity(
-        sources["coaches"], sources["prior_coaches"], season
-    )
+    coaches = _coach_continuity(sources["coaches"], sources["prior_coaches"], season)
     ratings = ratings.merge(coaches, on="team", how="left")
     ratings["coach_continuity_missing"] = (
-        ratings["coach_continuity_missing"]
-        .astype("boolean")
-        .fillna(True)
-        .astype(bool)
+        ratings["coach_continuity_missing"].astype("boolean").fillna(True).astype(bool)
     )
     coach_value = ratings["coach_continuity"].map(
         {True: COACH_CONTINUITY_POINTS, False: -COACH_CONTINUITY_POINTS}
@@ -647,9 +636,7 @@ def _build_ratings(season: int, previous_fit, sources: dict[str, pd.DataFrame]) 
         + ratings["injury_availability_missing"].astype(float) * 1.0**2
         + ratings["classification"].eq("fcs").astype(float) * 3.0**2
     )
-    ratings["power_rating_sd"] = np.sqrt(
-        BASE_OFFSEASON_POWER_SD**2 + missing_variance
-    )
+    ratings["power_rating_sd"] = np.sqrt(BASE_OFFSEASON_POWER_SD**2 + missing_variance)
     missing_columns = [
         "previous_rating_missing",
         "current_talent_missing",
@@ -782,9 +769,7 @@ def _project_games(
         margin_total_covariance = transform @ score_covariance @ transform.T
         margin_sd = float(np.sqrt(margin_total_covariance[0, 0]))
         total_sd = float(np.sqrt(margin_total_covariance[1, 1]))
-        correlation = float(
-            margin_total_covariance[0, 1] / (margin_sd * total_sd)
-        )
+        correlation = float(margin_total_covariance[0, 1] / (margin_sd * total_sd))
         projection = GameProjection(
             season=season,
             week=week,
@@ -949,8 +934,7 @@ def _market_comparisons(
                 projection.margin_sd if market_type == "spread" else projection.total_sd
             )
             scale = uncertainty * np.sqrt(
-                (projection.degrees_of_freedom - 2.0)
-                / projection.degrees_of_freedom
+                (projection.degrees_of_freedom - 2.0) / projection.degrees_of_freedom
             )
             row.update(
                 {
@@ -985,7 +969,10 @@ def _write_outputs(
 ) -> Path:
     timestamp = forecast_created_at.strftime("%Y%m%dT%H%M%S%fZ")
     log_directory = (
-        PROCESSED_DIR / "preseason" / "forecast_log" / f"{season}_{week:02d}_{timestamp}"
+        PROCESSED_DIR
+        / "preseason"
+        / "forecast_log"
+        / f"{season}_{week:02d}_{timestamp}"
     )
     for name, frame in outputs.items():
         store.write_processed(frame, "preseason", name, f"{season}_{week:02d}.parquet")
@@ -1011,16 +998,12 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
         "lines",
         "manifest",
     ]
-    sources = {
-        name: store.read_preseason_source(season, name) for name in source_names
-    }
+    sources = {name: store.read_preseason_source(season, name) for name in source_names}
     manifest = sources["manifest"]
     has_odds_api = manifest["source"].eq("odds_api").any()
     if has_odds_api:
         sources["odds_api"] = store.read_preseason_source(season, "odds_api")
-    source_snapshot_as_of = max(
-        pd.to_datetime(manifest["source_fetched_at"], utc=True)
-    )
+    source_snapshot_as_of = max(pd.to_datetime(manifest["source_fetched_at"], utc=True))
     forecast_created_at = pd.Timestamp(datetime.now(timezone.utc))
     previous_fit = _latest_season_fit(season - 1)
     carried_unit_ratings = _latest_unit_ratings(
@@ -1073,9 +1056,7 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
         "odds_match_coverage": odds_match_coverage,
         "source_manifest": manifest,
     }
-    log_directory = _write_outputs(
-        season, week, forecast_created_at, outputs
-    )
+    log_directory = _write_outputs(season, week, forecast_created_at, outputs)
     return PreseasonForecastResult(
         ratings=ratings,
         unit_ratings=unit_ratings,

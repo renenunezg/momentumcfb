@@ -38,10 +38,12 @@ def match_event(
     if candidates.empty:
         return None, 0.0
     candidates["match_score"] = candidates.apply(
-        lambda game: 0.5
-        * (
-            _name_score(home_team, game.home_team)
-            + _name_score(away_team, game.away_team)
+        lambda game: (
+            0.5
+            * (
+                _name_score(home_team, game.home_team)
+                + _name_score(away_team, game.away_team)
+            )
         ),
         axis=1,
     )
@@ -171,13 +173,11 @@ def compare_priced_offers(
         scale_by_market = {
             "spreads": projection.margin_sd
             * np.sqrt(
-                (projection.degrees_of_freedom - 2.0)
-                / projection.degrees_of_freedom
+                (projection.degrees_of_freedom - 2.0) / projection.degrees_of_freedom
             ),
             "totals": projection.total_sd
             * np.sqrt(
-                (projection.degrees_of_freedom - 2.0)
-                / projection.degrees_of_freedom
+                (projection.degrees_of_freedom - 2.0) / projection.degrees_of_freedom
             ),
         }
         candidates = []
@@ -209,9 +209,8 @@ def compare_priced_offers(
                     projection.degrees_of_freedom,
                 )
             )
-            expected_value = (
-                probability * _american_profit(float(offer.price))
-                - (1.0 - probability)
+            expected_value = probability * _american_profit(float(offer.price)) - (
+                1.0 - probability
             )
             candidates.append(
                 {
@@ -251,8 +250,7 @@ def compare_priced_offers(
             row.update({f"best_offer_{key}": value for key, value in best.items()})
             row["review_status"] = (
                 "requires_current_source_review"
-                if best["edge_points"] >= 4.0
-                and best["expected_value_per_unit"] > 0
+                if best["edge_points"] >= 4.0 and best["expected_value_per_unit"] > 0
                 else "below_material_review_threshold"
             )
         else:

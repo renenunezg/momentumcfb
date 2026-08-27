@@ -56,6 +56,7 @@ def load_serving_anchors(
         )
     if week is None:
         raise ValueError(f"anchor source {source!r} requires a projection week")
+    parts: tuple[str, ...]
     if source == PRESEASON_SOURCE:
         parts = ("preseason", "projections", f"{season}_{week:02d}.parquet")
     else:
@@ -100,14 +101,10 @@ def _projection_anchors(
     return _validated(frame, location)
 
 
-def _require_columns(
-    location: str, available: list[str], needed: list[str]
-) -> None:
+def _require_columns(location: str, available: list[str], needed: list[str]) -> None:
     missing = sorted(set(needed) - set(available))
     if missing:
-        raise ValueError(
-            f"{location} is missing anchor columns: {', '.join(missing)}"
-        )
+        raise ValueError(f"{location} is missing anchor columns: {', '.join(missing)}")
 
 
 def _validated(anchors: pd.DataFrame, origin: str) -> pd.DataFrame:

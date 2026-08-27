@@ -58,7 +58,7 @@ class OddsAPIClient:
             raise OddsAPIError("ODDS_API_KEY is not set")
         self.api_key = key
         self.regions = regions or os.getenv("ODDS_API_REGIONS") or "us"
-        configured = bookmakers or os.getenv("ODDS_API_BOOKMAKERS", "")
+        configured = bookmakers or os.getenv("ODDS_API_BOOKMAKERS") or ""
         self.bookmakers = tuple(
             value.strip() for value in configured.split(",") if value.strip()
         )
@@ -86,8 +86,7 @@ class OddsAPIClient:
         )
         if response.status_code != 200:
             raise OddsAPIError(
-                f"The Odds API returned {response.status_code}: "
-                f"{response.text[:300]}"
+                f"The Odds API returned {response.status_code}: {response.text[:300]}"
             )
         events = response.json()
         if not isinstance(events, list):
@@ -110,9 +109,7 @@ class OddsAPIClient:
             "commenceTimeFrom": self._utc_param(commence_from),
             "commenceTimeTo": self._utc_param(commence_to),
         }
-        events, response = self._get_events(
-            f"/sports/{NCAAF_SPORT_KEY}/events", params
-        )
+        events, response = self._get_events(f"/sports/{NCAAF_SPORT_KEY}/events", params)
         return EventsSnapshot(
             events=events,
             fetched_at=datetime.now(timezone.utc),
@@ -150,9 +147,7 @@ class OddsAPIClient:
             params["bookmakers"] = ",".join(self.bookmakers)
         else:
             params["regions"] = self.regions
-        events, response = self._get_events(
-            f"/sports/{NCAAF_SPORT_KEY}/odds", params
-        )
+        events, response = self._get_events(f"/sports/{NCAAF_SPORT_KEY}/odds", params)
         return OddsSnapshot(
             events=events,
             fetched_at=datetime.now(timezone.utc),
@@ -166,12 +161,13 @@ class OddsAPIClient:
         """Fetch provider game states (upcoming, in-play, completed) with scores."""
         if days_from is not None and not 1 <= days_from <= 3:
             raise ValueError("days_from must be between 1 and 3")
-        params = {"apiKey": self.api_key, "dateFormat": "iso"}
+        params: dict[str, str | int] = {
+            "apiKey": self.api_key,
+            "dateFormat": "iso",
+        }
         if days_from is not None:
             params["daysFrom"] = days_from
-        events, response = self._get_events(
-            f"/sports/{NCAAF_SPORT_KEY}/scores", params
-        )
+        events, response = self._get_events(f"/sports/{NCAAF_SPORT_KEY}/scores", params)
         return ScoreboardSnapshot(
             events=events,
             fetched_at=datetime.now(timezone.utc),

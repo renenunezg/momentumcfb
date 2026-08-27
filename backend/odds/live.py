@@ -234,17 +234,13 @@ def normalize_live_markets(markets: tuple[str, ...]) -> tuple[str, ...]:
         raise ValueError("live odds capture requires at least one market")
     unsupported = sorted(set(normalized) - SUPPORTED_LIVE_MARKETS)
     if unsupported:
-        raise ValueError(
-            "unsupported live odds markets: " + ", ".join(unsupported)
-        )
+        raise ValueError("unsupported live odds markets: " + ", ".join(unsupported))
     if "spreads" not in normalized:
         raise ValueError("live odds capture requires the spreads market")
     return normalized
 
 
-def live_poll_quota_cost(
-    markets: tuple[str, ...], days_from: int | None = None
-) -> int:
+def live_poll_quota_cost(markets: tuple[str, ...], days_from: int | None = None) -> int:
     """Maximum one-region cost for one odds and scores capture cycle."""
     scores_cost = 2 if days_from is not None else SCORES_COST
     return len(normalize_live_markets(markets)) + scores_cost
@@ -279,12 +275,8 @@ def load_division_one_schedule(season: int) -> pd.DataFrame:
 
 
 def division_one_schedule(games: pd.DataFrame) -> pd.DataFrame:
-    home = (
-        games["home_classification"].astype("string").str.lower().isin(DIVISION_ONE)
-    )
-    away = (
-        games["away_classification"].astype("string").str.lower().isin(DIVISION_ONE)
-    )
+    home = games["home_classification"].astype("string").str.lower().isin(DIVISION_ONE)
+    away = games["away_classification"].astype("string").str.lower().isin(DIVISION_ONE)
     schedule = games[home.fillna(False) | away.fillna(False)].copy()
     schedule = schedule.rename(columns={"id": "game_id"})
     return schedule[["game_id", "start_date", "home_team", "away_team"]].reset_index(
@@ -436,12 +428,8 @@ def build_live_snapshot(
                         }
                     )
 
-    events_frame = pd.DataFrame(event_rows, columns=EVENT_COLUMNS).astype(
-        EVENT_DTYPES
-    )
-    offers_frame = pd.DataFrame(offer_rows, columns=OFFER_COLUMNS).astype(
-        OFFER_DTYPES
-    )
+    events_frame = pd.DataFrame(event_rows, columns=EVENT_COLUMNS).astype(EVENT_DTYPES)
+    offers_frame = pd.DataFrame(offer_rows, columns=OFFER_COLUMNS).astype(OFFER_DTYPES)
 
     phase_counts = events_frame["phase"].value_counts()
     staleness = offers_frame["staleness_seconds"]
@@ -457,9 +445,7 @@ def build_live_snapshot(
                 "commence_from": query_window[0],
                 "commence_to": query_window[1],
                 "days_from": days_from,
-                "configured_bookmakers": json.dumps(
-                    list(odds.configured_bookmakers)
-                ),
+                "configured_bookmakers": json.dumps(list(odds.configured_bookmakers)),
                 "requested_markets": json.dumps(list(requested_markets)),
                 "odds_request_cost": odds.request_cost,
                 "odds_requests_used": odds.requests_used,
@@ -543,9 +529,7 @@ def record_failed_poll(
         row.update(
             {
                 "odds_fetched_at": odds.fetched_at,
-                "configured_bookmakers": json.dumps(
-                    list(odds.configured_bookmakers)
-                ),
+                "configured_bookmakers": json.dumps(list(odds.configured_bookmakers)),
                 "odds_request_cost": odds.request_cost,
                 "odds_requests_used": odds.requests_used,
                 "odds_requests_remaining": odds.requests_remaining,
@@ -563,9 +547,7 @@ def record_failed_poll(
     path = live_odds_dir(season) / "polls" / f"{snapshot_id}.parquet"
     if path.exists():
         raise FileExistsError(f"live snapshot {snapshot_id} already exists at {path}")
-    write_parquet(
-        pd.DataFrame([row], columns=POLL_COLUMNS).astype(POLL_DTYPES), path
-    )
+    write_parquet(pd.DataFrame([row], columns=POLL_COLUMNS).astype(POLL_DTYPES), path)
     return snapshot_id
 
 
@@ -636,8 +618,7 @@ def capture_live_snapshot(
     scores_cost = 2 if days_from is not None else SCORES_COST
     current_odds_cost = len(markets)
     future_cost = sum(
-        live_poll_quota_cost(planned, days_from)
-        for planned in future_poll_markets
+        live_poll_quota_cost(planned, days_from) for planned in future_poll_markets
     )
     remaining = discovery.requests_remaining
     reserved_cost = current_odds_cost + scores_cost + future_cost
@@ -654,10 +635,7 @@ def capture_live_snapshot(
         markets=markets,
         event_ids=tuple(relevant_event_ids),
     )
-    if (
-        odds.request_cost is None
-        or not 0 <= odds.request_cost <= current_odds_cost
-    ):
+    if odds.request_cost is None or not 0 <= odds.request_cost <= current_odds_cost:
         raise PartialPaidPollError(
             "odds response returned missing or unexpected request cost", odds
         )
@@ -722,10 +700,7 @@ def capture_live_snapshot(
         scoreboard = client.get_ncaaf_scores(days_from)
     except (OddsAPIError, requests.RequestException) as exc:
         raise PartialPaidPollError(str(exc), odds) from exc
-    if (
-        scoreboard.request_cost != scores_cost
-        or scoreboard.requests_remaining is None
-    ):
+    if scoreboard.request_cost != scores_cost or scoreboard.requests_remaining is None:
         raise PartialPaidPollError(
             "scores response returned missing or unexpected quota provenance",
             odds,
@@ -812,9 +787,7 @@ def run_live_polling(
     else:
         if len(poll_markets) != polls:
             raise ValueError("poll market plan must contain one entry per poll")
-        market_plan = tuple(
-            normalize_live_markets(markets) for markets in poll_markets
-        )
+        market_plan = tuple(normalize_live_markets(markets) for markets in poll_markets)
     client = OddsAPIClient()
     client.ensure_single_quota_region()
     consecutive_failures = 0

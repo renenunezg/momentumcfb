@@ -64,10 +64,7 @@ def ingest_cfbd_plays(
             df["pbp_source"] = "cfbd"
             write_parquet(
                 df,
-                RAW_DIR
-                / "pbp"
-                / str(season)
-                / f"{season_type}_{week:02d}.parquet",
+                RAW_DIR / "pbp" / str(season) / f"{season_type}_{week:02d}.parquet",
             )
             print(f"plays {season} {season_type} week {week}: {len(df)} rows")
 
@@ -93,12 +90,16 @@ def ingest_lines(client: CFBDClient, season: int) -> None:
 
 def ingest_talent(client: CFBDClient, season: int) -> None:
     rows = client.get("/talent", {"year": season})
-    write_parquet(to_snake(pd.DataFrame(rows)), RAW_DIR / "talent" / f"{season}.parquet")
+    write_parquet(
+        to_snake(pd.DataFrame(rows)), RAW_DIR / "talent" / f"{season}.parquet"
+    )
 
 
 def ingest_returning(client: CFBDClient, season: int) -> None:
     rows = client.get("/player/returning", {"year": season})
-    write_parquet(to_snake(pd.DataFrame(rows)), RAW_DIR / "returning" / f"{season}.parquet")
+    write_parquet(
+        to_snake(pd.DataFrame(rows)), RAW_DIR / "returning" / f"{season}.parquet"
+    )
 
 
 def ingest_preseason_sources(
@@ -149,9 +150,7 @@ def ingest_preseason_sources(
         odds = to_snake(pd.DataFrame(snapshot.events))
         odds["source_endpoint"] = "/v4/sports/americanfootball_ncaaf/odds"
         odds["source_fetched_at"] = fetched_at
-        odds["execution_eligibility_verified"] = bool(
-            snapshot.configured_bookmakers
-        )
+        odds["execution_eligibility_verified"] = bool(snapshot.configured_bookmakers)
         write_parquet(odds, destination / "odds_api.parquet")
         manifest_rows.append(
             {
