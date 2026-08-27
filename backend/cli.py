@@ -305,6 +305,29 @@ def parse_args(argv=None):
         help="skip the full refresh of the backtest history table",
     )
 
+    anchor_sync_commands = (
+        (
+            "publish-anchors",
+            "publish a stored serving anchor artifact to cfb.serving_anchors "
+            "so an ephemeral capture runner's output survives the job",
+        ),
+        (
+            "fetch-anchors",
+            "hydrate the local serving anchor artifact from "
+            "cfb.serving_anchors and prove it round-trips through the loader",
+        ),
+    )
+    for name, description in anchor_sync_commands:
+        anchor_sync = sub.add_parser(name, help=description)
+        anchor_sync.add_argument("--season", type=int, required=True)
+        anchor_sync.add_argument(
+            "--week",
+            type=int,
+            required=True,
+            help="artifact week: 0 is the frozen market capture, >= 1 a "
+            "projection artifact",
+        )
+
     return p.parse_args(argv)
 
 
@@ -1333,3 +1356,21 @@ def main(argv=None):
         )
         for table, count in stored.items():
             print(f"cfb.{table}: {count} rows stored")
+
+    elif args.command == "publish-anchors":
+        from backend.publish import publish_serving_anchors
+
+        count = publish_serving_anchors(args.season, args.week)
+        print(
+            f"cfb.serving_anchors: {count} rows stored for season "
+            f"{args.season} anchor week {args.week:02d}"
+        )
+
+    elif args.command == "fetch-anchors":
+        from backend.publish import fetch_serving_anchors
+
+        count = fetch_serving_anchors(args.season, args.week)
+        print(
+            f"hydrated {count} serving anchors for season {args.season} "
+            f"anchor week {args.week:02d} from cfb.serving_anchors"
+        )

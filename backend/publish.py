@@ -159,11 +159,34 @@ BACKTEST_PREDICTIONS_COLUMNS = [
     "actual_margin",
 ]
 
+# Serving anchor artifacts are keyed by artifact week: anchor_week 0 is the
+# frozen market closing-spread capture, anchor_week >= 1 is a projection
+# artifact for that week. The market columns are NULL on projection rows.
+SERVING_ANCHORS_COLUMNS = [
+    "season",
+    "anchor_week",
+    "game_id",
+    "model_week",
+    "home_margin",
+    "margin_sd",
+    "closing_spread",
+    "n_spread_offers",
+    "margin_sd_method",
+    "market_anchor_source",
+    "closing_snapshot_id",
+    "closing_fetched_at",
+    "latest_provider_update",
+]
+
+_SERVING_ANCHOR_CONTRACT = ["game_id", "model_week", "home_margin", "margin_sd"]
+
 _TIMESTAMP_COLUMNS = {
     "as_of",
     "start_date",
     "model_as_of",
     "best_offer_provider_last_update",
+    "closing_fetched_at",
+    "latest_provider_update",
 }
 
 
@@ -316,6 +339,82 @@ def load_market_comparisons(
 def load_backtest_predictions() -> pd.DataFrame:
     path = PROCESSED_DIR / "backtest" / "predictions_filtered.parquet"
     return _serving_frame(pd.read_parquet(path), BACKTEST_PREDICTIONS_COLUMNS)
+
+
+def publish_serving_anchors(season: int, anchor_week: int) -> int:
+    """Publish one stored serving anchor artifact to cfb.serving_anchors.
+
+    A CI capture runner is ephemeral, so the anchor artifact must reach the
+    database to survive the job; fetch_serving_anchors hydrates it back into
+    any local store.
+    """
+    from backend.db import engine
+    from backend.serving.anchors import (
+        load_serving_anchors,
+        serving_anchor_artifact,
+    )
+
+    # The loader round-trip is the artifact's validity proof; a frame that
+    # fails it must never reach serving consumers.
+    load_serving_anchors("serving", season=season, week=anchor_week)
+    parts = serving_anchor_artifact(season, anchor_week)
+    frame = pd.read_parquet(PROCESSED_DIR.joinpath(*parts))
+    frame = frame.assign(season=season, anchor_week=anchor_week)
+    rows = _serving_frame(frame, SERVING_ANCHORS_COLUMNS)
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "DELETE FROM serving_anchors "
+                "WHERE season = :s AND anchor_week = :w"
+            ),
+            {"s": season, "w": anchor_week},
+        )
+        rows.to_sql("serving_anchors", con=conn, if_exists="append", index=False)
+    with engine.connect() as conn:
+        return int(
+            conn.execute(
+                text(
+                    "SELECT count(*) FROM serving_anchors "
+                    "WHERE season = :s AND anchor_week = :w"
+                ),
+                {"s": season, "w": anchor_week},
+            ).scalar()
+        )
+
+
+def fetch_serving_anchors(season: int, anchor_week: int) -> int:
+    """Hydrate the local serving anchor artifact from cfb.serving_anchors."""
+    from backend.db import engine
+    from backend.etl import store
+    from backend.serving.anchors import (
+        load_serving_anchors,
+        serving_anchor_artifact,
+    )
+
+    with engine.connect() as conn:
+        frame = pd.read_sql_query(
+            text(
+                "SELECT "
+                + ", ".join(c for c in SERVING_ANCHORS_COLUMNS if c != "anchor_week")
+                + " FROM serving_anchors "
+                "WHERE season = :s AND anchor_week = :w ORDER BY game_id"
+            ),
+            conn,
+            params={"s": season, "w": anchor_week},
+        )
+    if frame.empty:
+        raise ValueError(
+            f"cfb.serving_anchors holds no rows for season {season} "
+            f"anchor week {anchor_week}"
+        )
+    # Projection artifacts carry no market columns; drop the all-NULL ones so
+    # the hydrated parquet matches the shape the builders write locally.
+    optional = [c for c in frame.columns if c not in _SERVING_ANCHOR_CONTRACT]
+    frame = frame.drop(columns=[c for c in optional if frame[c].isna().all()])
+    store.write_processed(frame, *serving_anchor_artifact(season, anchor_week))
+    stored = load_serving_anchors("serving", season=season, week=anchor_week)
+    return len(stored)
 
 
 def weekly_forecast_is_published(

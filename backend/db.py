@@ -50,6 +50,10 @@ def _pin_search_path(dbapi_connection, connection_record):
     # through the pooler; a session-level SET wins over both.
     with dbapi_connection.cursor() as cursor:
         cursor.execute("SET search_path TO cfb, public")
+        # The shared database pins extra_float_digits = 0, which truncates
+        # float8 text output to 12 significant digits; 3 restores exact
+        # round-trips for every double precision read through this engine.
+        cursor.execute("SET extra_float_digits = 3")
 
 
 _engine = None
