@@ -90,7 +90,7 @@ def evaluate_market_anchor(
             f"{overall['baseline_log_loss']:.5f} -> {overall['log_loss']:.5f} "
             f"({overall['log_loss_delta']:+.5f}; Brier "
             f"{overall['brier_delta']:+.5f}); the pregame anchor is the "
-            "binding constraint on in-game accuracy — effort belongs on the "
+            "binding constraint on in-game accuracy; effort belongs on the "
             "anchor, not on further in-game adjustments"
         )
     else:

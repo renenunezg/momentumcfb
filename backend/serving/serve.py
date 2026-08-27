@@ -1,7 +1,7 @@
 """Score one game from a play feed and serving anchors alone.
 
 This is the forward-looking serving entry point: everything it reads is
-available before a game ends — the pregame anchor projection through
+available before a game ends, from the pregame anchor projection through
 ``load_serving_anchors``, the frozen baseline parameters, and the game's
 plays as they arrive. It never opens the stored baseline predictions, so a
 season with no batch scoring run (2026) is served exactly like one that has

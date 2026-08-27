@@ -64,7 +64,7 @@ def build_serving_inputs(
 
     This is the live serving contract: only play states and the pregame
     anchor projection (game_id, model_week, home_margin, margin_sd) are
-    read — never actual final scores — so it can score a game whose result
+    read, never actual final scores, so it can score a game whose result
     is unknown.
     """
     missing = sorted(set(SERVING_ANCHOR_COLUMNS) - set(anchors.columns))
