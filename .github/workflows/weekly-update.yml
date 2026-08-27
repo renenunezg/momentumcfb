@@ -1,10 +1,13 @@
 name: Weekly CFB update
 
 on:
-  schedule:
-    # Monday is the normal post-Saturday update. Tuesday is the guarded
-    # recovery run for the long opening week or delayed source data.
-    - cron: "17 18 * 1,8-12 1,2"
+  # Primary trigger: Supabase pg_cron (cfb-weekly-update-dispatch) fires
+  # this via repository_dispatch Mondays and Tuesdays at 18:17 UTC,
+  # bypassing GitHub's unreliable scheduler. Monday is the normal
+  # post-Saturday update; Tuesday is the guarded recovery run for the
+  # long opening week or delayed source data.
+  repository_dispatch:
+    types: [weekly-update]
   workflow_dispatch:
     inputs:
       season:

@@ -1,15 +1,15 @@
 name: Opening kickoff capture
 
 on:
-  schedule:
-    # Friday evening runs publish the final pre-kickoff forecast so the
-    # site's lines are up the night before. Saturday runs refresh again,
-    # then poll across the first market-covered kickoff window to freeze
-    # the closing spread. Week 1 spans two weekends, so each gets a pair.
-    - cron: "0 23 28 8 *"
-    - cron: "30 13 29 8 *"
-    - cron: "0 23 4 9 *"
-    - cron: "30 13 5 9 *"
+  # Primary trigger: Supabase pg_cron (cfb-kickoff-*-dispatch jobs) fires
+  # these via repository_dispatch on the minute, bypassing GitHub's
+  # unreliable scheduler. Same pg_cron + Vault PAT mechanism as mlbmodel.
+  # kickoff-forecast fires Friday 15:00 UTC to publish the pre-kickoff
+  # lines by Friday morning PT; kickoff-capture fires Saturday 13:30 UTC
+  # to poll across the first market-covered kickoff window and freeze the
+  # closing spread. Week 1 spans two weekends, so each gets a pair.
+  repository_dispatch:
+    types: [kickoff-forecast, kickoff-capture]
   workflow_dispatch:
     inputs:
       mode:
@@ -64,11 +64,10 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             mode="${{ inputs.mode }}"
+          elif [[ "${{ github.event.action }}" == "kickoff-capture" ]]; then
+            mode="capture"
           else
-            case "${{ github.event.schedule }}" in
-              "30 13 "*) mode="capture" ;;
-              *) mode="forecast" ;;
-            esac
+            mode="forecast"
           fi
           echo "MODE=$mode" >> "$GITHUB_ENV"
           if [[ -n "$REQUESTED_SEASON" ]]; then
