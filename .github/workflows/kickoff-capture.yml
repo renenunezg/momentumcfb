@@ -101,6 +101,16 @@ jobs:
       - name: Run live odds regression gate
         run: poetry run pytest tests/test_live_odds.py -q
 
+      # The preseason forecast carries the prior season's final fit forward,
+      # so an ephemeral runner must rebuild that season's games and features
+      # from CFBD before forecasting.
+      - name: Rebuild prior season inputs
+        shell: bash
+        run: |
+          prior=$((SEASON - 1))
+          poetry run python -m backend ingest --seasons "$prior"
+          poetry run python -m backend features --seasons "$prior"
+
       # --with-odds-api buys the two-market Odds API snapshot (2 credits):
       # the adopted market source for the pre-kickoff comparison; the CFBD
       # lines feed alone covers too few games and carries no timestamps.
