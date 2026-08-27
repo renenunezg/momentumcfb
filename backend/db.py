@@ -23,13 +23,9 @@ def _is_write_statement(statement: str) -> bool:
 
 def writes_allowed() -> bool:
     """DATABASE_URL is the live production Supabase, not a dev copy, so a bare
-    local run is denied by default. CI opts in automatically (GitHub Actions
-    sets GITHUB_ACTIONS=true); a human sets MOMENTUMCFB_DB_WRITES=1 to mutate
-    production intentionally."""
-    return (
-        os.getenv("GITHUB_ACTIONS") == "true"
-        or os.getenv("MOMENTUMCFB_DB_WRITES") == "1"
-    )
+    run is denied by default. Every writer, including GitHub Actions, must set
+    MOMENTUMCFB_DB_WRITES=1 to mutate production intentionally."""
+    return os.getenv("MOMENTUMCFB_DB_WRITES") == "1"
 
 
 def _block_unauthorized_writes(
@@ -39,8 +35,7 @@ def _block_unauthorized_writes(
         raise RuntimeError(
             "Refusing to write to the production database (DATABASE_URL is "
             "the live Supabase). Re-run with MOMENTUMCFB_DB_WRITES=1 to "
-            "mutate production intentionally. CI runs are allowed "
-            "automatically."
+            "mutate production intentionally."
         )
 
 

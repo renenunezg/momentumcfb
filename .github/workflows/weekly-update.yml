@@ -93,6 +93,8 @@ jobs:
 
       - name: Retrain and publish next week
         shell: bash
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
         run: |
           arguments=(--season "$SEASON")
           if [[ -n "$FORECAST_WEEK" ]]; then
