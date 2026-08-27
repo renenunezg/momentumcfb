@@ -125,11 +125,15 @@ jobs:
           --season "$SEASON" --week 1 --source preseason
 
       - name: Publish serving tables
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
         run: >-
           poetry run python -m backend publish
           --season "$SEASON" --week 1 --skip-backtest
 
       - name: Publish week 1 serving anchors
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
         run: poetry run python -m backend publish-anchors --season "$SEASON" --week 1
 
       # The kickoff preflight needs at least one stored poll for target
@@ -159,6 +163,8 @@ jobs:
 
       - name: Publish market serving anchors
         if: env.MODE == 'capture'
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
         run: poetry run python -m backend publish-anchors --season "$SEASON" --week 0
 
       - name: Preserve audit artifacts
