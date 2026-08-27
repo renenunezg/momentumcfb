@@ -5,15 +5,25 @@ CLAUDE.md
 # Secrets and local configuration
 .env
 .env.*
+!.env.example
 frontend/.env*
 .claude/
 .cursor/
 .python-version
 
+# Frontend source lives in the momentumweb repository
+frontend/
+
 # Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
 venv/
 env/
 

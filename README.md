@@ -55,6 +55,7 @@ CFBD lines remain an audit source when timestamped market data is unavailable.
 
 Raw and processed Parquet artifacts are stored under `backend/data/` and are not committed.
 This keeps provider data, generated predictions, and model artifacts out of Git while leaving the pipeline and fixture-based tests reproducible.
+A compact aggregate evaluation export and a synthetic serving fixture are available under [`examples/`](examples/).
 
 ```text
 CFBD data -> raw Parquet -> possession and scoring features -> model artifacts
@@ -73,7 +74,7 @@ backend/odds/       Market capture, freshness, quota, and kickoff validation
 backend/serving/    Outcome-free anchors, replay, serving, and verification
 backend/publish.py  Supabase publication boundary
 tests/              Production-critical regression and acceptance tests
-sql/                CFB schema extensions
+sql/                Reproducible CFB database schema
 ```
 
 ## Local setup
@@ -84,14 +85,10 @@ Python 3.11 or 3.12 and Poetry are required.
 poetry install --no-root
 ```
 
-Create a local `.env` only for the services used by the command you plan to run.
+Copy the environment template, then fill only the services used by the command you plan to run.
 
-```dotenv
-CFBD_API_KEY=
-ODDS_API_KEY=
-ODDS_API_BOOKMAKERS=
-ODDS_API_REGIONS=
-DATABASE_URL=
+```bash
+cp .env.example .env
 ```
 
 `DATABASE_URL` points at the production Supabase project.
@@ -104,15 +101,21 @@ poetry run python -m backend ingest --seasons 2025
 poetry run python -m backend features --seasons 2025
 poetry run python -m backend calibrate
 poetry run python -m backend preseason --season 2026 --week 1 --refresh
+poetry run ruff format --check .
+poetry run ruff check .
+poetry run mypy
 poetry run pytest -q
 ```
 
 Run `poetry run python -m backend --help` for the complete command list.
 
+The repository is released under the [MIT License](LICENSE).
+
 ## Production workflows
 
 `.github/workflows/weekly-update.yml` refreshes completed-season data, rebuilds features, fits the next unstarted model week, and publishes only after readiness checks pass.
 `.github/workflows/kickoff-capture.yml` refreshes the opening forecast and captures the final verified pregame market snapshot around kickoff.
+`.github/workflows/ci.yml` installs the locked environment, validates metadata, checks formatting and linting, type-checks production boundaries, compiles the source, and runs the test suite for every pull request and push to `main`.
 
 Publishing is a separate, explicit boundary.
 Local model and evaluation commands do not require database write access.
