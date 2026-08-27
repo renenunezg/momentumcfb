@@ -110,10 +110,10 @@ GARBAGE_MARGIN = {1: 43, 2: 38, 3: 28}
 GARBAGE_MARGIN_LATE = 22
 EXPLOSIVE_EPA = 1.0
 
-CLOCK_MANAGEMENT_PATTERN = r"\bkneel(?:ed|ing|s)?\b|takes? a knee|\bspik(?:e|ed|es|ing)\b"
-SPECIAL_TEAMS_TEXT_PATTERN = (
-    r"\bkickoff\b|\bpunt(?:ed|s|ing)?\b|\bfield goal\b"
+CLOCK_MANAGEMENT_PATTERN = (
+    r"\bkneel(?:ed|ing|s)?\b|takes? a knee|\bspik(?:e|ed|es|ing)\b"
 )
+SPECIAL_TEAMS_TEXT_PATTERN = r"\bkickoff\b|\bpunt(?:ed|s|ing)?\b|\bfield goal\b"
 ADMINISTRATIVE_TEXT_PATTERN = (
     r"^end of (?:the )?(?:first|second|third|fourth|[1-4](?:st|nd|rd|th)) quarter"
     r"|^end of (?:ot|overtime|game|half|regulation)"
@@ -199,9 +199,7 @@ def classify_plays(plays: pd.DataFrame) -> pd.DataFrame:
         np.nan,
     )
     if "game_play_number" in df:
-        df["game_play_number"] = pd.to_numeric(
-            df["game_play_number"], errors="coerce"
-        )
+        df["game_play_number"] = pd.to_numeric(df["game_play_number"], errors="coerce")
         sort_columns = ["game_id", "game_play_number", "_source_order"]
     else:
         sort_columns = [
@@ -253,8 +251,8 @@ def classify_plays(plays: pd.DataFrame) -> pd.DataFrame:
     df["is_competitive"] = (
         df["is_scrimmage"] & df["epa"].notna() & ~df["is_garbage_time"]
     )
-    df["is_non_turnover_efficiency"] = (
-        df["is_competitive"] & ~df["play_type"].isin(TURNOVER_TYPES)
+    df["is_non_turnover_efficiency"] = df["is_competitive"] & ~df["play_type"].isin(
+        TURNOVER_TYPES
     )
     source_rush = _source_flag(df, "is_rush_source")
     source_pass = _source_flag(df, "is_pass_source")
@@ -269,9 +267,7 @@ def classify_plays(plays: pd.DataFrame) -> pd.DataFrame:
     df["is_turnover"] = df["is_scrimmage"] & (
         source_turnover | df["play_type"].isin(TURNOVER_TYPES)
     )
-    df["is_sack"] = df["is_scrimmage"] & (
-        source_sack | df["play_type"].eq("Sack")
-    )
+    df["is_sack"] = df["is_scrimmage"] & (source_sack | df["play_type"].eq("Sack"))
     df["is_explosive"] = df["is_competitive"] & df["epa"].gt(EXPLOSIVE_EPA)
     df["is_offensive_touchdown"] = (
         df["is_scrimmage"]
@@ -322,18 +318,16 @@ def build_possessions(plays: pd.DataFrame) -> pd.DataFrame:
         | scrimmage["boundary_before"].ne(previous_boundary)
         | scrimmage["source_drive_id"].ne(previous_drive)
     )
-    scrimmage["possession_number"] = new_possession.groupby(
-        scrimmage["game_id"]
-    ).cumsum().astype(int)
+    scrimmage["possession_number"] = (
+        new_possession.groupby(scrimmage["game_id"]).cumsum().astype(int)
+    )
     scrimmage["possession_id"] = (
         scrimmage["game_id"].astype(str)
         + ":"
         + scrimmage["possession_number"].astype(str)
     )
 
-    scrimmage["competitive_epa"] = scrimmage["epa"].where(
-        scrimmage["is_competitive"]
-    )
+    scrimmage["competitive_epa"] = scrimmage["epa"].where(scrimmage["is_competitive"])
     scrimmage["non_turnover_epa"] = scrimmage["epa"].where(
         scrimmage["is_non_turnover_efficiency"]
     )
@@ -347,9 +341,9 @@ def build_possessions(plays: pd.DataFrame) -> pd.DataFrame:
     scrimmage["early_down_epa"] = scrimmage["epa"].where(
         scrimmage["is_competitive"] & scrimmage["down"].isin([1, 2])
     )
-    scrimmage["opponent_40"] = (
-        ~scrimmage["is_garbage_time"] & scrimmage["yards_to_goal"].le(40)
-    )
+    scrimmage["opponent_40"] = ~scrimmage["is_garbage_time"] & scrimmage[
+        "yards_to_goal"
+    ].le(40)
 
     keys = ["game_id", "possession_number"]
     grouped = scrimmage.groupby(keys, sort=True)
@@ -414,12 +408,14 @@ def build_possessions(plays: pd.DataFrame) -> pd.DataFrame:
     out["early_down_epa_per_play"] = (
         out["early_down_epa_total"] / out["early_down_plays"]
     )
-    span = (
-        out["end_elapsed_seconds"] - out["start_elapsed_seconds"]
-    ).where(out["start_period"].le(4) & out["end_period"].le(4))
+    span = (out["end_elapsed_seconds"] - out["start_elapsed_seconds"]).where(
+        out["start_period"].le(4) & out["end_period"].le(4)
+    )
     out["scrimmage_span_seconds"] = span.where(span.ge(0))
-    out["timed_play_intervals"] = (out["scrimmage_plays"] - 1).clip(lower=0).where(
-        out["scrimmage_span_seconds"].notna(), 0
+    out["timed_play_intervals"] = (
+        (out["scrimmage_plays"] - 1)
+        .clip(lower=0)
+        .where(out["scrimmage_span_seconds"].notna(), 0)
     )
     out["seconds_per_play"] = (
         out["scrimmage_span_seconds"] / out["timed_play_intervals"]
@@ -476,7 +472,9 @@ def _aggregate_side(
         out["scrimmage_span_seconds"] / out["timed_play_intervals"]
     ).where(out["timed_play_intervals"].gt(0))
 
-    value_columns = [column for column in out.columns if column not in keys + ["opponent"]]
+    value_columns = [
+        column for column in out.columns if column not in keys + ["opponent"]
+    ]
     out = out.rename(columns={column: f"{prefix}_{column}" for column in value_columns})
     return out
 
@@ -518,9 +516,7 @@ def build_team_games(possessions: pd.DataFrame) -> pd.DataFrame:
     out["game_possessions"] = (
         out["offense_possessions"] + out["defense_possessions"]
     ) / 2
-    out["possession_balance"] = (
-        out["offense_possessions"] - out["defense_possessions"]
-    )
+    out["possession_balance"] = out["offense_possessions"] - out["defense_possessions"]
     out["game_plays_per_possession"] = (
         out["offense_scrimmage_plays"] + out["defense_scrimmage_plays"]
     ) / (out["offense_possessions"] + out["defense_possessions"])

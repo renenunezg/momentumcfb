@@ -32,7 +32,9 @@ def _mini_season() -> pd.DataFrame:
     ]
     rows = []
     for game_id, matchup in enumerate(matchups, start=100):
-        week, home, away, home_points, away_points, home_epa, away_epa, neutral = matchup
+        week, home, away, home_points, away_points, home_epa, away_epa, neutral = (
+            matchup
+        )
         rows.append(
             {
                 "game_id": game_id,
@@ -97,11 +99,14 @@ def test_joint_model_is_leak_free_and_reconciles_outputs():
     fcs_ratings["classification"] = fcs_ratings["team_id"].map(classifications)
     assert set(fcs_ratings["classification"]) == {"fbs", "fcs"}
     assert len(fbs_calibration_cohort(fcs_games)) == 3
-    assert abs(
-        fcs_ratings.loc[
-            fcs_ratings["classification"].eq("fbs"), "power_rating"
-        ].mean()
-    ) < 1e-10
+    assert (
+        abs(
+            fcs_ratings.loc[
+                fcs_ratings["classification"].eq("fbs"), "power_rating"
+            ].mean()
+        )
+        < 1e-10
+    )
 
     prior_fit = fit_joint_scoring(
         games,

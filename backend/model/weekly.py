@@ -121,13 +121,10 @@ def _validate_weekly_inputs(
             for row in incomplete_prior.head(8).itertuples()
         )
         raise WeeklyForecastNotReady(
-            f"{len(incomplete_prior)} earlier D1 games are not complete: "
-            f"{descriptions}"
+            f"{len(incomplete_prior)} earlier D1 games are not complete: {descriptions}"
         )
 
-    prior_completed = games[
-        games["model_week"].lt(forecast_week) & completed
-    ]
+    prior_completed = games[games["model_week"].lt(forecast_week) & completed]
     missing_features = prior_completed[
         prior_completed[SCORING_COLUMNS].isna().any(axis=1)
     ]
@@ -162,12 +159,10 @@ def _validate_weekly_inputs(
     target = games[games["model_week"].eq(forecast_week)].copy()
     if target.empty:
         raise WeeklyForecastNotReady(
-            f"no unplayed future D1 games are scheduled for model Week "
-            f"{forecast_week}"
+            f"no unplayed future D1 games are scheduled for model Week {forecast_week}"
         )
     started_target = target[
-        target["completed"].fillna(False).astype(bool)
-        | target["start_date"].le(as_of)
+        target["completed"].fillna(False).astype(bool) | target["start_date"].le(as_of)
     ]
     if not started_target.empty:
         descriptions = ", ".join(
@@ -180,9 +175,7 @@ def _validate_weekly_inputs(
     return target, missing_features
 
 
-def _team_context(
-    games: pd.DataFrame, preseason_ratings: pd.DataFrame
-) -> pd.DataFrame:
+def _team_context(games: pd.DataFrame, preseason_ratings: pd.DataFrame) -> pd.DataFrame:
     home = games[
         [
             "home_team_id",
@@ -226,9 +219,7 @@ def _team_context(
         "team_id", keep="last"
     )
     context = schedule.merge(prior, on="team_id", how="left", validate="one_to_one")
-    context["conference"] = context["schedule_conference"].fillna(
-        context["conference"]
-    )
+    context["conference"] = context["schedule_conference"].fillna(context["conference"])
     context["classification"] = context["schedule_classification"].fillna(
         context["classification"]
     )
@@ -249,17 +240,13 @@ def _decorate_outputs(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     by_team = context.set_index("team_id")
     ratings["conference"] = ratings["team_id"].map(by_team["conference"])
-    ratings["classification"] = ratings["team_id"].map(
-        by_team["classification"]
-    )
+    ratings["classification"] = ratings["team_id"].map(by_team["classification"])
     ratings["missing_input_count"] = ratings["team_id"].map(
         by_team["missing_input_count"]
     )
 
     by_game = target.set_index("game_id")
-    projections["start_date"] = projections["game_id"].map(
-        by_game["start_date"]
-    )
+    projections["start_date"] = projections["game_id"].map(by_game["start_date"])
     projections["home_classification"] = projections["game_id"].map(
         by_game["home_classification"]
     )
@@ -288,9 +275,7 @@ def _odds_frames(odds_client, target: pd.DataFrame):
     )
     events = pd.DataFrame(snapshot.events)
     events["source_fetched_at"] = snapshot.fetched_at.isoformat()
-    events["execution_eligibility_verified"] = bool(
-        snapshot.configured_bookmakers
-    )
+    events["execution_eligibility_verified"] = bool(snapshot.configured_bookmakers)
     offers, matches = flatten_odds_api_offers(events, target)
     return events, offers, matches, snapshot
 
@@ -304,10 +289,7 @@ def _write_outputs(
     filename = f"{season}_{week:02d}.parquet"
     timestamp = created_at.strftime("%Y%m%dT%H%M%S%fZ")
     log_directory = (
-        PROCESSED_DIR
-        / "weekly"
-        / "forecast_log"
-        / f"{season}_{week:02d}_{timestamp}"
+        PROCESSED_DIR / "weekly" / "forecast_log" / f"{season}_{week:02d}_{timestamp}"
     )
     for name, frame in outputs.items():
         store.write_processed(frame, name, filename)
@@ -353,9 +335,7 @@ def run_weekly_forecast(
             f"projected {len(projections)} of {len(target)} eligible games"
         )
     context = _team_context(games, preseason_ratings)
-    ratings, projections = _decorate_outputs(
-        ratings, projections, target, context
-    )
+    ratings, projections = _decorate_outputs(ratings, projections, target, context)
 
     unit_games = store.read_processed("unit_games", f"{season}.parquet")
     units = fit_unit_ratings(
@@ -369,9 +349,7 @@ def run_weekly_forecast(
     unit_ratings["unit_history_missing"] = False
 
     odds_events, offers, matches, snapshot = _odds_frames(odds_client, target)
-    priced_spreads = offers[
-        offers["market"].eq("spreads") & offers["point"].notna()
-    ]
+    priced_spreads = offers[offers["market"].eq("spreads") & offers["point"].notna()]
     if require_market and priced_spreads.empty:
         raise ValueError(
             "the Odds API returned no priced spread matched to the forecast week"

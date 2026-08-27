@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 
-
 DIVISION_ONE = {"fbs", "fcs"}
 SCORING_COLUMNS = [
     "home_points",
@@ -28,9 +27,7 @@ def _division_one_schedule(games: pd.DataFrame) -> pd.DataFrame:
         }
     )
     schedule["start_date"] = pd.to_datetime(schedule["start_date"], utc=True)
-    max_regular_week = schedule.loc[
-        schedule["season_type"].eq("regular"), "week"
-    ].max()
+    max_regular_week = schedule.loc[schedule["season_type"].eq("regular"), "week"].max()
     if pd.isna(max_regular_week):
         raise ValueError("the schedule has no regular-season games")
     schedule["model_week"] = np.where(
@@ -52,9 +49,7 @@ def _split_week_zero(schedule: pd.DataFrame) -> pd.DataFrame:
     cluster model week 0 so its completed games can train the Week 1 fit.
     """
     out = schedule.copy()
-    first_week = out[
-        out["season_type"].eq("regular") & out["week"].eq(1)
-    ]
+    first_week = out[out["season_type"].eq("regular") & out["week"].eq(1)]
     starts = first_week["start_date"].drop_duplicates().sort_values()
     if len(starts) < 2:
         return out
@@ -106,9 +101,7 @@ def _join_scoring_features(
     )
     out = schedule.merge(
         home, on=["game_id", "home_team"], how="left", validate="one_to_one"
-    ).merge(
-        away, on=["game_id", "away_team"], how="left", validate="one_to_one"
-    )
+    ).merge(away, on=["game_id", "away_team"], how="left", validate="one_to_one")
     out["game_possessions"] = out[
         ["home_game_possessions", "away_game_possessions"]
     ].mean(axis=1)
@@ -118,9 +111,7 @@ def _join_scoring_features(
     out["away_epa_per_possession"] = (
         out["away_offense_epa_total"] / out["away_offense_possessions"]
     )
-    return out.sort_values(
-        ["start_date", "game_id"], kind="stable", ignore_index=True
-    )
+    return out.sort_values(["start_date", "game_id"], kind="stable", ignore_index=True)
 
 
 def build_weekly_scoring_games(
@@ -131,9 +122,7 @@ def build_weekly_scoring_games(
     return _join_scoring_features(schedule, team_games)
 
 
-def build_scoring_games(
-    games: pd.DataFrame, team_games: pd.DataFrame
-) -> pd.DataFrame:
+def build_scoring_games(games: pd.DataFrame, team_games: pd.DataFrame) -> pd.DataFrame:
     """Join completed Division I schedules and possession features by game."""
     schedule = _division_one_schedule(games)
     out = _join_scoring_features(schedule, team_games)

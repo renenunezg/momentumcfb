@@ -1,5 +1,4 @@
 import pandas as pd
-import pytest
 
 from backend.features import ingame
 
@@ -46,25 +45,58 @@ def _game_plays():
             _play(1, 1, 15, 0, HOME, "Kickoff"),
             _play(2, 1, 14, 30, AWAY, "Rush", drive_number=2),
             _play(
-                3, 1, 13, 50, AWAY, "Passing Touchdown",
-                drive_number=2, offense_score=7, scoring=True,
+                3,
+                1,
+                13,
+                50,
+                AWAY,
+                "Passing Touchdown",
+                drive_number=2,
+                offense_score=7,
+                scoring=True,
             ),
             _play(
-                4, 2, 8, 0, AWAY, "Timeout",
-                drive_number=3, offense_score=7, offense_timeouts=2,
+                4,
+                2,
+                8,
+                0,
+                AWAY,
+                "Timeout",
+                drive_number=3,
+                offense_score=7,
+                offense_timeouts=2,
             ),
             # Pick six thrown by the home offense: points land in defense_score.
             _play(
-                5, 2, 7, 40, HOME, "Interception Return Touchdown",
-                drive_number=4, defense_score=14, scoring=True,
+                5,
+                2,
+                7,
+                40,
+                HOME,
+                "Interception Return Touchdown",
+                drive_number=4,
+                defense_score=14,
+                scoring=True,
             ),
             _play(
-                6, 4, 0, 30, HOME, "Rush",
-                drive_number=5, defense_score=14,
+                6,
+                4,
+                0,
+                30,
+                HOME,
+                "Rush",
+                drive_number=5,
+                defense_score=14,
             ),
             _play(
-                7, 5, 0, 0, HOME, "Rush",
-                drive_number=6, defense_score=14,
+                7,
+                5,
+                0,
+                0,
+                HOME,
+                "Rush",
+                drive_number=6,
+                defense_score=14,
             ),
         ]
     )

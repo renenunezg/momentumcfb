@@ -55,9 +55,7 @@ def test_ingest_season_fetches_and_labels_cfbd_plays(tmp_path, monkeypatch):
 def test_read_season_pbp_combines_only_cfbd_weekly_snapshots(tmp_path, monkeypatch):
     season_dir = tmp_path / "pbp" / "2025"
     season_dir.mkdir(parents=True)
-    pd.DataFrame({"id": [1]}).to_parquet(
-        season_dir / "regular_01.parquet", index=False
-    )
+    pd.DataFrame({"id": [1]}).to_parquet(season_dir / "regular_01.parquet", index=False)
     pd.DataFrame({"id": [2], "pbp_source": ["cfbd"]}).to_parquet(
         season_dir / "postseason_01.parquet", index=False
     )

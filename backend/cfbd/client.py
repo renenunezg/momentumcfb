@@ -19,6 +19,8 @@ class CFBDClient:
         self.session.headers["Authorization"] = f"Bearer {key}"
 
     def get(self, path: str, params: dict | None = None, retries: int = 3) -> list:
+        if retries < 1:
+            raise ValueError("retries must be positive")
         url = f"{CFBD_BASE_URL}{path}"
         for attempt in range(retries):
             resp = self.session.get(url, params=params, timeout=60)
@@ -28,8 +30,11 @@ class CFBDClient:
                     continue
                 raise CFBDError(f"GET {path} rate limited after {retries} attempts")
             if resp.status_code != 200:
-                raise CFBDError(f"GET {path} returned {resp.status_code}: {resp.text[:200]}")
+                raise CFBDError(
+                    f"GET {path} returned {resp.status_code}: {resp.text[:200]}"
+                )
             data = resp.json()
             if not isinstance(data, list):
                 raise CFBDError(f"GET {path} returned a non-list payload")
             return data
+        raise CFBDError(f"GET {path} failed after {retries} attempts")

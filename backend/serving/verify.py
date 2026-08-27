@@ -115,11 +115,9 @@ def verify_served(
                 "problem_count": len(problems),
                 "status": "exact_match" if not problems else "mismatch",
                 "diagnostic": (
-                    "every served probability equals the stored baseline "
-                    "prediction row"
+                    "every served probability equals the stored baseline prediction row"
                     if not problems
-                    else "served outputs diverge from stored baseline "
-                    "predictions"
+                    else "served outputs diverge from stored baseline predictions"
                 ),
             }
         ]

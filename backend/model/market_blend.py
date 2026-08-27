@@ -24,14 +24,12 @@ def _consensus_home_spread(offers: pd.DataFrame) -> pd.Series:
         home["home_spread"] = pd.to_numeric(home["point"], errors="coerce")
     elif {"game_id", "home_spread"}.issubset(offers.columns):
         home = offers[["game_id", "home_spread"]].copy()
-        home["home_spread"] = pd.to_numeric(
-            home["home_spread"], errors="coerce"
-        )
+        home["home_spread"] = pd.to_numeric(home["home_spread"], errors="coerce")
     else:
         return pd.Series(dtype=float)
-    return home.dropna(subset=["home_spread"]).groupby("game_id")[
-        "home_spread"
-    ].median()
+    return (
+        home.dropna(subset=["home_spread"]).groupby("game_id")["home_spread"].median()
+    )
 
 
 def add_market_informed_margins(
@@ -41,9 +39,7 @@ def add_market_informed_margins(
 ) -> pd.DataFrame:
     """Add pure and market-informed margin fields to projection records."""
     if not 0 <= weight <= MARKET_WEIGHT_CAP:
-        raise ValueError(
-            f"market weight must be between 0 and {MARKET_WEIGHT_CAP:g}"
-        )
+        raise ValueError(f"market weight must be between 0 and {MARKET_WEIGHT_CAP:g}")
     required = {"game_id", "home_margin", "home_spread"}
     missing = sorted(required - set(projections.columns))
     if missing:

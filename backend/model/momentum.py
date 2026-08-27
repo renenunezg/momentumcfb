@@ -93,9 +93,7 @@ class MomentumRecencyParams:
 
     def __post_init__(self) -> None:
         if int(self.half_life_plays) not in DECAY_HALF_LIVES:
-            raise ValueError(
-                f"half_life_plays must be one of {DECAY_HALF_LIVES}"
-            )
+            raise ValueError(f"half_life_plays must be one of {DECAY_HALF_LIVES}")
         if len(self.betas) != len(FEATURE_NAMES):
             raise ValueError(f"expected {len(FEATURE_NAMES)} betas")
         if not all(isfinite(beta) for beta in self.betas):
@@ -139,9 +137,7 @@ def league_scrimmage_rate(inputs: pd.DataFrame) -> float:
 def evidence_numerators(inputs: pd.DataFrame, league_rate: float) -> np.ndarray:
     """Home-minus-away evidence totals, one column per feature family."""
     elapsed = REGULATION_SECONDS - inputs["seconds_remaining"].to_numpy(float)
-    pace_gap = (
-        inputs["scrimmage_plays_before"].to_numpy(float) - league_rate * elapsed
-    )
+    pace_gap = inputs["scrimmage_plays_before"].to_numpy(float) - league_rate * elapsed
     diffs = {
         "drive_efficiency": inputs["home_epa_total"] - inputs["away_epa_total"],
         "success_rate": inputs["home_successes"] - inputs["away_successes"],
@@ -172,10 +168,9 @@ def recency_numerators(
 ) -> np.ndarray:
     """Home-minus-away decayed evidence totals for one half-life."""
     suffix = f"_hl{half_life}"
-    pace_gap = (
-        inputs[f"scrimmage_plays_decayed{suffix}"].to_numpy(float)
-        - league_rate * inputs[f"elapsed_seconds_decayed{suffix}"].to_numpy(float)
-    )
+    pace_gap = inputs[f"scrimmage_plays_decayed{suffix}"].to_numpy(
+        float
+    ) - league_rate * inputs[f"elapsed_seconds_decayed{suffix}"].to_numpy(float)
     diffs = {
         "drive_efficiency": (
             inputs[f"home_epa_total{suffix}"] - inputs[f"away_epa_total{suffix}"]
@@ -184,8 +179,7 @@ def recency_numerators(
             inputs[f"home_successes{suffix}"] - inputs[f"away_successes{suffix}"]
         ),
         "sustained_stops": (
-            inputs[f"home_stops_forced{suffix}"]
-            - inputs[f"away_stops_forced{suffix}"]
+            inputs[f"home_stops_forced{suffix}"] - inputs[f"away_stops_forced{suffix}"]
         ),
         "turnovers": (
             inputs[f"home_turnovers_forced{suffix}"]
@@ -200,8 +194,7 @@ def recency_numerators(
             - inputs[f"away_fourth_down_conversions{suffix}"]
         ),
         "missed_kicks": (
-            inputs[f"home_missed_kicks{suffix}"]
-            - inputs[f"away_missed_kicks{suffix}"]
+            inputs[f"home_missed_kicks{suffix}"] - inputs[f"away_missed_kicks{suffix}"]
         ),
         "tempo": inputs["pregame_margin"].to_numpy(float) * pace_gap,
     }
@@ -216,9 +209,7 @@ def recency_numerators(
 def momentum_adjustment(inputs: pd.DataFrame, params: MomentumParams) -> np.ndarray:
     """Shrinkage-weighted update to the expected rest-of-game margin, in
     points per full game from the home perspective."""
-    numerators = evidence_numerators(
-        inputs, params.league_scrimmage_plays_per_second
-    )
+    numerators = evidence_numerators(inputs, params.league_scrimmage_plays_per_second)
     plays = inputs["evidence_plays"].to_numpy(float)
     features = numerators / (plays + params.shrinkage_prior_plays)[:, None]
     return features @ np.asarray(params.betas, dtype=float)
@@ -242,9 +233,9 @@ def momentum_recency_adjustment(
         int(params.half_life_plays),
         params.league_scrimmage_plays_per_second,
     )
-    plays = inputs[
-        f"evidence_plays_decayed_hl{int(params.half_life_plays)}"
-    ].to_numpy(float)
+    plays = inputs[f"evidence_plays_decayed_hl{int(params.half_life_plays)}"].to_numpy(
+        float
+    )
     features = numerators / (plays + params.shrinkage_prior_plays)[:, None]
     return features @ np.asarray(params.betas, dtype=float)
 
@@ -280,7 +271,9 @@ def _fit_betas(
         options={"xtol": 1e-4, "ftol": 1e-8, "maxiter": 20000},
     )
     if not result.success:
-        raise ValueError(f"momentum fit did not converge at {context}: {result.message}")
+        raise ValueError(
+            f"momentum fit did not converge at {context}: {result.message}"
+        )
     return float(result.fun), result.x
 
 

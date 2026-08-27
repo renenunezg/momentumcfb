@@ -142,7 +142,9 @@ class GameProjection:
         if self.degrees_of_freedom <= 2:
             raise ValueError("degrees_of_freedom must exceed 2")
         if self.neutral_site and abs(self.home_field_points) > 1e-9:
-            raise ValueError("neutral-site projections cannot include home-field points")
+            raise ValueError(
+                "neutral-site projections cannot include home-field points"
+            )
 
     @property
     def home_margin(self) -> float:
@@ -163,18 +165,14 @@ class GameProjection:
     @property
     def home_score_sd(self) -> float:
         variance = 0.25 * (
-            self.margin_sd**2
-            + self.total_sd**2
-            + 2 * self.margin_total_covariance
+            self.margin_sd**2 + self.total_sd**2 + 2 * self.margin_total_covariance
         )
         return variance**0.5
 
     @property
     def away_score_sd(self) -> float:
         variance = 0.25 * (
-            self.margin_sd**2
-            + self.total_sd**2
-            - 2 * self.margin_total_covariance
+            self.margin_sd**2 + self.total_sd**2 - 2 * self.margin_total_covariance
         )
         return variance**0.5
 

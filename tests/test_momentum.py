@@ -46,30 +46,71 @@ def _game_plays():
             _play(1, 15, AWAY, "Kickoff", 1),
             _play(2, 14, HOME, "Rush", 2, yards_gained=6, ppa=0.3),
             _play(
-                3, 13, HOME, "Pass Incompletion", 2,
-                down=2, distance=4, yards_to_goal=69, ppa=-0.5,
+                3,
+                13,
+                HOME,
+                "Pass Incompletion",
+                2,
+                down=2,
+                distance=4,
+                yards_to_goal=69,
+                ppa=-0.5,
             ),
             _play(4, 12, HOME, "Punt", 2, down=4, yards_to_goal=65),
             _play(
-                5, 11, AWAY, "Rush", 3,
-                yards_to_goal=55, yards_gained=5, ppa=0.2,
+                5,
+                11,
+                AWAY,
+                "Rush",
+                3,
+                yards_to_goal=55,
+                yards_gained=5,
+                ppa=0.2,
             ),
             _play(
-                6, 10, AWAY, "Interception", 3,
-                down=2, distance=5, yards_to_goal=50, ppa=-2.0,
+                6,
+                10,
+                AWAY,
+                "Interception",
+                3,
+                down=2,
+                distance=5,
+                yards_to_goal=50,
+                ppa=-2.0,
             ),
             _play(
-                7, 9, HOME, "Rush", 4,
-                yards_to_goal=45, yards_gained=2, ppa=-0.2,
+                7,
+                9,
+                HOME,
+                "Rush",
+                4,
+                yards_to_goal=45,
+                yards_gained=2,
+                ppa=-0.2,
             ),
             _play(
-                8, 8, HOME, "Rush", 4,
-                down=4, distance=1, yards_to_goal=43, yards_gained=3, ppa=0.8,
+                8,
+                8,
+                HOME,
+                "Rush",
+                4,
+                down=4,
+                distance=1,
+                yards_to_goal=43,
+                yards_gained=3,
+                ppa=0.8,
             ),
             _play(9, 7, HOME, "Field Goal Missed", 4, down=4, yards_to_goal=20),
             _play(
-                10, 6, AWAY, "Rush", 5,
-                down=4, distance=2, yards_to_goal=80, ppa=-0.3,
+                10,
+                6,
+                AWAY,
+                "Rush",
+                5,
+                down=4,
+                distance=2,
+                yards_to_goal=80,
+                ppa=-0.3,
             ),
             _play(11, 0, AWAY, "End of Game", 6, period=4),
         ]
@@ -123,9 +164,7 @@ def test_process_evidence_is_presnap_and_attributes_every_family():
 def test_extended_leakage_check_covers_process_evidence(monkeypatch):
     plays = _game_plays()
     assert (
-        ingame.leakage_problems(
-            plays, [9101], builder=ingame.build_momentum_states
-        )
+        ingame.leakage_problems(plays, [9101], builder=ingame.build_momentum_states)
         == []
     )
 
