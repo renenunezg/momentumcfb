@@ -1,0 +1,14 @@
+evaluation,partition,metric,n_games,n_states,value,unit,source_artifact
+pregame,holdout,margin_mae,2258,,13.283975,points,calibration/joint_scoring_summary.parquet
+pregame,holdout,total_mae,2258,,13.080571,points,calibration/joint_scoring_summary.parquet
+pregame,holdout,margin_50_interval_coverage,2258,,0.516386,rate,calibration/joint_scoring_summary.parquet
+pregame,holdout,margin_80_interval_coverage,2258,,0.801151,rate,calibration/joint_scoring_summary.parquet
+pregame,holdout,margin_95_interval_coverage,2258,,0.942427,rate,calibration/joint_scoring_summary.parquet
+ingame_baseline,holdout,log_loss,2258,400878,0.407296,score,ingame/baseline_summary.parquet
+ingame_baseline,holdout,brier,2258,400878,0.132798,score,ingame/baseline_summary.parquet
+ingame_market_anchor,holdout,log_loss,2258,400878,0.389543,score,ingame/market_anchor_summary.parquet
+ingame_market_anchor,holdout,brier,2258,400878,0.125756,score,ingame/market_anchor_summary.parquet
+ingame_market_anchor,holdout,log_loss_delta,2258,400878,-0.017753,score,ingame/market_anchor_summary.parquet
+ingame_market_anchor,holdout,brier_delta,2258,400878,-0.007043,score,ingame/market_anchor_summary.parquet
+momentum,holdout,log_loss_delta,2258,400878,0.000424,score,ingame/momentum_summary.parquet
+momentum_recency,holdout,log_loss_delta,2258,400878,0.000572,score,ingame/momentum_recency_summary.parquet
