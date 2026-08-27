@@ -3,8 +3,8 @@
 Replays a stored game as a simulated live feed: plays arrive one at a time in
 chronological order, and after each event the play-boundary state is rebuilt
 from only the plays seen so far, then scored with the frozen baseline
-parameters and the game's pregame anchor. Serving inputs are outcome-free —
-only the serving anchor columns are read, never actual final scores — so the
+parameters and the game's pregame anchor. Serving inputs are outcome-free:
+only the serving anchor columns are read, never actual final scores, so the
 same loop can score a game whose result is unknown. This rebuild-per-play loop
 is the reference serving path; ``stream_problems`` proves each streamed
 probability sequence equals the stored batch predictions exactly.
