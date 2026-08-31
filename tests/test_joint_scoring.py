@@ -117,6 +117,24 @@ def test_joint_model_is_leak_free_and_reconciles_outputs():
     prior_rating_by_id = {rating.team_id: rating for rating in prior_fit.ratings()}
     assert prior_rating_by_id[1].power_rating > rating_by_id[1].power_rating
 
+    extreme_fit = fit_joint_scoring(
+        games,
+        forecast_week=3,
+        as_of=as_of,
+        strength_prior_means={1: (3.0, 3.0)},
+    )
+    extreme_projections = extreme_fit.project(target)
+    expected_scores = [
+        score
+        for projection in extreme_projections
+        for score in (
+            projection.expected_home_points,
+            projection.expected_away_points,
+        )
+    ]
+    assert min(expected_scores) == 0.0
+    assert all(score >= 0.0 for score in expected_scores)
+
 
 def test_weekly_frame_retains_future_games_without_training_on_them():
     games = _mini_season()

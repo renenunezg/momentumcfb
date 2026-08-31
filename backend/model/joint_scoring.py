@@ -206,8 +206,11 @@ class JointScoringFit:
                     away_team=game.away_team,
                     neutral_site=bool(game.neutral_site),
                     home_field_points=float(home_field),
-                    expected_home_points=float(expected_home),
-                    expected_away_points=float(expected_away),
+                    # The linear strength model is unconstrained, but football
+                    # scores are not. Extreme mismatches can otherwise produce
+                    # a negative mean for the underdog and abort the forecast.
+                    expected_home_points=max(float(expected_home), 0.0),
+                    expected_away_points=max(float(expected_away), 0.0),
                     margin_sd=margin_sd,
                     total_sd=total_sd,
                     margin_total_correlation=float(np.clip(correlation, -0.999, 0.999)),
