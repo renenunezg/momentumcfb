@@ -4,6 +4,8 @@ from sqlalchemy import create_engine, event
 
 from backend.config import REPO_ROOT  # noqa: F401  (importing loads .env)
 
+CFB_SCHEMA = "cfb"
+
 _WRITE_KEYWORDS = (
     "insert",
     "update",
@@ -44,7 +46,7 @@ def _pin_search_path(dbapi_connection, connection_record):
     # (set for mlbmodel), and role settings win over the startup options
     # through the pooler; a session-level SET wins over both.
     with dbapi_connection.cursor() as cursor:
-        cursor.execute("SET search_path TO cfb, public")
+        cursor.execute(f"SET search_path TO {CFB_SCHEMA}, public")
         # The shared database pins extra_float_digits = 0, which truncates
         # float8 text output to 12 significant digits; 3 restores exact
         # round-trips for every double precision read through this engine.

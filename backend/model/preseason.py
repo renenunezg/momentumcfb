@@ -99,12 +99,12 @@ def load_preseason_ratings(season: int, week: int = 1) -> tuple[pd.DataFrame, st
     except FileNotFoundError:
         from sqlalchemy import text
 
-        from backend.db import engine
+        from backend.db import CFB_SCHEMA, engine
 
         query = text(
             "SELECT team_id, team, conference, classification, "
             "offense_points, defense_points, expected_possessions, "
-            "missing_input_count FROM team_ratings "
+            f"missing_input_count FROM {CFB_SCHEMA}.team_ratings "
             "WHERE season = :season AND week = :week"
         )
         with engine.connect() as connection:

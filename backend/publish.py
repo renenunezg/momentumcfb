@@ -23,6 +23,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from backend.config import PROCESSED_DIR, RAW_DIR
+from backend.db import CFB_SCHEMA
 
 # Identity only. Conference and classification are deliberately absent: every
 # consumer already loads team_ratings, which carries both.
@@ -310,7 +311,7 @@ def _table_exists(conn, table: str) -> bool:
     return (
         conn.execute(
             text("SELECT to_regclass(:table_name)"),
-            {"table_name": table},
+            {"table_name": f"{CFB_SCHEMA}.{table}"},
         ).scalar()
         is not None
     )
@@ -322,9 +323,9 @@ def _table_columns(conn, table: str) -> set[str]:
         for row in conn.execute(
             text(
                 "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = :table_name"
+                "WHERE table_schema = :table_schema AND table_name = :table_name"
             ),
-            {"table_name": table},
+            {"table_schema": CFB_SCHEMA, "table_name": table},
         )
     }
 
@@ -363,15 +364,24 @@ def publish_serving_anchors(season: int, anchor_week: int) -> int:
 
     with engine.begin() as conn:
         conn.execute(
-            text("DELETE FROM serving_anchors WHERE season = :s AND anchor_week = :w"),
+            text(
+                f"DELETE FROM {CFB_SCHEMA}.serving_anchors "
+                "WHERE season = :s AND anchor_week = :w"
+            ),
             {"s": season, "w": anchor_week},
         )
-        rows.to_sql("serving_anchors", con=conn, if_exists="append", index=False)
+        rows.to_sql(
+            "serving_anchors",
+            con=conn,
+            schema=CFB_SCHEMA,
+            if_exists="append",
+            index=False,
+        )
     with engine.connect() as conn:
         return int(
             conn.execute(
                 text(
-                    "SELECT count(*) FROM serving_anchors "
+                    f"SELECT count(*) FROM {CFB_SCHEMA}.serving_anchors "
                     "WHERE season = :s AND anchor_week = :w"
                 ),
                 {"s": season, "w": anchor_week},
@@ -393,7 +403,7 @@ def fetch_serving_anchors(season: int, anchor_week: int) -> int:
             text(
                 "SELECT "
                 + ", ".join(c for c in SERVING_ANCHORS_COLUMNS if c != "anchor_week")
-                + " FROM serving_anchors "
+                + f" FROM {CFB_SCHEMA}.serving_anchors "
                 "WHERE season = :s AND anchor_week = :w ORDER BY game_id"
             ),
             conn,
@@ -428,7 +438,7 @@ def weekly_forecast_is_published(
             conn.execute(
                 text(
                     "SELECT EXISTS ("
-                    "SELECT 1 FROM team_ratings "
+                    f"SELECT 1 FROM {CFB_SCHEMA}.team_ratings "
                     "WHERE season = :season AND week = :week "
                     "AND model_version = :model_version"
                     ")"
@@ -471,47 +481,87 @@ def publish(
         if teams is not None:
             # A dimension with no natural version: replace it wholesale so a
             # rebrand or a reclassification cannot leave a stale row behind.
-            conn.execute(text("DELETE FROM teams"))
-            teams.to_sql("teams", con=conn, if_exists="append", index=False)
+            conn.execute(text(f"DELETE FROM {CFB_SCHEMA}.teams"))
+            teams.to_sql(
+                "teams",
+                con=conn,
+                schema=CFB_SCHEMA,
+                if_exists="append",
+                index=False,
+            )
 
         conn.execute(
-            text("DELETE FROM team_ratings WHERE season = :s AND week = :w"),
+            text(
+                f"DELETE FROM {CFB_SCHEMA}.team_ratings WHERE season = :s AND week = :w"
+            ),
             {"s": season, "w": week},
         )
-        ratings.to_sql("team_ratings", con=conn, if_exists="append", index=False)
+        ratings.to_sql(
+            "team_ratings",
+            con=conn,
+            schema=CFB_SCHEMA,
+            if_exists="append",
+            index=False,
+        )
 
         if unit_ratings is not None and _table_exists(conn, "team_unit_ratings"):
             conn.execute(
-                text("DELETE FROM team_unit_ratings WHERE season = :s AND week = :w"),
+                text(
+                    f"DELETE FROM {CFB_SCHEMA}.team_unit_ratings "
+                    "WHERE season = :s AND week = :w"
+                ),
                 {"s": season, "w": week},
             )
             unit_ratings.to_sql(
-                "team_unit_ratings", con=conn, if_exists="append", index=False
+                "team_unit_ratings",
+                con=conn,
+                schema=CFB_SCHEMA,
+                if_exists="append",
+                index=False,
             )
 
         conn.execute(
-            text("DELETE FROM game_projections WHERE game_id = ANY(:ids)"),
+            text(
+                f"DELETE FROM {CFB_SCHEMA}.game_projections WHERE game_id = ANY(:ids)"
+            ),
             {"ids": game_ids},
         )
         projection_columns = _table_columns(conn, "game_projections")
         projections[
             [column for column in projections.columns if column in projection_columns]
-        ].to_sql("game_projections", con=conn, if_exists="append", index=False)
+        ].to_sql(
+            "game_projections",
+            con=conn,
+            schema=CFB_SCHEMA,
+            if_exists="append",
+            index=False,
+        )
 
         if market is not None:
             conn.execute(
-                text("DELETE FROM market_comparisons WHERE game_id = ANY(:ids)"),
+                text(
+                    f"DELETE FROM {CFB_SCHEMA}.market_comparisons "
+                    "WHERE game_id = ANY(:ids)"
+                ),
                 {"ids": [int(g) for g in market["game_id"]]},
             )
             market.to_sql(
-                "market_comparisons", con=conn, if_exists="append", index=False
+                "market_comparisons",
+                con=conn,
+                schema=CFB_SCHEMA,
+                if_exists="append",
+                index=False,
             )
 
         if backtest is not None:
             # Full refresh: TRUNCATE + append preserves RLS and indexes.
-            conn.execute(text("TRUNCATE TABLE backtest_predictions"))
+            conn.execute(text(f"TRUNCATE TABLE {CFB_SCHEMA}.backtest_predictions"))
             backtest.to_sql(
-                "backtest_predictions", con=conn, if_exists="append", index=False
+                "backtest_predictions",
+                con=conn,
+                schema=CFB_SCHEMA,
+                if_exists="append",
+                index=False,
             )
 
     # Read back stored totals so the caller reports what the website will see.
@@ -526,6 +576,10 @@ def publish(
         if _table_exists(conn, "team_unit_ratings"):
             tables.insert(2, "team_unit_ratings")
         return {
-            table: int(conn.execute(text(f"SELECT count(*) FROM {table}")).scalar())
+            table: int(
+                conn.execute(
+                    text(f"SELECT count(*) FROM {CFB_SCHEMA}.{table}")
+                ).scalar()
+            )
             for table in tables
         }
