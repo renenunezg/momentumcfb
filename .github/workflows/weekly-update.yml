@@ -1,11 +1,10 @@
 name: Weekly CFB update
 
 on:
-  # Primary trigger: Supabase pg_cron (cfb-weekly-update-dispatch) fires
-  # this via repository_dispatch Mondays and Tuesdays at 18:17 UTC,
-  # bypassing GitHub's unreliable scheduler. Monday is the normal
-  # post-Saturday update; Tuesday is the guarded recovery run for the
-  # long opening week or delayed source data.
+  # Supabase pg_cron (cfb-weekly-update-dispatch) fires this via
+  # repository_dispatch Mondays at 18:17 UTC. A failed or input-blocked
+  # run is investigated and rerun deliberately instead of scheduling a
+  # speculative Tuesday retry.
   repository_dispatch:
     types: [weekly-update]
   workflow_dispatch:

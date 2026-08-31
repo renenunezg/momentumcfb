@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
+from backend.etl import store
 from backend.odds import kickoff, live
 from backend.odds.client import (
     EventsSnapshot,
@@ -799,6 +800,27 @@ def test_live_schedule_uses_the_freshest_stored_snapshot(tmp_path, monkeypatch):
     os.utime(raw_path, (3, 3))
     schedule = live.load_division_one_schedule(2026)
     assert schedule["game_id"].tolist() == [1]
+
+    raw_path.unlink()
+    preseason_path.unlink()
+    coverage = preseason.rename(columns={"id": "game_id"}).assign(
+        game_id=3,
+        home_team="Frozen State",
+        away_team="Frozen Tech",
+    )
+    processed_path = (
+        tmp_path
+        / "processed"
+        / "preseason"
+        / "forecast_log"
+        / "2026_01_20260828T150144955330Z"
+        / "schedule_coverage.parquet"
+    )
+    processed_path.parent.mkdir(parents=True)
+    coverage.to_parquet(processed_path, index=False)
+    monkeypatch.setattr(store, "PROCESSED_DIR", tmp_path / "processed")
+    schedule = live.load_division_one_schedule(2026)
+    assert schedule["game_id"].tolist() == [3]
 
 
 def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
