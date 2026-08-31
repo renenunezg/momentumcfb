@@ -265,7 +265,13 @@ def load_division_one_schedule(season: int) -> pd.DataFrame:
     preseason_path = RAW_DIR / "preseason" / str(season) / "games.parquet"
     candidates = [path for path in (games_path, preseason_path) if path.exists()]
     if not candidates:
-        raise FileNotFoundError(f"season {season} has no stored schedule")
+        try:
+            coverage = store.read_preseason_forecast_artifact(
+                season, 1, "schedule_coverage"
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"season {season} has no stored schedule") from exc
+        return division_one_schedule(coverage)
     freshest = max(candidates, key=lambda path: path.stat().st_mtime_ns)
     if freshest == games_path:
         games = store.read_games(season)
@@ -278,7 +284,8 @@ def division_one_schedule(games: pd.DataFrame) -> pd.DataFrame:
     home = games["home_classification"].astype("string").str.lower().isin(DIVISION_ONE)
     away = games["away_classification"].astype("string").str.lower().isin(DIVISION_ONE)
     schedule = games[home.fillna(False) | away.fillna(False)].copy()
-    schedule = schedule.rename(columns={"id": "game_id"})
+    if "game_id" not in schedule:
+        schedule = schedule.rename(columns={"id": "game_id"})
     return schedule[["game_id", "start_date", "home_team", "away_team"]].reset_index(
         drop=True
     )

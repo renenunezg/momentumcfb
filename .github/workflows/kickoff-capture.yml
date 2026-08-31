@@ -1,30 +1,28 @@
 name: Opening kickoff capture
 
 on:
-  # Primary trigger: Supabase pg_cron (cfb-kickoff-*-dispatch jobs) fires
-  # these via repository_dispatch on the minute, bypassing GitHub's
-  # unreliable scheduler. Same pg_cron + Vault PAT mechanism as mlbmodel.
-  # kickoff-forecast fires Friday 15:00 UTC to publish the pre-kickoff
-  # lines by Friday morning PT; kickoff-capture fires Saturday 13:30 UTC
-  # to poll across the first market-covered kickoff window and freeze the
-  # closing spread. Week 1 spans two weekends, so each gets a pair.
+  # Supabase pg_cron dispatches only the market-capture window.
+  # The frozen pregame forecast is restored from the explicitly named
+  # successful forecast run and is never rebuilt or republished here.
   repository_dispatch:
-    types: [kickoff-forecast, kickoff-capture]
+    types: [kickoff-capture]
   workflow_dispatch:
     inputs:
-      mode:
-        description: forecast publishes lines only; capture also freezes the kickoff window
-        required: true
-        type: choice
-        options:
-          - forecast
-          - capture
       season:
         description: Optional season override
         required: false
         type: string
+      forecast_run_id:
+        description: Successful opening forecast run containing the frozen artifacts
+        required: true
+        type: string
+      forecast_artifact:
+        description: Exact artifact name produced by that forecast run
+        required: true
+        type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -36,8 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
-      REQUESTED_SEASON: ${{ inputs.season }}
-      CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+      REQUESTED_SEASON: ${{ github.event.client_payload.season || inputs.season }}
+      FORECAST_RUN_ID: ${{ github.event.client_payload.forecast_run_id || inputs.forecast_run_id }}
+      FORECAST_ARTIFACT: ${{ github.event.client_payload.forecast_artifact || inputs.forecast_artifact }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       ODDS_API_BOOKMAKERS: ${{ secrets.ODDS_API_BOOKMAKERS }}
       ODDS_API_REGIONS: ${{ secrets.ODDS_API_REGIONS }}
@@ -59,17 +58,9 @@ jobs:
           python -m pip install poetry==2.1.3
           poetry install --no-root --no-interaction --no-ansi
 
-      - name: Resolve mode and season
+      - name: Resolve frozen forecast inputs
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            mode="${{ inputs.mode }}"
-          elif [[ "${{ github.event.action }}" == "kickoff-capture" ]]; then
-            mode="capture"
-          else
-            mode="forecast"
-          fi
-          echo "MODE=$mode" >> "$GITHUB_ENV"
           if [[ -n "$REQUESTED_SEASON" ]]; then
             season="$REQUESTED_SEASON"
           else
@@ -81,13 +72,30 @@ jobs:
               season="$calendar_year"
             fi
           fi
+          if [[ ! "$FORECAST_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "forecast_run_id must identify one successful forecast run"
+            exit 1
+          fi
+          if [[ ! "$FORECAST_ARTIFACT" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "forecast_artifact contains unsupported characters"
+            exit 1
+          fi
           echo "SEASON=$season" >> "$GITHUB_ENV"
+
+      - name: Restore the frozen pregame forecast
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.FORECAST_ARTIFACT }}
+          path: backend/data
+          repository: ${{ github.repository }}
+          run-id: ${{ env.FORECAST_RUN_ID }}
+          github-token: ${{ github.token }}
 
       - name: Verify required secrets
         shell: bash
         run: |
           missing=()
-          for secret_name in CFBD_API_KEY ODDS_API_KEY DATABASE_URL; do
+          for secret_name in ODDS_API_KEY DATABASE_URL; do
             if [[ -z "${!secret_name}" ]]; then
               missing+=("$secret_name")
             fi
@@ -100,79 +108,36 @@ jobs:
       - name: Run live odds regression gate
         run: poetry run pytest tests/test_live_odds.py -q
 
-      # The preseason forecast carries the prior season's final fit forward,
-      # so an ephemeral runner must rebuild that season's games and features
-      # from CFBD before forecasting.
-      - name: Rebuild prior season inputs
-        shell: bash
-        run: |
-          prior=$((SEASON - 1))
-          poetry run python -m backend ingest --seasons "$prior"
-          poetry run python -m backend features --seasons "$prior"
-
-      # --with-odds-api buys the two-market Odds API snapshot (2 credits):
-      # the adopted market source for the pre-kickoff comparison; the CFBD
-      # lines feed alone covers too few games and carries no timestamps.
-      - name: Build the pre-kickoff forecast
-        run: >-
-          poetry run python -m backend preseason
-          --season "$SEASON" --refresh --with-odds-api
-
-      - name: Rebuild week 1 serving anchors
-        run: >-
-          poetry run python -m backend serving-anchors
-          --season "$SEASON" --week 1 --source preseason
-
-      - name: Publish serving tables
-        env:
-          MOMENTUMCFB_DB_WRITES: "1"
-        run: >-
-          poetry run python -m backend publish
-          --season "$SEASON" --week 1 --skip-backtest
-
-      - name: Publish week 1 serving anchors
-        env:
-          MOMENTUMCFB_DB_WRITES: "1"
-        run: poetry run python -m backend publish-anchors --season "$SEASON" --week 1
-
-      # The kickoff preflight needs at least one stored poll for target
-      # resolution, provider coverage, and quota provenance; a fresh runner
-      # starts empty, so seed the append-only store with a single poll.
+      # A fresh runner needs one provider snapshot for market coverage and
+      # quota provenance before the fail-closed kickoff window is planned.
       - name: Bootstrap the live odds store
-        if: env.MODE == 'capture'
         run: >-
           poetry run python -m backend live-odds
-          --season "$SEASON" --polls 1 --min-quota 40
+          --season "$SEASON" --polls 1 --min-quota 20
 
-      # min-quota 40 instead of the default 50: the opening capture is the
-      # purpose of the remaining opening-week quota, so give the window
-      # headroom for retries rather than aborting a poll short.
       - name: Capture the kickoff window
-        if: env.MODE == 'capture'
         run: >-
           poetry run python -m backend kickoff-run
-          --season "$SEASON" --max-wait-hours 4 --min-quota 40
+          --season "$SEASON" --max-wait-hours 4 --min-quota 20
+          --max-forecast-age-hours 240 --max-source-age-hours 240
 
       - name: Prove the frozen market anchors
-        if: env.MODE == 'capture'
         run: |
           poetry run python -m backend serving-anchors \
             --season "$SEASON" --source market --market-feed live-odds
           poetry run python -m backend live-replay --season "$SEASON"
 
       - name: Publish market serving anchors
-        if: env.MODE == 'capture'
         env:
           MOMENTUMCFB_DB_WRITES: "1"
         run: poetry run python -m backend publish-anchors --season "$SEASON" --week 0
 
-      - name: Preserve audit artifacts
+      - name: Preserve capture audit artifacts
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: kickoff-${{ env.MODE }}-${{ github.run_id }}
+          name: kickoff-capture-${{ github.run_id }}
           path: |
-            backend/data/processed/preseason/forecast_log/
             backend/data/processed/serving/
             backend/data/raw/live_odds/
           if-no-files-found: ignore

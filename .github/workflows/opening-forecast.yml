@@ -1,20 +1,12 @@
-name: Weekly CFB update
+name: Opening forecast publication
 
 on:
-  # Supabase pg_cron (cfb-weekly-update-dispatch) fires this via
-  # repository_dispatch Mondays at 18:17 UTC. A failed or input-blocked
-  # run is investigated and rerun deliberately instead of scheduling a
-  # speculative Tuesday retry.
-  repository_dispatch:
-    types: [weekly-update]
+  # Opening forecasts are intentional release operations, not retry crons.
+  # Run this early enough for the independent model lines to be useful.
   workflow_dispatch:
     inputs:
       season:
         description: Optional season override
-        required: false
-        type: string
-      week:
-        description: Optional model week override
         required: false
         type: string
 
@@ -22,16 +14,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: weekly-cfb-update
+  group: opening-forecast-publication
   cancel-in-progress: false
 
 jobs:
-  update:
+  forecast:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       REQUESTED_SEASON: ${{ inputs.season }}
-      FORECAST_WEEK: ${{ inputs.week || '' }}
       CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       ODDS_API_BOOKMAKERS: ${{ secrets.ODDS_API_BOOKMAKERS }}
@@ -84,31 +75,49 @@ jobs:
             exit 1
           fi
 
-      - name: Run weekly regression gate
-        run: poetry run pytest tests/test_joint_scoring.py -q
+      - name: Run forecast regression gates
+        run: |
+          poetry run pytest tests/test_joint_scoring.py -q
+          poetry run pytest tests/test_live_odds.py -q
 
-      - name: Refresh season data from CFBD
-        run: poetry run python -m backend ingest --seasons "$SEASON"
-
-      - name: Rebuild features
-        run: poetry run python -m backend features --seasons "$SEASON"
-
-      - name: Retrain and publish next week
+      # The preseason forecast carries the prior season's final fit forward,
+      # so an ephemeral runner must rebuild that season before forecasting.
+      - name: Rebuild prior season inputs
         shell: bash
+        run: |
+          prior=$((SEASON - 1))
+          poetry run python -m backend ingest --seasons "$prior"
+          poetry run python -m backend features --seasons "$prior"
+
+      - name: Build the opening forecast
+        run: >-
+          poetry run python -m backend preseason
+          --season "$SEASON" --refresh --with-odds-api
+
+      - name: Build week 1 serving anchors
+        run: >-
+          poetry run python -m backend serving-anchors
+          --season "$SEASON" --week 1 --source preseason
+
+      - name: Publish serving tables
         env:
           MOMENTUMCFB_DB_WRITES: "1"
-        run: |
-          arguments=(--season "$SEASON")
-          if [[ -n "$FORECAST_WEEK" ]]; then
-            arguments+=(--week "$FORECAST_WEEK")
-          fi
-          poetry run python -m backend weekly-update "${arguments[@]}"
+        run: >-
+          poetry run python -m backend publish
+          --season "$SEASON" --week 1 --skip-backtest
 
-      - name: Preserve forecast audit artifacts
-        if: always()
+      - name: Publish week 1 serving anchors
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
+        run: poetry run python -m backend publish-anchors --season "$SEASON" --week 1
+
+      - name: Preserve the frozen forecast and capture inputs
         uses: actions/upload-artifact@v7
         with:
-          name: weekly-cfb-${{ github.run_id }}
-          path: backend/data/processed/weekly/forecast_log/
-          if-no-files-found: ignore
+          name: opening-forecast-${{ github.run_id }}
+          path: |
+            backend/data/raw/preseason/*/games.parquet
+            backend/data/processed/preseason/forecast_log/
+            backend/data/processed/serving/
+          if-no-files-found: error
           retention-days: 90

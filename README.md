@@ -114,7 +114,8 @@ The repository is released under the [MIT License](LICENSE).
 ## Production workflows
 
 `.github/workflows/weekly-update.yml` refreshes completed-season data, rebuilds features, fits the next unstarted model week, and publishes only after readiness checks pass.
-`.github/workflows/kickoff-capture.yml` refreshes the opening forecast and captures the final verified pregame market snapshot around kickoff.
+`.github/workflows/opening-forecast.yml` intentionally builds and publishes the opening forecast early, then preserves its frozen capture inputs.
+`.github/workflows/kickoff-capture.yml` restores that exact forecast artifact and captures the final verified pregame market snapshot without rebuilding or republishing the model.
 `.github/workflows/ci.yml` installs the locked environment, validates metadata, checks formatting and linting, type-checks production boundaries, compiles the source, and runs the test suite for every pull request and push to `main`.
 
 Publishing is a separate, explicit boundary.

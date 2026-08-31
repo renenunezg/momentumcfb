@@ -52,6 +52,28 @@ def read_processed(*parts: str, columns: list[str] | None = None) -> pd.DataFram
     return pd.read_parquet(PROCESSED_DIR.joinpath(*parts), columns=columns)
 
 
+def read_preseason_forecast_artifact(
+    season: int,
+    week: int,
+    name: str,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Read a canonical forecast output or its immutable run-log copy."""
+    filename = f"{season}_{week:02d}.parquet"
+    canonical = PROCESSED_DIR / "preseason" / name / filename
+    if canonical.exists():
+        return pd.read_parquet(canonical, columns=columns)
+
+    log_root = PROCESSED_DIR / "preseason" / "forecast_log"
+    candidates = sorted(
+        log_root.glob(f"{season}_{week:02d}_*/{name}.parquet"),
+        key=lambda path: path.parent.name,
+    )
+    if not candidates:
+        raise FileNotFoundError(canonical)
+    return pd.read_parquet(candidates[-1], columns=columns)
+
+
 def processed_names(*parts: str) -> list[str]:
     """Parquet file stems stored under a processed directory, if it exists."""
     directory = PROCESSED_DIR.joinpath(*parts)

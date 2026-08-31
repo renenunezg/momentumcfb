@@ -89,7 +89,7 @@ def _utc(value=None) -> pd.Timestamp:
 
 
 def _artifact_frame(season: int, week: int, name: str) -> pd.DataFrame:
-    return store.read_processed("preseason", name, f"{season}_{week:02d}.parquet")
+    return store.read_preseason_forecast_artifact(season, week, name)
 
 
 def check_preseason_readiness(
