@@ -1,7 +1,12 @@
+from argparse import Namespace
+from types import SimpleNamespace
+
 import pandas as pd
 
 from backend import cli
+from backend.commands import pipeline
 from backend.etl import ingest, store
+from backend.odds.client import OddsAPIError
 
 
 class FakeCFBDClient:
@@ -101,3 +106,39 @@ def test_preseason_weekly_commands_noop_without_cfbd_plays(
     output = capsys.readouterr().out
     assert "2026: no CFBD play-by-play is available" in output
     assert "weekly update not ready: no completed D1 games are available" in output
+
+
+def test_weekly_update_publishes_pure_model_when_odds_quota_is_exhausted(
+    tmp_path, monkeypatch, capsys
+):
+    from backend import publish
+    from backend.model import weekly
+    from backend.odds import client as odds_client
+
+    calls = []
+    result = SimpleNamespace(
+        week=1,
+        ratings=[object()],
+        projections=[object()],
+        market_comparisons=[object()],
+        log_directory=tmp_path,
+    )
+
+    def fake_run_weekly_forecast(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise OddsAPIError("OUT_OF_USAGE_CREDITS")
+        return result
+
+    monkeypatch.setattr(weekly, "resolve_ready_forecast_week", lambda *args: 1)
+    monkeypatch.setattr(weekly, "run_weekly_forecast", fake_run_weekly_forecast)
+    monkeypatch.setattr(publish, "weekly_forecast_is_published", lambda *args: False)
+    monkeypatch.setattr(publish, "publish", lambda *args, **kwargs: {})
+    monkeypatch.setattr(odds_client, "OddsAPIClient", lambda: object())
+
+    pipeline.handle_weekly_update(Namespace(season=2026, week=None))
+
+    assert [call["require_market"] for call in calls] == [True, False]
+    assert calls[0]["odds_client"] is not None
+    assert calls[1]["odds_client"] is None
+    assert "publishing the pure-model forecast" in capsys.readouterr().out

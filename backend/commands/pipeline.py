@@ -62,7 +62,7 @@ def handle_weekly_update(args: Namespace) -> None:
         resolve_ready_forecast_week,
         run_weekly_forecast,
     )
-    from backend.odds.client import OddsAPIClient
+    from backend.odds.client import OddsAPIClient, OddsAPIError
     from backend.publish import publish, weekly_forecast_is_published
 
     as_of = datetime.now(timezone.utc)
@@ -86,13 +86,28 @@ def handle_weekly_update(args: Namespace) -> None:
         )
         return
     try:
-        result = run_weekly_forecast(
-            args.season,
-            forecast_week,
-            odds_client=OddsAPIClient(),
-            require_market=True,
-            as_of=as_of,
-        )
+        try:
+            result = run_weekly_forecast(
+                args.season,
+                forecast_week,
+                odds_client=OddsAPIClient(),
+                require_market=True,
+                as_of=as_of,
+            )
+        except OddsAPIError as exc:
+            if "OUT_OF_USAGE_CREDITS" not in str(exc):
+                raise
+            print(
+                "Odds API quota exhausted; publishing the pure-model forecast "
+                "with market offers marked unavailable"
+            )
+            result = run_weekly_forecast(
+                args.season,
+                forecast_week,
+                odds_client=None,
+                require_market=False,
+                as_of=as_of,
+            )
     except WeeklyForecastNotReady as exc:
         print(f"weekly update not ready: {exc}")
         return
