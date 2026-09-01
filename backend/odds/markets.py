@@ -59,30 +59,48 @@ def _stored_sequence(value) -> list | np.ndarray:
     return value if isinstance(value, (list, np.ndarray)) else []
 
 
+OFFER_COLUMNS = [
+    "game_id",
+    "odds_api_event_id",
+    "provider_key",
+    "provider",
+    "market",
+    "selection",
+    "point",
+    "price",
+    "provider_last_update",
+    "event_link",
+    "market_link",
+    "bet_link",
+    "execution_eligibility_verified",
+    "market_fetched_at",
+    "match_score",
+]
+
+
+def offer_selection(
+    market_key: str, outcome_name: str | None, home_team: str, away_team: str
+) -> str | None:
+    """Map an Odds API outcome onto home/away or over/under, or None to skip."""
+    if market_key == "spreads":
+        if outcome_name == home_team:
+            return "home"
+        if outcome_name == away_team:
+            return "away"
+        return None
+    if market_key == "totals":
+        selection = str(outcome_name or "").lower()
+        return selection if selection in {"over", "under"} else None
+    return None
+
+
 def flatten_odds_api_offers(
     events: pd.DataFrame, schedule: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    offer_columns = [
-        "game_id",
-        "odds_api_event_id",
-        "provider_key",
-        "provider",
-        "market",
-        "selection",
-        "point",
-        "price",
-        "provider_last_update",
-        "event_link",
-        "market_link",
-        "bet_link",
-        "execution_eligibility_verified",
-        "market_fetched_at",
-        "match_score",
-    ]
     offers = []
     matches = []
     if events.empty:
-        return pd.DataFrame(columns=offer_columns), pd.DataFrame()
+        return pd.DataFrame(columns=OFFER_COLUMNS), pd.DataFrame()
 
     for event in events.itertuples():
         game_id, match_score = match_event(
@@ -104,20 +122,15 @@ def flatten_odds_api_offers(
         for bookmaker in _stored_sequence(event.bookmakers):
             for market in _stored_sequence(bookmaker.get("markets")):
                 market_key = market.get("key")
-                if market_key not in {"spreads", "totals"}:
-                    continue
                 for outcome in _stored_sequence(market.get("outcomes")):
-                    if market_key == "spreads":
-                        if outcome.get("name") == event.home_team:
-                            selection = "home"
-                        elif outcome.get("name") == event.away_team:
-                            selection = "away"
-                        else:
-                            continue
-                    else:
-                        selection = str(outcome.get("name", "")).lower()
-                        if selection not in {"over", "under"}:
-                            continue
+                    selection = offer_selection(
+                        market_key,
+                        outcome.get("name"),
+                        event.home_team,
+                        event.away_team,
+                    )
+                    if selection is None:
+                        continue
                     offers.append(
                         {
                             "game_id": game_id,
@@ -140,7 +153,7 @@ def flatten_odds_api_offers(
                             "match_score": match_score,
                         }
                     )
-    frame = pd.DataFrame(offers, columns=offer_columns)
+    frame = pd.DataFrame(offers, columns=OFFER_COLUMNS)
     for column in ("point", "price"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame, pd.DataFrame(matches)
@@ -163,13 +176,12 @@ def compare_priced_offers(
     rows = []
     for projection in projections.itertuples():
         game_offers = offers[offers["game_id"].eq(projection.game_id)].dropna(
-            subset=["point", "price"]
+            subset=["point"]
         )
-        eligible = game_offers[
-            game_offers["execution_eligibility_verified"].astype(bool)
-        ]
+        priced = game_offers.dropna(subset=["price"])
+        eligible = priced[priced["execution_eligibility_verified"].astype(bool)]
         executable = not eligible.empty
-        candidate_offers = eligible if executable else game_offers
+        candidate_offers = eligible if executable else priced
         scale_by_market = {
             "spreads": projection.margin_sd
             * np.sqrt(

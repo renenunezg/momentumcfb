@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -36,14 +37,6 @@ def read_lines(season: int) -> pd.DataFrame:
     return pd.read_parquet(raw_path("lines", season))
 
 
-def read_talent(season: int) -> pd.DataFrame:
-    return pd.read_parquet(RAW_DIR / "talent" / f"{season}.parquet")
-
-
-def read_returning(season: int) -> pd.DataFrame:
-    return pd.read_parquet(RAW_DIR / "returning" / f"{season}.parquet")
-
-
 def read_preseason_source(season: int, source: str) -> pd.DataFrame:
     return pd.read_parquet(RAW_DIR / "preseason" / str(season) / f"{source}.parquet")
 
@@ -56,6 +49,28 @@ def write_processed(df: pd.DataFrame, *parts: str) -> None:
 
 def read_processed(*parts: str, columns: list[str] | None = None) -> pd.DataFrame:
     return pd.read_parquet(PROCESSED_DIR.joinpath(*parts), columns=columns)
+
+
+def write_forecast_outputs(
+    kind: str,
+    season: int,
+    week: int,
+    created_at: datetime,
+    outputs: dict[str, pd.DataFrame],
+    canonical_prefix: tuple[str, ...] = (),
+) -> Path:
+    """Write each forecast frame to its canonical processed path and to an
+    immutable timestamped run log under ``<kind>/forecast_log``."""
+    filename = f"{season}_{week:02d}.parquet"
+    timestamp = created_at.strftime("%Y%m%dT%H%M%S%fZ")
+    log_directory = (
+        PROCESSED_DIR / kind / "forecast_log" / f"{season}_{week:02d}_{timestamp}"
+    )
+    log_directory.mkdir(parents=True, exist_ok=True)
+    for name, frame in outputs.items():
+        write_processed(frame, *canonical_prefix, name, filename)
+        frame.to_parquet(log_directory / f"{name}.parquet", index=False)
+    return log_directory
 
 
 def read_preseason_forecast_artifact(

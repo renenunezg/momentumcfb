@@ -1,8 +1,11 @@
 """Data, feature, and forecast command handlers."""
 
+import logging
 from argparse import Namespace
 
 from backend.config import SEASONS
+
+log = logging.getLogger(__name__)
 
 
 def handle_ingest(args: Namespace) -> None:
@@ -23,7 +26,7 @@ def handle_features(args: Namespace) -> None:
         try:
             plays = store.read_season_pbp(season)
         except FileNotFoundError:
-            print(
+            log.info(
                 f"{season}: no CFBD play-by-play is available; no features to rebuild"
             )
             continue
@@ -33,7 +36,7 @@ def handle_features(args: Namespace) -> None:
         store.write_processed(possessions, "possessions", f"{season}.parquet")
         store.write_processed(team_games, "team_games", f"{season}.parquet")
         store.write_processed(unit_games, "unit_games", f"{season}.parquet")
-        print(
+        log.info(
             f"{season}: {len(possessions)} possessions, "
             f"{len(team_games)} team-game rows, "
             f"{len(unit_games)} unit-game rows"
@@ -44,13 +47,13 @@ def handle_fit(args: Namespace) -> None:
     from backend.model.weekly import run_weekly_forecast
 
     result = run_weekly_forecast(args.season, args.week)
-    print(result.ratings.head(30).to_string(index=False))
-    print(
+    log.info(result.ratings.head(30).to_string(index=False))
+    log.info(
         f"wrote {len(result.ratings)} ratings, "
         f"{len(result.projections)} projections, and "
         f"{len(result.unit_ratings)} unit ratings for Week {result.week}"
     )
-    print(f"forecast log: {result.log_directory}")
+    log.info(f"forecast log: {result.log_directory}")
 
 
 def handle_weekly_update(args: Namespace) -> None:
@@ -73,14 +76,14 @@ def handle_weekly_update(args: Namespace) -> None:
             as_of,
         )
     except WeeklyForecastNotReady as exc:
-        print(f"weekly update not ready: {exc}")
+        log.info(f"weekly update not ready: {exc}")
         return
     if args.week is None and weekly_forecast_is_published(
         args.season,
         forecast_week,
         MODEL_VERSION,
     ):
-        print(
+        log.info(
             f"weekly update already published for {args.season} "
             f"model Week {forecast_week}; no changes made"
         )
@@ -97,7 +100,7 @@ def handle_weekly_update(args: Namespace) -> None:
         except OddsAPIError as exc:
             if "OUT_OF_USAGE_CREDITS" not in str(exc):
                 raise
-            print(
+            log.info(
                 "Odds API quota exhausted; publishing the pure-model forecast "
                 "with market offers marked unavailable"
             )
@@ -109,7 +112,7 @@ def handle_weekly_update(args: Namespace) -> None:
                 as_of=as_of,
             )
     except WeeklyForecastNotReady as exc:
-        print(f"weekly update not ready: {exc}")
+        log.info(f"weekly update not ready: {exc}")
         return
     totals = publish(
         args.season,
@@ -117,13 +120,13 @@ def handle_weekly_update(args: Namespace) -> None:
         source="fit",
         include_backtest=False,
     )
-    print(
+    log.info(
         f"published Week {result.week}: {len(result.ratings)} ratings, "
         f"{len(result.projections)} projections, "
         f"{len(result.market_comparisons)} market comparisons"
     )
-    print(f"serving totals: {totals}")
-    print(f"forecast log: {result.log_directory}")
+    log.info(f"serving totals: {totals}")
+    log.info(f"forecast log: {result.log_directory}")
 
 
 def handle_calibrate(args: Namespace) -> None:
@@ -164,7 +167,7 @@ def handle_calibrate(args: Namespace) -> None:
     result = run_calibration(
         games_by_season,
         strength_priors_by_season=priors_by_season,
-        progress=print,
+        progress=log.info,
     )
     store.write_processed(
         result.predictions,
@@ -176,8 +179,8 @@ def handle_calibrate(args: Namespace) -> None:
         "calibration",
         "joint_scoring_summary.parquet",
     )
-    print(format_diagnostic(result.summary))
-    print(
+    log.info(format_diagnostic(result.summary))
+    log.info(
         f"wrote {len(result.predictions)} predictions and "
         f"{len(result.summary)} calibration rows"
     )
@@ -200,7 +203,7 @@ def handle_preseason(args: Namespace) -> None:
                 raise SystemExit(str(exc)) from exc
         ingest_preseason_sources(CFBDClient(), args.season, odds_client=odds_client)
     result = run_preseason_forecast(args.season, args.week)
-    print(
+    log.info(
         result.ratings[
             [
                 "team",
@@ -215,10 +218,10 @@ def handle_preseason(args: Namespace) -> None:
         .head(25)
         .to_string(index=False)
     )
-    print(
+    log.info(
         f"wrote {len(result.ratings)} ratings, "
         f"{len(result.unit_ratings)} unit ratings, "
         f"{len(result.projections)} projections, and "
         f"{len(result.market_comparisons)} market comparisons"
     )
-    print(f"forecast log: {result.log_directory}")
+    log.info(f"forecast log: {result.log_directory}")

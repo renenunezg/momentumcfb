@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +27,8 @@ from backend.serving.anchors import (
     serving_anchor_artifact,
 )
 from backend.serving.market import MARKET_ANCHOR_WEEK, build_live_market_anchors
+
+log = logging.getLogger(__name__)
 
 REQUIRED_PRESEASON_SOURCES = frozenset(
     {
@@ -840,7 +843,7 @@ def run_kickoff_window(
     max_source_age_hours: float = 48.0,
     max_offer_staleness_seconds: float = 300.0,
     min_providers: int = 2,
-    progress=print,
+    progress=log.info,
     now=lambda: datetime.now(timezone.utc),
     sleep=time.sleep,
 ) -> KickoffRunResult:

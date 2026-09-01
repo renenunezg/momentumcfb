@@ -14,5 +14,3 @@ CFBD_BASE_URL = "https://api.collegefootballdata.com"
 SEASONS = list(range(2019, 2026))
 EVAL_SEASONS = list(range(2021, 2026))
 MAX_REGULAR_WEEK = 16
-
-FCS_LABEL = "FCS"

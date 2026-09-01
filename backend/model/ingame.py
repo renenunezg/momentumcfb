@@ -163,6 +163,65 @@ def _mean_log_loss(outcome: np.ndarray, probability: np.ndarray) -> float:
     )
 
 
+def load_baseline_params(summary: pd.DataFrame) -> IngameBaselineParams:
+    """Rebuild the frozen parameters from a stored baseline summary."""
+    parameter = summary[summary["summary_type"].eq("parameter")].iloc[0]
+    return IngameBaselineParams(
+        possession_points=float(parameter["possession_points"]),
+        field_position_points_per_yard=float(
+            parameter["field_position_points_per_yard"]
+        ),
+        sd_floor_points=float(parameter["sd_floor_points"]),
+    )
+
+
+def check_frozen_probabilities(
+    predictions: pd.DataFrame, params: IngameBaselineParams
+) -> None:
+    """Raise unless stored baseline probabilities reproduce from ``params``."""
+    if not np.allclose(
+        win_probability(predictions, params),
+        predictions["win_probability"].to_numpy(float),
+        atol=1e-9,
+    ):
+        raise ValueError(
+            "stored baseline probabilities do not match the frozen parameters"
+        )
+
+
+def comparison_row(
+    frame: pd.DataFrame,
+    probability_column: str,
+    partition: str,
+    scope: str,
+    group_value: str,
+) -> dict[str, object]:
+    """Score one candidate probability column against the stored baseline."""
+    outcome = frame["home_win"].to_numpy(float)
+    baseline = frame["baseline_win_probability"].to_numpy(float)
+    candidate = frame[probability_column].to_numpy(float)
+    row = {
+        "summary_type": "evaluation",
+        "partition": partition,
+        "scope": scope,
+        "group_value": group_value,
+        "n_states": len(frame),
+        "n_games": int(frame["game_id"].nunique()),
+        "log_loss": _mean_log_loss(outcome, candidate),
+        "brier": float(np.mean(np.square(candidate - outcome))),
+        "baseline_log_loss": _mean_log_loss(outcome, baseline),
+        "baseline_brier": float(np.mean(np.square(baseline - outcome))),
+    }
+    row["log_loss_delta"] = row["log_loss"] - row["baseline_log_loss"]
+    row["brier_delta"] = row["brier"] - row["baseline_brier"]
+    row["diagnostic"] = (
+        f"log loss {row['log_loss']:.5f} vs baseline "
+        f"{row['baseline_log_loss']:.5f} ({row['log_loss_delta']:+.5f}); "
+        f"Brier delta {row['brier_delta']:+.5f}"
+    )
+    return row
+
+
 def fit_baseline(inputs: pd.DataFrame) -> IngameBaselineParams:
     """Fit the three baseline parameters by play-level log loss."""
     if inputs.empty:

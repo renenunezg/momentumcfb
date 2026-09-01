@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -8,6 +9,8 @@ import pandas as pd
 from backend.cfbd.client import CFBDClient
 from backend.config import MAX_REGULAR_WEEK, RAW_DIR
 from backend.odds.client import OddsAPIClient
+
+log = logging.getLogger(__name__)
 
 SEASON_TYPES = ("regular", "postseason")
 
@@ -66,14 +69,14 @@ def ingest_cfbd_plays(
                 df,
                 RAW_DIR / "pbp" / str(season) / f"{season_type}_{week:02d}.parquet",
             )
-            print(f"plays {season} {season_type} week {week}: {len(df)} rows")
+            log.info(f"plays {season} {season_type} week {week}: {len(df)} rows")
 
 
 def ingest_games(client: CFBDClient, season: int) -> None:
     rows = client.get("/games", {"year": season, "seasonType": "both"})
     games = to_snake(pd.DataFrame(rows))
     write_parquet(games, RAW_DIR / "games" / f"{season}.parquet")
-    print(f"games {season}: {len(rows)} rows")
+    log.info(f"games {season}: {len(rows)} rows")
 
 
 def ingest_lines(client: CFBDClient, season: int) -> None:
@@ -85,7 +88,7 @@ def ingest_lines(client: CFBDClient, season: int) -> None:
         }
     )
     write_parquet(df, RAW_DIR / "lines" / f"{season}.parquet")
-    print(f"lines {season}: {len(df)} rows")
+    log.info(f"lines {season}: {len(df)} rows")
 
 
 def ingest_talent(client: CFBDClient, season: int) -> None:
@@ -134,7 +137,7 @@ def ingest_preseason_sources(
                 "is_empty": frame.empty,
             }
         )
-        print(f"preseason {season} {name}: {len(frame)} rows")
+        log.info(f"preseason {season} {name}: {len(frame)} rows")
 
     if odds_client is not None:
         if games_frame is None:
@@ -172,7 +175,7 @@ def ingest_preseason_sources(
                 "request_cost": snapshot.request_cost,
             }
         )
-        print(
+        log.info(
             f"preseason {season} odds_api: {len(odds)} events, "
             f"cost={snapshot.request_cost}, "
             f"remaining={snapshot.requests_remaining}"

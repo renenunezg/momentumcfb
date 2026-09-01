@@ -42,14 +42,12 @@ def _block_unauthorized_writes(
 
 
 def _pin_search_path(dbapi_connection, connection_record):
-    # The shared postgres role carries a role-level search_path=mlb,public
-    # (set for mlbmodel), and role settings win over the startup options
-    # through the pooler; a session-level SET wins over both.
+    # The shared role defaults search_path to mlb, and role settings win over
+    # startup options through the pooler; a session-level SET wins over both.
     with dbapi_connection.cursor() as cursor:
         cursor.execute(f"SET search_path TO {CFB_SCHEMA}, public")
-        # The shared database pins extra_float_digits = 0, which truncates
-        # float8 text output to 12 significant digits; 3 restores exact
-        # round-trips for every double precision read through this engine.
+        # The database pins extra_float_digits = 0, which truncates float8
+        # text to 12 digits; 3 restores exact round-trips.
         cursor.execute("SET extra_float_digits = 3")
 
 

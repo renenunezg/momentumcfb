@@ -9,6 +9,7 @@ line movement alone can never mark a pregame offer as live.
 
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -19,12 +20,15 @@ import requests
 from backend.config import RAW_DIR
 from backend.etl.ingest import write_parquet
 from backend.odds.client import (
+    EventsSnapshot,
     OddsAPIClient,
     OddsAPIError,
     OddsSnapshot,
     ScoreboardSnapshot,
 )
-from backend.odds.markets import match_event
+from backend.odds.markets import match_event, offer_selection
+
+log = logging.getLogger(__name__)
 
 PHASES = ("pregame", "live", "final", "unknown")
 DIVISION_ONE = {"fbs", "fcs"}
@@ -311,37 +315,25 @@ def _team_score(scores, team: str) -> float | None:
     return None
 
 
-def build_live_snapshot(
-    season: int,
+def _event_rows(
+    snapshot_id: str,
+    fetched_at: datetime,
     odds: OddsSnapshot,
     scoreboard: ScoreboardSnapshot,
     schedule: pd.DataFrame,
-    query_window: tuple[datetime, datetime],
-    days_from: int | None,
-    requested_markets: tuple[str, ...] = LIVE_MARKETS,
-) -> LiveSnapshot:
-    requested_markets = normalize_live_markets(requested_markets)
-    fetched_at = odds.fetched_at
-    snapshot_id = snapshot_id_for(fetched_at)
+) -> list[dict]:
     scoreboard_by_id = {event.get("id"): event for event in scoreboard.events}
     odds_ids = {event.get("id") for event in odds.events}
-    execution_verified = bool(odds.configured_bookmakers)
-
-    event_rows = []
-    offer_rows = []
-    dropped_unmatched = 0
-    dropped_untimestamped = 0
-
     merged_events: dict[str, dict] = {}
     for event in scoreboard.events:
         merged_events[event.get("id")] = event
     for event in odds.events:
         merged_events.setdefault(event.get("id"), event)
 
+    rows = []
     for event_id, event in merged_events.items():
         status = scoreboard_by_id.get(event_id)
         completed = None if status is None else bool(status.get("completed"))
-        phase = resolve_phase(event.get("commence_time"), completed, fetched_at)
         scoreboard_last_update = None if status is None else status.get("last_update")
         game_id, match_score = match_event(
             event.get("commence_time"),
@@ -349,7 +341,7 @@ def build_live_snapshot(
             event.get("away_team", ""),
             schedule,
         )
-        event_rows.append(
+        rows.append(
             {
                 "snapshot_id": snapshot_id,
                 "fetched_at": fetched_at,
@@ -357,7 +349,9 @@ def build_live_snapshot(
                 "commence_time": event.get("commence_time"),
                 "odds_home_team": event.get("home_team"),
                 "odds_away_team": event.get("away_team"),
-                "phase": phase,
+                "phase": resolve_phase(
+                    event.get("commence_time"), completed, fetched_at
+                ),
                 "status_source": "scores" if status is not None else "missing",
                 "status_completed": completed,
                 "scoreboard_last_update": scoreboard_last_update,
@@ -376,31 +370,38 @@ def build_live_snapshot(
                 "has_odds": event_id in odds_ids,
             }
         )
+    return rows
 
-    phase_by_id = {row["odds_api_event_id"]: row["phase"] for row in event_rows}
-    game_by_id = {row["odds_api_event_id"]: row["game_id"] for row in event_rows}
-    score_by_id = {row["odds_api_event_id"]: row["match_score"] for row in event_rows}
 
+def _offer_rows(
+    snapshot_id: str,
+    fetched_at: datetime,
+    odds: OddsSnapshot,
+    event_rows: list[dict],
+) -> tuple[list[dict], int, int]:
+    """Flatten bookmaker outcomes; returns rows plus the unmatched and
+    untimestamped drop counts recorded on the poll row."""
+    events_by_id = {row["odds_api_event_id"]: row for row in event_rows}
+    execution_verified = bool(odds.configured_bookmakers)
+    rows = []
+    dropped_unmatched = 0
+    dropped_untimestamped = 0
     for event in odds.events:
         event_id = event.get("id")
-        game_id = game_by_id.get(event_id)
+        event_row = events_by_id.get(event_id, {})
+        game_id = event_row.get("game_id")
         for bookmaker in event.get("bookmakers") or []:
             for market in bookmaker.get("markets") or []:
                 market_key = market.get("key")
-                if market_key not in {"spreads", "totals"}:
-                    continue
                 for outcome in market.get("outcomes") or []:
-                    if market_key == "spreads":
-                        if outcome.get("name") == event.get("home_team"):
-                            selection = "home"
-                        elif outcome.get("name") == event.get("away_team"):
-                            selection = "away"
-                        else:
-                            continue
-                    else:
-                        selection = str(outcome.get("name", "")).lower()
-                        if selection not in {"over", "under"}:
-                            continue
+                    selection = offer_selection(
+                        market_key,
+                        outcome.get("name"),
+                        event.get("home_team"),
+                        event.get("away_team"),
+                    )
+                    if selection is None:
+                        continue
                     if game_id is None:
                         dropped_unmatched += 1
                         continue
@@ -411,14 +412,14 @@ def build_live_snapshot(
                     if staleness is None:
                         dropped_untimestamped += 1
                         continue
-                    offer_rows.append(
+                    rows.append(
                         {
                             "snapshot_id": snapshot_id,
                             "fetched_at": fetched_at,
                             "game_id": game_id,
-                            "match_score": score_by_id.get(event_id),
+                            "match_score": event_row.get("match_score"),
                             "odds_api_event_id": event_id,
-                            "phase": phase_by_id.get(event_id, "unknown"),
+                            "phase": event_row.get("phase", "unknown"),
                             "commence_time": event.get("commence_time"),
                             "provider_key": bookmaker.get("key"),
                             "provider": bookmaker.get("title"),
@@ -434,7 +435,25 @@ def build_live_snapshot(
                             "execution_eligibility_verified": execution_verified,
                         }
                     )
+    return rows, dropped_unmatched, dropped_untimestamped
 
+
+def build_live_snapshot(
+    season: int,
+    odds: OddsSnapshot,
+    scoreboard: ScoreboardSnapshot,
+    schedule: pd.DataFrame,
+    query_window: tuple[datetime, datetime],
+    days_from: int | None,
+    requested_markets: tuple[str, ...] = LIVE_MARKETS,
+) -> LiveSnapshot:
+    requested_markets = normalize_live_markets(requested_markets)
+    fetched_at = odds.fetched_at
+    snapshot_id = snapshot_id_for(fetched_at)
+    event_rows = _event_rows(snapshot_id, fetched_at, odds, scoreboard, schedule)
+    offer_rows, dropped_unmatched, dropped_untimestamped = _offer_rows(
+        snapshot_id, fetched_at, odds, event_rows
+    )
     events_frame = pd.DataFrame(event_rows, columns=EVENT_COLUMNS).astype(EVENT_DTYPES)
     offers_frame = pd.DataFrame(offer_rows, columns=OFFER_COLUMNS).astype(OFFER_DTYPES)
 
@@ -558,27 +577,14 @@ def record_failed_poll(
     return snapshot_id
 
 
-def capture_live_snapshot(
+def _discover_target_events(
     client: OddsAPIClient,
-    season: int,
     schedule: pd.DataFrame,
-    lookback_hours: float,
-    lookahead_hours: float,
-    days_from: int | None,
-    min_quota: int,
-    required_game_ids: tuple[int, ...] | None = None,
-    markets: tuple[str, ...] = LIVE_MARKETS,
-    future_poll_markets: tuple[tuple[str, ...], ...] = (),
-) -> LiveSnapshot:
-    markets = normalize_live_markets(markets)
-    future_poll_markets = tuple(
-        normalize_live_markets(planned) for planned in future_poll_markets
-    )
-    now = datetime.now(timezone.utc)
-    window = (
-        now - timedelta(hours=lookback_hours),
-        now + timedelta(hours=lookahead_hours),
-    )
+    window: tuple[datetime, datetime],
+    required_game_ids: tuple[int, ...] | None,
+) -> tuple[EventsSnapshot, tuple[int, ...], list[str], dict[str, str]]:
+    """Free event discovery; returns the snapshot, the required game ids, the
+    event ids to buy odds for, and each event's commence time."""
     discovery = client.get_ncaaf_events(*window)
     if discovery.request_cost != 0:
         raise OddsAPIError(
@@ -587,8 +593,8 @@ def capture_live_snapshot(
     if discovery.requests_remaining is None:
         raise OddsAPIError("free event discovery lacked quota provenance")
 
-    event_id_by_game = {}
-    commence_by_event_id = {}
+    event_id_by_game: dict[int, str] = {}
+    commence_by_event_id: dict[str, str] = {}
     for event in discovery.events:
         game_id, _ = match_event(
             event.get("commence_time"),
@@ -602,13 +608,11 @@ def capture_live_snapshot(
             event_id_by_game.setdefault(int(game_id), event_id)
             commence_by_event_id[event_id] = event.get("commence_time")
     required = tuple(dict.fromkeys(required_game_ids or ()))
-    missing_discovery = [
-        game_id for game_id in required if game_id not in event_id_by_game
-    ]
-    if missing_discovery:
+    missing = [game_id for game_id in required if game_id not in event_id_by_game]
+    if missing:
         raise LivePollSkipped(
             "free event discovery is missing target games: "
-            + ", ".join(str(game_id) for game_id in missing_discovery),
+            + ", ".join(str(game_id) for game_id in missing),
             discovery.requests_remaining,
         )
     relevant_event_ids = (
@@ -621,72 +625,72 @@ def capture_live_snapshot(
             "free event discovery found no matching Division I games",
             discovery.requests_remaining,
         )
+    return discovery, required, relevant_event_ids, commence_by_event_id
 
-    scores_cost = 2 if days_from is not None else SCORES_COST
-    current_odds_cost = len(markets)
-    future_cost = sum(
-        live_poll_quota_cost(planned, days_from) for planned in future_poll_markets
+
+def _has_spread(event: dict) -> bool:
+    return any(
+        market.get("key") == "spreads"
+        for bookmaker in event.get("bookmakers") or []
+        for market in bookmaker.get("markets") or []
     )
-    remaining = discovery.requests_remaining
-    reserved_cost = current_odds_cost + scores_cost + future_cost
-    if remaining - reserved_cost < min_quota:
-        raise QuotaFloorReached(
-            f"{remaining} credits remain; {1 + len(future_poll_markets)} "
-            "remaining live "
-            f"cycles reserve {reserved_cost} credits and would cross the "
-            f"{min_quota}-credit floor"
-        )
 
+
+def _fetch_target_odds(
+    client: OddsAPIClient,
+    window: tuple[datetime, datetime],
+    markets: tuple[str, ...],
+    relevant_event_ids: list[str],
+    required: tuple[int, ...],
+    commence_by_event_id: dict[str, str],
+    now: datetime,
+) -> OddsSnapshot:
+    """Buy odds for the discovered events and keep only those with a spread.
+
+    A required event that is missing after kickoff is tolerated (the book has
+    pulled it); any other gap is a partial paid poll or a skip.
+    """
     odds = client.get_ncaaf_odds(
-        *window,
-        markets=markets,
-        event_ids=tuple(relevant_event_ids),
+        *window, markets=markets, event_ids=tuple(relevant_event_ids)
     )
-    if odds.request_cost is None or not 0 <= odds.request_cost <= current_odds_cost:
+    if odds.request_cost is None or not 0 <= odds.request_cost <= len(markets):
         raise PartialPaidPollError(
             "odds response returned missing or unexpected request cost", odds
         )
     if odds.requests_remaining is None:
         raise PartialPaidPollError("odds response lacked quota provenance", odds)
 
-    def has_spread(event: dict) -> bool:
-        return any(
-            market.get("key") == "spreads"
-            for bookmaker in event.get("bookmakers") or []
-            for market in bookmaker.get("markets") or []
-        )
-
     selected_ids = set(relevant_event_ids)
     returned = [
         event
         for event in odds.events
-        if event.get("id") in selected_ids and has_spread(event)
+        if event.get("id") in selected_ids and _has_spread(event)
     ]
     returned_ids = {str(event.get("id")) for event in returned}
-    missing_odds = [
+    missing = [
         event_id for event_id in relevant_event_ids if event_id not in returned_ids
     ]
-    if missing_odds:
+    if missing:
         reason = "spread odds are missing discovered target events: " + ", ".join(
-            missing_odds
+            missing
         )
         missing_have_started = all(
             pd.to_datetime(
                 commence_by_event_id.get(event_id), utc=True, errors="coerce"
             )
             <= pd.Timestamp(now)
-            for event_id in missing_odds
+            for event_id in missing
         )
         if not required or not missing_have_started:
             if odds.request_cost:
                 raise PartialPaidPollError(reason, odds)
             raise LivePollSkipped(reason, odds.requests_remaining)
-    if not returned and not missing_odds:
+    if not returned and not missing:
         raise LivePollSkipped(
             "no spread odds were returned for the discovered games",
             odds.requests_remaining,
         )
-    odds = OddsSnapshot(
+    return OddsSnapshot(
         events=returned,
         fetched_at=odds.fetched_at,
         requests_remaining=odds.requests_remaining,
@@ -694,15 +698,17 @@ def capture_live_snapshot(
         request_cost=odds.request_cost,
         configured_bookmakers=odds.configured_bookmakers,
     )
-    future_reserved_cost = scores_cost + future_cost
-    if odds.requests_remaining - future_reserved_cost < min_quota:
-        raise QuotaFloorReached(
-            f"{odds.requests_remaining} credits remain after odds; a "
-            f"{future_reserved_cost}-credit reserve for scores and future "
-            f"cycles would cross the {min_quota}-credit floor",
-            odds,
-        )
 
+
+def _fetch_target_scores(
+    client: OddsAPIClient,
+    days_from: int | None,
+    scores_cost: int,
+    relevant_event_ids: list[str],
+    odds: OddsSnapshot,
+    future_cost: int,
+    min_quota: int,
+) -> ScoreboardSnapshot:
     try:
         scoreboard = client.get_ncaaf_scores(days_from)
     except (OddsAPIError, requests.RequestException) as exc:
@@ -722,12 +728,80 @@ def capture_live_snapshot(
             scoreboard,
         )
     relevant = set(relevant_event_ids)
-    scoreboard = ScoreboardSnapshot(
+    return ScoreboardSnapshot(
         events=[event for event in scoreboard.events if event.get("id") in relevant],
         fetched_at=scoreboard.fetched_at,
         requests_remaining=scoreboard.requests_remaining,
         requests_used=scoreboard.requests_used,
         request_cost=scoreboard.request_cost,
+    )
+
+
+def capture_live_snapshot(
+    client: OddsAPIClient,
+    season: int,
+    schedule: pd.DataFrame,
+    lookback_hours: float,
+    lookahead_hours: float,
+    days_from: int | None,
+    min_quota: int,
+    required_game_ids: tuple[int, ...] | None = None,
+    markets: tuple[str, ...] = LIVE_MARKETS,
+    future_poll_markets: tuple[tuple[str, ...], ...] = (),
+) -> LiveSnapshot:
+    """One paid poll: discover, check the quota floor, buy odds, buy scores,
+    and append the snapshot. Every failure after a paid call is reported with
+    the quota provenance of the calls that did complete."""
+    markets = normalize_live_markets(markets)
+    future_poll_markets = tuple(
+        normalize_live_markets(planned) for planned in future_poll_markets
+    )
+    now = datetime.now(timezone.utc)
+    window = (
+        now - timedelta(hours=lookback_hours),
+        now + timedelta(hours=lookahead_hours),
+    )
+    discovery, required, relevant_event_ids, commence_by_event_id = (
+        _discover_target_events(client, schedule, window, required_game_ids)
+    )
+
+    scores_cost = 2 if days_from is not None else SCORES_COST
+    future_cost = sum(
+        live_poll_quota_cost(planned, days_from) for planned in future_poll_markets
+    )
+    reserved_cost = len(markets) + scores_cost + future_cost
+    if discovery.requests_remaining - reserved_cost < min_quota:
+        raise QuotaFloorReached(
+            f"{discovery.requests_remaining} credits remain; "
+            f"{1 + len(future_poll_markets)} remaining live cycles reserve "
+            f"{reserved_cost} credits and would cross the {min_quota}-credit floor"
+        )
+
+    odds = _fetch_target_odds(
+        client,
+        window,
+        markets,
+        relevant_event_ids,
+        required,
+        commence_by_event_id,
+        now,
+    )
+    future_reserved_cost = scores_cost + future_cost
+    if odds.requests_remaining - future_reserved_cost < min_quota:
+        raise QuotaFloorReached(
+            f"{odds.requests_remaining} credits remain after odds; a "
+            f"{future_reserved_cost}-credit reserve for scores and future "
+            f"cycles would cross the {min_quota}-credit floor",
+            odds,
+        )
+    scoreboard = _fetch_target_scores(
+        client,
+        days_from,
+        scores_cost,
+        relevant_event_ids,
+        odds,
+        future_cost,
+        min_quota,
     )
     snapshot = build_live_snapshot(
         season,
@@ -779,7 +853,7 @@ def run_live_polling(
     max_failures: int,
     required_game_ids: tuple[int, ...] | None = None,
     poll_markets: tuple[tuple[str, ...], ...] | None = None,
-    progress=print,
+    progress=log.info,
     sleep=time.sleep,
     monotonic=time.monotonic,
 ) -> int:

@@ -4,19 +4,19 @@ from pathlib import Path
 
 import pandas as pd
 
-from backend.config import PROCESSED_DIR
 from backend.etl import store
 from backend.features.scoring import SCORING_COLUMNS, build_weekly_scoring_games
 from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.market_blend import add_market_informed_margins
 from backend.model.preseason import (
+    MISSING_INPUT_COLUMNS,
     load_preseason_ratings,
     strength_prior_means_from_ratings,
 )
 from backend.model.unit_ratings import fit_unit_ratings
 from backend.odds.markets import compare_priced_offers, flatten_odds_api_offers
 
-MAX_MISSING_INPUT_COUNT = 9
+MAX_MISSING_INPUT_COUNT = len(MISSING_INPUT_COLUMNS)
 
 
 class WeeklyForecastNotReady(RuntimeError):
@@ -280,25 +280,6 @@ def _odds_frames(odds_client, target: pd.DataFrame):
     return events, offers, matches, snapshot
 
 
-def _write_outputs(
-    season: int,
-    week: int,
-    created_at: datetime,
-    outputs: dict[str, pd.DataFrame],
-) -> Path:
-    filename = f"{season}_{week:02d}.parquet"
-    timestamp = created_at.strftime("%Y%m%dT%H%M%S%fZ")
-    log_directory = (
-        PROCESSED_DIR / "weekly" / "forecast_log" / f"{season}_{week:02d}_{timestamp}"
-    )
-    for name, frame in outputs.items():
-        store.write_processed(frame, name, filename)
-        path = log_directory / f"{name}.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        frame.to_parquet(path, index=False)
-    return log_directory
-
-
 def run_weekly_forecast(
     season: int,
     week: int | None = None,
@@ -417,7 +398,8 @@ def run_weekly_forecast(
             }
         ]
     )
-    log_directory = _write_outputs(
+    log_directory = store.write_forecast_outputs(
+        "weekly",
         season,
         forecast_week,
         created_at,

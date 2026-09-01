@@ -1,6 +1,9 @@
 """Serving anchor, scoring, and verification command handlers."""
 
+import logging
 from argparse import Namespace
+
+log = logging.getLogger(__name__)
 
 
 def handle_serving_anchors(args: Namespace) -> None:
@@ -45,7 +48,7 @@ def handle_serving_anchors(args: Namespace) -> None:
             else (None, [])
         )
         for problem in problems:
-            print(f"PROBLEM: {problem}")
+            log.info(f"PROBLEM: {problem}")
         if problems:
             raise SystemExit(1)
         week = MARKET_ANCHOR_WEEK
@@ -81,7 +84,7 @@ def handle_serving_anchors(args: Namespace) -> None:
         if args.source == "market"
         else f"the {args.source} projections"
     )
-    print(
+    log.info(
         f"wrote {'/'.join(artifact)}: {len(stored)} outcome-free anchors "
         f"for season {args.season} model week"
         f"{'s' if len(weeks) > 1 else ''} "
@@ -94,18 +97,18 @@ def handle_serving_anchors(args: Namespace) -> None:
     )
     if args.source == "market":
         if market_feed == "live-odds":
-            print(
+            log.info(
                 f"froze {built['closing_snapshot_id'].nunique()} latest "
                 "pregame snapshots; live and post-kickoff offers excluded"
             )
         else:
-            print(
+            log.info(
                 f"cross-checked {checked} closing spreads against "
                 "backtest/predictions_filtered.parquet"
                 + ("" if checked else " (season absent from the backtest)")
             )
         sd_note = built["margin_sd_method"].iloc[0]
-        print(f"margin_sd {built['margin_sd'].iloc[0]:.3f} points ({sd_note})")
+        log.info(f"margin_sd {built['margin_sd'].iloc[0]:.3f} points ({sd_note})")
 
 
 def handle_serve_game(args: Namespace) -> None:
@@ -133,13 +136,13 @@ def handle_serve_game(args: Namespace) -> None:
     artifact = served_events_artifact(args.season, args.game_id)
     store.write_processed(events, *artifact)
     latency = summarize_latency(events["latency_seconds"])
-    print(
+    log.info(
         f"wrote {'/'.join(artifact)}: {int(events['emitted'].sum())} win "
         f"probabilities across {len(events)} play events for game "
         f"{args.game_id} (model week {int(events['model_week'].iloc[0])}, "
         f"{args.anchor_source} anchors)"
     )
-    print(
+    log.info(
         f"latency per event: median {latency['median_seconds'] * 1e3:.1f} ms, "
         f"p99 {latency['p99_seconds'] * 1e3:.1f} ms, "
         f"max {latency['max_seconds'] * 1e3:.1f} ms"
@@ -155,7 +158,7 @@ def handle_serve_verify(args: Namespace) -> None:
     except (FileNotFoundError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     for problem in problems:
-        print(f"PROBLEM: {problem}")
+        log.info(f"PROBLEM: {problem}")
     if args.game_id is None:
         store.write_processed(
             frames["games"],
@@ -168,14 +171,14 @@ def handle_serve_verify(args: Namespace) -> None:
             f"served_verification_{args.season}.parquet",
         )
     summary = frames["summary"].iloc[0]
-    print(
+    log.info(
         f"{summary['status']}: {summary['served_rows']} served "
         f"probabilities vs {summary['stored_rows']} stored baseline rows "
         f"across {summary['compared_games']} of {summary['served_games']} "
         f"served games"
     )
     if summary["unverifiable_games"]:
-        print(
+        log.info(
             f"{summary['unverifiable_games']} served games have no stored "
             "baseline predictions to compare against"
         )

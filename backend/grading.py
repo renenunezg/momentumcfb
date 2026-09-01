@@ -1,14 +1,9 @@
 """Grade frozen published projections against final scores and closing lines.
 
-The grading record is built only from records that were frozen before the
-result was known: the projection row the site published before kickoff, the
-CFBD closing line, and the final score. A game is graded once. Later grading
-runs keep the stored row and add only newly completed games, so the metrics
-can always be regenerated from the same frozen rows.
-
-The closing line is the benchmark, never an input: the pure model margin is
-graded on its own, the market-informed blend separately, and the closing
-market itself as the bar every model source is measured against.
+Inputs are records frozen before the result was known: the projection row
+published before kickoff, the CFBD closing line, and the final score. A game
+is graded once; later runs keep stored rows and add newly completed games.
+The closing line is a benchmark graded alongside the model, never an input.
 """
 
 from __future__ import annotations

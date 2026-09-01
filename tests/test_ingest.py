@@ -1,10 +1,8 @@
-from argparse import Namespace
 from types import SimpleNamespace
 
 import pandas as pd
 
 from backend import cli
-from backend.commands import pipeline
 from backend.etl import ingest, store
 from backend.odds.client import OddsAPIError
 
@@ -136,7 +134,7 @@ def test_weekly_update_publishes_pure_model_when_odds_quota_is_exhausted(
     monkeypatch.setattr(publish, "publish", lambda *args, **kwargs: {})
     monkeypatch.setattr(odds_client, "OddsAPIClient", lambda: object())
 
-    pipeline.handle_weekly_update(Namespace(season=2026, week=None))
+    cli.main(["weekly-update", "--season", "2026"])
 
     assert [call["require_market"] for call in calls] == [True, False]
     assert calls[0]["odds_client"] is not None
