@@ -79,6 +79,23 @@ _NO_DECAY_REFINEMENT_CANDIDATES = tuple(
     )
 )
 
+# Full-season fits compress ratings about 30 percent in-sample at the selected
+# prior spread, so the no-decay search also covers wider priors.
+_WIDE_PRIOR_CANDIDATES = tuple(
+    JointScoringConfig(
+        rating_half_life_weeks=np.inf,
+        strength_prior_sd_ppp=prior_sd,
+        covariance_shrinkage=shrinkage,
+        student_t_degrees_of_freedom=degrees_of_freedom,
+        score_covariance_scale=covariance_scale,
+    )
+    for prior_sd, shrinkage, degrees_of_freedom, covariance_scale in product(
+        (0.55, 0.65, 0.80, 1.00),
+        (0.5, 0.7, 0.8, 0.9),
+        (250.0, 500.0, 1000.0),
+        (1.10, 1.125, 1.15),
+    )
+)
 CANDIDATE_CONFIGS = tuple(
     dict.fromkeys(
         (
@@ -86,6 +103,7 @@ CANDIDATE_CONFIGS = tuple(
             *_REFINEMENT_CANDIDATES,
             *_FINAL_REFINEMENT_CANDIDATES,
             *_NO_DECAY_REFINEMENT_CANDIDATES,
+            *_WIDE_PRIOR_CANDIDATES,
         )
     )
 )
