@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 import pyarrow.parquet
 
@@ -22,12 +24,16 @@ def read_season_pbp(season: int) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def raw_path(kind: str, season: int) -> Path:
+    return RAW_DIR / kind / f"{season}.parquet"
+
+
 def read_games(season: int) -> pd.DataFrame:
-    return pd.read_parquet(RAW_DIR / "games" / f"{season}.parquet")
+    return pd.read_parquet(raw_path("games", season))
 
 
 def read_lines(season: int) -> pd.DataFrame:
-    return pd.read_parquet(RAW_DIR / "lines" / f"{season}.parquet")
+    return pd.read_parquet(raw_path("lines", season))
 
 
 def read_talent(season: int) -> pd.DataFrame:

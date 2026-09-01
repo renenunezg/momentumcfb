@@ -321,6 +321,24 @@ def parse_args(argv=None):
             "projection artifact",
         )
 
+    grade = sub.add_parser(
+        "grade",
+        help="grade completed games from the frozen published projection, "
+        "the CFBD closing line, and the final score",
+    )
+    grade.add_argument("--season", type=int, required=True)
+    grade.add_argument(
+        "--regrade",
+        action="store_true",
+        help="rebuild every graded row instead of keeping stored grades",
+    )
+
+    publish_grading = sub.add_parser(
+        "publish-grading",
+        help="publish graded games and performance metrics to the cfb schema",
+    )
+    publish_grading.add_argument("--season", type=int, required=True)
+
     return p.parse_args(argv)
 
 
