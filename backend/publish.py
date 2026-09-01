@@ -9,6 +9,8 @@ Supabase is the only interface between this model and the website
 - game_projections      current forecast, one row per game
 - market_comparisons    best priced offer vs model, one row per game
 - backtest_predictions  frozen walk-forward history, full refresh
+- graded_games          frozen live-season grading record, one row per game
+- performance_metrics   live-season aggregates per source and segment
 
 Writes use per-key DELETE + append (or TRUNCATE + append for the full
 backtest refresh) so RLS, policies, and indexes on the tables survive;
@@ -24,6 +26,11 @@ from sqlalchemy import text
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.db import CFB_SCHEMA
+from backend.grading import (
+    GRADED_GAME_COLUMNS,
+    PERFORMANCE_METRIC_COLUMNS,
+    read_grading_artifacts,
+)
 
 # Identity only. Conference and classification are deliberately absent: every
 # consumer already loads team_ratings, which carries both.
@@ -188,6 +195,10 @@ _TIMESTAMP_COLUMNS = {
     "best_offer_provider_last_update",
     "closing_fetched_at",
     "latest_provider_update",
+    "forecast_as_of",
+    "source_ingested_at",
+    "graded_at",
+    "computed_at",
 }
 
 
@@ -582,4 +593,76 @@ def publish(
                 ).scalar()
             )
             for table in tables
+        }
+
+
+def fetch_published_projections(season: int) -> pd.DataFrame:
+    """Read the frozen published projection record for one season."""
+    from backend.db import engine
+
+    with engine.connect() as conn:
+        return pd.read_sql_query(
+            text(
+                f"SELECT * FROM {CFB_SCHEMA}.game_projections "
+                "WHERE season = :s ORDER BY as_of, game_id"
+            ),
+            conn,
+            params={"s": season},
+        )
+
+
+def fetch_graded_games(season: int) -> pd.DataFrame:
+    """Read the stored grading record so graded rows are never rebuilt."""
+    from backend.db import engine
+
+    with engine.connect() as conn:
+        if not _table_exists(conn, "graded_games"):
+            return pd.DataFrame(columns=GRADED_GAME_COLUMNS)
+        return pd.read_sql_query(
+            text(
+                "SELECT "
+                + ", ".join(GRADED_GAME_COLUMNS)
+                + f" FROM {CFB_SCHEMA}.graded_games WHERE season = :s ORDER BY game_id"
+            ),
+            conn,
+            params={"s": season},
+        )
+
+
+def publish_grading(season: int) -> dict[str, int]:
+    """Publish the local grading artifacts for one season in one transaction."""
+    from backend.db import engine
+
+    graded, metrics = read_grading_artifacts(season)
+    graded_rows = _serving_frame(graded, GRADED_GAME_COLUMNS)
+    metric_rows = _serving_frame(metrics, PERFORMANCE_METRIC_COLUMNS)
+
+    with engine.begin() as conn:
+        for table, rows in (
+            ("graded_games", graded_rows),
+            ("performance_metrics", metric_rows),
+        ):
+            conn.execute(
+                text(f"DELETE FROM {CFB_SCHEMA}.{table} WHERE season = :s"),
+                {"s": season},
+            )
+            if not rows.empty:
+                rows.to_sql(
+                    table,
+                    con=conn,
+                    schema=CFB_SCHEMA,
+                    if_exists="append",
+                    index=False,
+                )
+    with engine.connect() as conn:
+        return {
+            table: int(
+                conn.execute(
+                    text(
+                        f"SELECT count(*) FROM {CFB_SCHEMA}.{table} WHERE season = :s"
+                    ),
+                    {"s": season},
+                ).scalar()
+            )
+            for table in ("graded_games", "performance_metrics")
         }

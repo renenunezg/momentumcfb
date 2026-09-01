@@ -52,25 +52,36 @@ LIVE_MARKET_PROVENANCE_COLUMNS = [
 ]
 
 
+def _median_offer_field(
+    lines: pd.DataFrame, field: str, value_column: str, count_column: str
+) -> pd.DataFrame:
+    records = []
+    for game_id, offers in zip(lines["game_id"], lines["lines"]):
+        for offer in offers:
+            value = offer.get(field)
+            if value is not None and isfinite(float(value)):
+                records.append((game_id, float(value)))
+    if not records:
+        raise ValueError(f"lines carry no priced {field} offers to flatten")
+    flat = pd.DataFrame(records, columns=["game_id", field])
+    grouped = flat.groupby("game_id")[field].agg(
+        **{value_column: "median", count_column: "size"}
+    )
+    return grouped.reset_index()
+
+
 def flatten_closing_lines(lines: pd.DataFrame) -> pd.DataFrame:
     """Resolve one closing spread per game from the nested provider offers.
 
     The closing spread is the median across every priced provider spread,
     which is exactly the resolution the backtest market comparison used.
     """
-    records = []
-    for game_id, offers in zip(lines["game_id"], lines["lines"]):
-        for offer in offers:
-            spread = offer.get("spread")
-            if spread is not None and isfinite(float(spread)):
-                records.append((game_id, float(spread)))
-    if not records:
-        raise ValueError("lines carry no priced spreads to flatten")
-    flat = pd.DataFrame(records, columns=["game_id", "spread"])
-    grouped = flat.groupby("game_id")["spread"].agg(
-        closing_spread="median", n_spread_offers="size"
-    )
-    return grouped.reset_index()
+    return _median_offer_field(lines, "spread", "closing_spread", "n_spread_offers")
+
+
+def flatten_closing_totals(lines: pd.DataFrame) -> pd.DataFrame:
+    """Resolve one closing total per game, the median provider over/under."""
+    return _median_offer_field(lines, "overUnder", "closing_total", "n_total_offers")
 
 
 def flatten_live_closing_lines(offers: pd.DataFrame) -> pd.DataFrame:

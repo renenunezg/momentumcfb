@@ -104,6 +104,17 @@ jobs:
           fi
           poetry run python -m backend weekly-update "${arguments[@]}"
 
+      # Grading reads only frozen records: the projection the site published
+      # before kickoff, the CFBD closing line, and the final score. It runs
+      # after the forecast so a not-ready week still grades completed games.
+      - name: Grade completed games and publish performance
+        shell: bash
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
+        run: |
+          poetry run python -m backend grade --season "$SEASON"
+          poetry run python -m backend publish-grading --season "$SEASON"
+
       - name: Preserve forecast audit artifacts
         if: always()
         uses: actions/upload-artifact@v7
