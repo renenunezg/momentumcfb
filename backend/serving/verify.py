@@ -1,11 +1,8 @@
 """Prove served events match the stored batch baseline, after the fact.
 
-This is the only serving module allowed to open
-``ingame/baseline_predictions.parquet``. It runs strictly after serving, over
-artifacts already written to ``serving/served/``, so the equality proof for
-completed seasons costs the serving path nothing and adds no outcome-bearing
-read to it. Seasons with no stored batch run (2026) have nothing to compare
-against and are reported as unverifiable rather than as failures.
+This is the only serving module allowed to open the stored baseline
+predictions, and it runs only over artifacts already served. Seasons with no
+batch run are reported as unverifiable, not as failures.
 """
 
 import pandas as pd

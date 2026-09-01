@@ -24,6 +24,7 @@ from backend.model.ingame import (
     _margin_bucket,
     _mean_log_loss,
     _phase,
+    comparison_row,
     margin_distribution,
 )
 
@@ -380,34 +381,6 @@ def fit_momentum_recency(
     )
 
 
-def _delta_row(
-    frame: pd.DataFrame, partition: str, scope: str, group_value: str
-) -> dict[str, object]:
-    outcome = frame["home_win"].to_numpy(float)
-    baseline = frame["baseline_win_probability"].to_numpy(float)
-    momentum = frame["momentum_win_probability"].to_numpy(float)
-    row = {
-        "summary_type": "evaluation",
-        "partition": partition,
-        "scope": scope,
-        "group_value": group_value,
-        "n_states": len(frame),
-        "n_games": int(frame["game_id"].nunique()),
-        "log_loss": _mean_log_loss(outcome, momentum),
-        "brier": float(np.mean(np.square(momentum - outcome))),
-        "baseline_log_loss": _mean_log_loss(outcome, baseline),
-        "baseline_brier": float(np.mean(np.square(baseline - outcome))),
-    }
-    row["log_loss_delta"] = row["log_loss"] - row["baseline_log_loss"]
-    row["brier_delta"] = row["brier"] - row["baseline_brier"]
-    row["diagnostic"] = (
-        f"log loss {row['log_loss']:.5f} vs baseline "
-        f"{row['baseline_log_loss']:.5f} ({row['log_loss_delta']:+.5f}); "
-        f"Brier delta {row['brier_delta']:+.5f}"
-    )
-    return row
-
-
 def evaluate_momentum(
     inputs: pd.DataFrame,
     params: MomentumParams | MomentumRecencyParams,
@@ -429,11 +402,19 @@ def evaluate_momentum(
     for partition, part in partitions.items():
         if part.empty:
             continue
-        rows.append(_delta_row(part, partition, "overall", "all"))
+        rows.append(
+            comparison_row(
+                part, "momentum_win_probability", partition, "overall", "all"
+            )
+        )
     holdout = partitions["holdout"]
     for scope, column in (("phase", "phase"), ("margin", "margin_bucket")):
         for key, group in holdout.groupby(column, sort=True, observed=True):
-            rows.append(_delta_row(group, "holdout", scope, str(key)))
+            rows.append(
+                comparison_row(
+                    group, "momentum_win_probability", "holdout", scope, str(key)
+                )
+            )
 
     overall = next(
         (

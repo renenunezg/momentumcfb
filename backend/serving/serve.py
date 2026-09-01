@@ -1,17 +1,11 @@
 """Score one game from a play feed and serving anchors alone.
 
-This is the forward-looking serving entry point: everything it reads is
-available before a game ends, from the pregame anchor projection through
-``load_serving_anchors``, the frozen baseline parameters, and the game's
-plays as they arrive. It never opens the stored baseline predictions, so a
-season with no batch scoring run (2026) is served exactly like one that has
-one. Proving the served output matches a stored batch run is a separate step
-in ``backend.serving.verify``; keeping the two apart is what makes the
-no-outcome-read guarantee inspectable rather than asserted.
-
-The play feed abstraction is stored raw play-by-play: a game whose plays are
-not stored raises ``MissingPlayFeed``, which is the same condition a live
-feed would report before kickoff.
+Everything read here is available before a game ends: the pregame anchor via
+``load_serving_anchors``, the frozen baseline parameters, and the plays so
+far. Stored baseline predictions are never opened; proving served output
+matches a batch run lives in ``backend.serving.verify``. A game with no stored
+plays raises ``MissingPlayFeed``, the same condition a live feed reports
+before kickoff.
 """
 
 import pandas as pd

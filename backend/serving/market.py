@@ -1,21 +1,12 @@
 """Market closing lines flattened into outcome-free serving anchors.
 
-The in-game model is a pregame anchor updated by game state, so it inherits
-whatever error its anchor carries. On the 2021-2025 backtest games the model's
-projected margin runs MAE 13.40 against the closing line's 12.14, worse in
-every season and week bucket, so the live model anchors on the market closing
-spread: a live serve starts after kickoff, when the closing line is already
-fixed and known, so the anchor is not forward-looking.
-
-One game's closing spread is the median of the provider closing spreads in
-the raw ``lines`` feed, and ``home_margin = -closing_spread``. The market
-prices a spread but not a margin standard deviation, so ``margin_sd`` is a
-single frozen constant: the residual standard deviation of the final margin
-around the market margin over the development seasons that have stored lines.
-Fitting that constant reads final scores, like every other fit; the stored
-artifact carries no outcome column, and every row records the method that
-produced ``margin_sd`` so a later reader cannot mistake the constant for a
-per-game fitted spread.
+The live model anchors on the closing spread because a serve starts after
+kickoff, when that line is fixed, and because on the 2021-2025 backtest the
+model margin (MAE 13.40) trails the closing line (12.14) in every bucket.
+One game's closing spread is the provider median and ``home_margin`` is its
+negation. The market prices no margin SD, so ``margin_sd`` is one frozen
+constant fitted on development-season residuals; each row records the method
+so the constant cannot be mistaken for a per-game estimate.
 """
 
 from math import isfinite

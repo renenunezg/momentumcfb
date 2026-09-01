@@ -1,49 +1,16 @@
 """Market-anchored rescoring of the frozen in-game baseline.
 
-Answers one question with numbers: is the pregame anchor the binding
-constraint on in-game holdout accuracy? The frozen baseline parameters and
-play boundaries stay exactly as stored; the only variable is the anchor,
-swapped from the chronological model projection to the market closing line.
-The verdict keys on holdout log loss in the manner of the momentum
-adopt-or-reject rows, and its diagnostic states what the result implies for
-where effort goes next.
+Holds the baseline parameters and play boundaries fixed and swaps only the
+pregame anchor for the market closing line, so the holdout log loss delta
+isolates how much the anchor limits in-game accuracy.
 """
 
-import numpy as np
 import pandas as pd
 
 from backend.model.calibration import DEVELOPMENT_SEASONS, HOLDOUT_SEASONS
-from backend.model.ingame import _margin_bucket, _mean_log_loss, _phase
+from backend.model.ingame import _margin_bucket, _phase, comparison_row
 
 MODEL_VERSION = "ingame_market_anchor_v1"
-
-
-def _delta_row(
-    frame: pd.DataFrame, partition: str, scope: str, group_value: str
-) -> dict[str, object]:
-    outcome = frame["home_win"].to_numpy(float)
-    baseline = frame["baseline_win_probability"].to_numpy(float)
-    market = frame["market_win_probability"].to_numpy(float)
-    row = {
-        "summary_type": "evaluation",
-        "partition": partition,
-        "scope": scope,
-        "group_value": group_value,
-        "n_states": len(frame),
-        "n_games": int(frame["game_id"].nunique()),
-        "log_loss": _mean_log_loss(outcome, market),
-        "brier": float(np.mean(np.square(market - outcome))),
-        "baseline_log_loss": _mean_log_loss(outcome, baseline),
-        "baseline_brier": float(np.mean(np.square(baseline - outcome))),
-    }
-    row["log_loss_delta"] = row["log_loss"] - row["baseline_log_loss"]
-    row["brier_delta"] = row["brier"] - row["baseline_brier"]
-    row["diagnostic"] = (
-        f"log loss {row['log_loss']:.5f} vs baseline "
-        f"{row['baseline_log_loss']:.5f} ({row['log_loss_delta']:+.5f}); "
-        f"Brier delta {row['brier_delta']:+.5f}"
-    )
-    return row
 
 
 def evaluate_market_anchor(
@@ -66,11 +33,17 @@ def evaluate_market_anchor(
     for partition, part in partitions.items():
         if part.empty:
             continue
-        rows.append(_delta_row(part, partition, "overall", "all"))
+        rows.append(
+            comparison_row(part, "market_win_probability", partition, "overall", "all")
+        )
     holdout = partitions["holdout"]
     for scope, column in (("phase", "phase"), ("margin", "margin_bucket")):
         for key, group in holdout.groupby(column, sort=True, observed=True):
-            rows.append(_delta_row(group, "holdout", scope, str(key)))
+            rows.append(
+                comparison_row(
+                    group, "market_win_probability", "holdout", scope, str(key)
+                )
+            )
 
     overall = next(
         (

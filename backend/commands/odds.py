@@ -1,6 +1,9 @@
 """Live odds and kickoff command handlers."""
 
+import logging
 from argparse import Namespace
+
+log = logging.getLogger(__name__)
 
 
 def handle_kickoff_check(args: Namespace) -> None:
@@ -24,7 +27,7 @@ def handle_kickoff_check(args: Namespace) -> None:
         max_offer_staleness_seconds=args.max_offer_staleness_seconds,
         min_providers=args.min_providers,
     )
-    print(format_readiness(result))
+    log.info(format_readiness(result))
     if not result.ready:
         raise SystemExit(1)
 
@@ -52,12 +55,12 @@ def handle_kickoff_run(args: Namespace) -> None:
             min_providers=args.min_providers,
         )
     except ValueError as exc:
-        print(f"NOT READY\nBLOCKER: {exc}")
+        log.info(f"NOT READY\nBLOCKER: {exc}")
         raise SystemExit(1) from exc
-    print("READY")
+    log.info("READY")
     for detail in result.target_details:
-        print(f"OK: {detail}")
-    print(
+        log.info(f"OK: {detail}")
+    log.info(
         f"OK: wrote {result.anchor_count} market anchors after "
         f"{result.plan.polls} verified polls"
     )
@@ -78,7 +81,7 @@ def handle_live_odds(args: Namespace) -> None:
         min_quota=args.min_quota,
         max_failures=args.max_failures,
     )
-    print(f"completed {completed} of {args.polls} polls")
+    log.info(f"completed {completed} of {args.polls} polls")
     if completed != args.polls:
         raise SystemExit(1)
 
@@ -90,7 +93,7 @@ def handle_live_replay(args: Namespace) -> None:
 
     problems, frames = verify_live_snapshots(args.season)
     polls = frames["polls"]
-    print(
+    log.info(
         f"{len(polls)} polls stored "
         f"({int(polls['poll_status'].eq('ok').sum()) if not polls.empty else 0} ok, "
         f"{int(polls['poll_status'].eq('error').sum()) if not polls.empty else 0} failed), "
@@ -98,13 +101,13 @@ def handle_live_replay(args: Namespace) -> None:
     )
     if problems:
         for problem in problems:
-            print(f"PROBLEM: {problem}")
+            log.info(f"PROBLEM: {problem}")
     else:
-        print("replay check passed: snapshots are complete and append-only")
+        log.info("replay check passed: snapshots are complete and append-only")
     if args.as_of is not None:
         as_of = pd.to_datetime(args.as_of, utc=True)
         available = offers_available_at(polls, frames["offers"], as_of)
-        print(f"\navailable at {as_of.isoformat()}: {len(available)} offers")
+        log.info(f"\navailable at {as_of.isoformat()}: {len(available)} offers")
         if not available.empty:
             view = available[
                 [
@@ -118,6 +121,6 @@ def handle_live_replay(args: Namespace) -> None:
                     "staleness_seconds",
                 ]
             ].sort_values(["game_id", "market", "provider_key", "selection"])
-            print(view.to_string(index=False))
+            log.info(view.to_string(index=False))
     if problems:
         raise SystemExit(1)

@@ -8,10 +8,20 @@ Current ratings, methodology, and performance are available at [renenunez.dev/cf
 
 ## Current status
 
-The 2026 preseason pipeline is ready for opening week.
-The latest pre-kickoff run contains 266 Division I team ratings, 172 game projections, unit ratings, market comparisons, and outcome-free serving anchors.
-The 2026 season has not started, so there is not yet a live-season performance sample.
-Historical walk-forward results are kept separate from the live 2026 record.
+The 2026 season is live.
+The pre-kickoff refresh produced 266 Division I team ratings, 172 week-one game projections, unit ratings, market comparisons, and outcome-free serving anchors.
+Completed games are graded against the projection that was published before kickoff and the CFBD closing line, and the graded record is published to the site.
+
+| Live 2026 measure (as of Sep 1) | Value |
+|---|---:|
+| Graded games | 53 |
+| Graded games with a closing spread | 53 |
+| Pure model margin MAE | 12.86 points |
+| Closing line margin MAE | 11.80 points |
+| 80 percent interval coverage | 0.85 |
+
+Only 8 of those games are FBS versus FBS, so the live sample is too small to draw conclusions from.
+Historical walk-forward results below are kept separate from the live record.
 
 ## Model design
 
@@ -66,12 +76,15 @@ model artifacts -> reviewed publish step -> Supabase cfb schema -> momentumweb
 ## Repository layout
 
 ```text
+backend/cli.py      Argument parsing, grouped by pipeline, research, serving, market, publish
+backend/commands/   One handler module per command group
 backend/cfbd/       CFBD API client
 backend/etl/        Source ingestion and local Parquet storage
 backend/features/   Possession, scoring, in-game, and unit features
 backend/model/      Pregame, in-game, calibration, and evaluation models
 backend/odds/       Market capture, freshness, quota, and kickoff validation
 backend/serving/    Outcome-free anchors, replay, serving, and verification
+backend/grading.py  Frozen live-season grading record and metrics
 backend/publish.py  Supabase publication boundary
 tests/              Production-critical regression and acceptance tests
 sql/                Reproducible CFB database schema
@@ -108,8 +121,15 @@ poetry run pytest -q
 ```
 
 Run `poetry run python -m backend --help` for the complete command list.
+The commands fall into five groups.
 
-The repository is released under the [MIT License](LICENSE).
+| Group | Commands | Used by |
+|---|---|---|
+| Pipeline | `ingest`, `features`, `fit`, `weekly-update`, `calibrate`, `preseason` | Weekly and opening workflows; `fit` is a local dry run of `weekly-update` without publishing |
+| Research | `ingame-baseline`, `ingame-momentum`, `ingame-momentum-recency`, `ingame-market-anchor` | Reproduce the frozen in-game evaluations reported under Validation; not part of any workflow |
+| Serving | `ingame-stream`, `serving-anchors`, `serve-game`, `serve-verify` | Anchor builds run in workflows; the others are operator checks that prove streamed output equals batch output |
+| Market | `live-odds`, `kickoff-check`, `kickoff-run`, `live-replay` | Kickoff capture workflow; `kickoff-check` and `live-replay` are read-only diagnostics |
+| Publish | `publish`, `publish-anchors`, `fetch-anchors`, `grade`, `publish-grading` | Workflows; every database write requires `MOMENTUMCFB_DB_WRITES=1` |
 
 ## Production workflows
 
@@ -126,5 +146,5 @@ Local model and evaluation commands do not require database write access.
 - The free historical CFBD feed is not the low-latency source required for live in-game production.
 - Injuries and player availability are not inferred from play-by-play or market movement.
 - FCS teams have less complete preseason data and carry wider uncertainty.
-- The 2026 live performance section will remain empty until completed games can be graded against frozen pregame predictions.
+- The 2026 live performance sample is small early in the season and is reported with its game count rather than as a conclusion.
 - The project does not automate wagers, size positions, or claim profitability.

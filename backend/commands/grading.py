@@ -1,6 +1,9 @@
 """Live-season grading command handlers."""
 
+import logging
 from argparse import Namespace
+
+log = logging.getLogger(__name__)
 
 
 def handle_grade(args: Namespace) -> None:
@@ -18,7 +21,7 @@ def handle_grade(args: Namespace) -> None:
     write_grading_artifacts(args.season, graded, metrics)
 
     kept = 0 if existing is None else len(existing)
-    print(
+    log.info(
         f"graded {len(graded)} {args.season} games "
         f"({len(graded) - kept} new, {kept} kept); "
         f"{int(graded['closing_spread'].notna().sum())} with a closing spread"
@@ -28,7 +31,7 @@ def handle_grade(args: Namespace) -> None:
         & metrics["prediction_source"].isin(["pure_model", "closing_market"])
     ]
     if not overall.empty:
-        print(
+        log.info(
             overall[
                 [
                     "prediction_source",
@@ -46,4 +49,4 @@ def handle_publish_grading(args: Namespace) -> None:
 
     stored = publish_grading(args.season)
     for table, count in stored.items():
-        print(f"cfb.{table}: {count} rows stored for season {args.season}")
+        log.info(f"cfb.{table}: {count} rows stored for season {args.season}")

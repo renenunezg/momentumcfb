@@ -1,7 +1,7 @@
 """Publish serving tables to the cfb schema of the momentum Supabase project.
 
-Supabase is the only interface between this model and the website
-(momentumweb); the tables written here are that API surface:
+Supabase is the only interface between this model and the website; the
+tables written here are that API surface:
 
 - teams                 team identity dimension (logos, colors), full refresh
 - team_ratings          one row per team per published (season, week)
@@ -12,9 +12,8 @@ Supabase is the only interface between this model and the website
 - graded_games          frozen live-season grading record, one row per game
 - performance_metrics   live-season aggregates per source and segment
 
-Writes use per-key DELETE + append (or TRUNCATE + append for the full
-backtest refresh) so RLS, policies, and indexes on the tables survive;
-to_sql(if_exists="replace") would drop them.
+Writes are DELETE plus append (TRUNCATE for full refreshes) so policies and
+indexes survive; ``to_sql(if_exists="replace")`` would drop them.
 """
 
 from __future__ import annotations
@@ -236,9 +235,8 @@ def _hex_color(value) -> str | None:
     return color if _HEX_COLOR.match(color) else None
 
 
-# The site renders logos at roughly 20px, and the schedule page loads two per
-# game; at CFBD's 500px variant that is ~9MB of PNG for a full week, so serve
-# the 128px variant, which still has ample headroom over the display size.
+# The site renders logos at about 20px; the 128px CFBD variant keeps a full
+# week of schedule images under 1MB instead of ~9MB at 500px.
 LOGO_TARGET_WIDTH = 128
 
 
@@ -298,10 +296,8 @@ def load_team_unit_ratings(source: str, season: int, week: int) -> pd.DataFrame:
 def load_game_projections(source: str, season: int, week: int) -> pd.DataFrame:
     path = _artifact_dir(source, "projections") / f"{season}_{week:02d}.parquet"
     projections = pd.read_parquet(path)
-    # conference_game is schedule metadata the model never consumes, so it is
-    # absent from the forecast artifact; take it from the same snapshot the
-    # forecast ran against rather than inferring it from matching conference
-    # names, which would call two independents a conference game.
+    # conference_game is absent from the forecast artifact; read it from the
+    # schedule snapshot rather than inferring it from conference names.
     schedule_path = (
         RAW_DIR / "preseason" / str(season) / "games.parquet"
         if source == "preseason"

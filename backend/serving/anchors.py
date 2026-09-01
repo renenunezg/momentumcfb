@@ -1,14 +1,9 @@
 """Outcome-free serving anchor loading.
 
-The streaming serving path scores games from pregame anchor projections in
-the serving contract shape (game_id, model_week, home_margin, margin_sd).
-Historical replays anchor on the calibration backtest table, which only
-exists for completed seasons; forward-looking serving anchors come from a
-stored projection artifact (preseason projections now, weekly ``fit``
-projections later). Every source emits exactly the contract columns and
-validates them at load time: one row per game_id, finite home_margin,
-positive finite margin_sd. Artifact reads are column-restricted, so no
-outcome column is ever read even when one is stored alongside the anchors.
+Every source emits exactly the serving contract (game_id, model_week,
+home_margin, margin_sd) and validates it at load: one row per game, finite
+margin, positive finite SD. Reads are column-restricted so an outcome column
+stored beside the anchors is never touched.
 """
 
 import numpy as np
@@ -91,10 +86,8 @@ def _projection_anchors(
     if "season" in needed and not frame["season"].eq(season).all():
         raise ValueError(f"{location} contains seasons other than {season}")
     if week_column == "week":
-        # A projection artifact records the schedule week it targets; the
-        # serving contract's model_week is derived from that projection week.
-        # Regular-season weeks map one-to-one; postseason projections need
-        # their own offset mapping and have no serving source yet.
+        # Regular-season projection weeks map one-to-one onto model_week;
+        # postseason projections have no serving source yet.
         if not frame["week"].eq(week).all():
             raise ValueError(f"{location} targets weeks other than {week}")
         frame = frame.rename(columns={"week": "model_week"})

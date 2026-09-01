@@ -72,6 +72,22 @@ def _regularized_covariance(
     return (1 - shrinkage) * covariance + shrinkage * diagonal + np.eye(2) * floor
 
 
+def margin_total_distribution(
+    score_covariance: np.ndarray,
+) -> tuple[float, float, float]:
+    """Rotate a home/away score covariance into margin and total space.
+
+    Returns the margin SD, the total SD, and their correlation clipped so the
+    joint Student-t stays well defined.
+    """
+    transform = np.array([[1.0, -1.0], [1.0, 1.0]])
+    covariance = transform @ score_covariance @ transform.T
+    margin_sd = float(np.sqrt(covariance[0, 0]))
+    total_sd = float(np.sqrt(covariance[1, 1]))
+    correlation = float(covariance[0, 1] / (margin_sd * total_sd))
+    return margin_sd, total_sd, float(np.clip(correlation, -0.999, 0.999))
+
+
 def _team_catalog(games: pd.DataFrame) -> pd.DataFrame:
     home = games[["home_team_id", "home_team", "home_classification"]].rename(
         columns={
@@ -188,11 +204,9 @@ class JointScoringFit:
                 score_design @ self.parameter_covariance @ score_design.T
             )
             score_covariance *= self.config.score_covariance_scale**2
-            transform = np.array([[1.0, -1.0], [1.0, 1.0]])
-            margin_total_covariance = transform @ score_covariance @ transform.T
-            margin_sd = float(np.sqrt(margin_total_covariance[0, 0]))
-            total_sd = float(np.sqrt(margin_total_covariance[1, 1]))
-            correlation = float(margin_total_covariance[0, 1] / (margin_sd * total_sd))
+            margin_sd, total_sd, correlation = margin_total_distribution(
+                score_covariance
+            )
             projections.append(
                 GameProjection(
                     season=int(game.season),
@@ -213,7 +227,7 @@ class JointScoringFit:
                     expected_away_points=max(float(expected_away), 0.0),
                     margin_sd=margin_sd,
                     total_sd=total_sd,
-                    margin_total_correlation=float(np.clip(correlation, -0.999, 0.999)),
+                    margin_total_correlation=correlation,
                     degrees_of_freedom=self.config.student_t_degrees_of_freedom,
                 )
             )

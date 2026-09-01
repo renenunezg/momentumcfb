@@ -1,6 +1,9 @@
 """In-game model and evaluation command handlers."""
 
+import logging
 from argparse import Namespace
+
+log = logging.getLogger(__name__)
 
 
 def handle_ingame_baseline(args: Namespace) -> None:
@@ -29,16 +32,16 @@ def handle_ingame_baseline(args: Namespace) -> None:
         step = max(1, len(game_ids) // max(args.leakage_games_per_season, 1))
         sample = game_ids[::step][: args.leakage_games_per_season]
         problems.extend(leakage_problems(plays, sample))
-        print(
+        log.info(
             f"{season}: {len(states)} play states across "
             f"{states['game_id'].nunique()} games "
             f"(leakage-checked {len(sample)})"
         )
     for problem in problems:
-        print(f"PROBLEM: {problem}")
+        log.info(f"PROBLEM: {problem}")
     if problems:
         raise SystemExit(1)
-    print("leakage check passed: states are prefix-stable")
+    log.info("leakage check passed: states are prefix-stable")
 
     try:
         anchors = store.read_processed(
@@ -58,16 +61,15 @@ def handle_ingame_baseline(args: Namespace) -> None:
     summary = evaluate_baseline(inputs, params)
     store.write_processed(inputs, "ingame", "baseline_predictions.parquet")
     store.write_processed(summary, "ingame", "baseline_summary.parquet")
-    print(
+    log.info(
         f"anchored {inputs['game_id'].nunique()} of "
         f"{states['game_id'].nunique()} games with pregame projections; "
         f"wrote {len(inputs)} baseline predictions"
     )
-    print(format_ingame_diagnostic(summary))
+    log.info(format_ingame_diagnostic(summary))
 
 
 def handle_ingame_momentum(args: Namespace) -> None:
-    import numpy as np
     import pandas as pd
 
     from backend.etl import store
@@ -77,7 +79,7 @@ def handle_ingame_momentum(args: Namespace) -> None:
         leakage_problems,
     )
     from backend.model.calibration import DEVELOPMENT_SEASONS
-    from backend.model.ingame import IngameBaselineParams, win_probability
+    from backend.model.ingame import check_frozen_probabilities, load_baseline_params
     from backend.model.momentum import (
         MODEL_VERSION,
         RECENCY_MODEL_VERSION,
@@ -101,16 +103,16 @@ def handle_ingame_momentum(args: Namespace) -> None:
         step = max(1, len(game_ids) // max(args.leakage_games_per_season, 1))
         sample = game_ids[::step][: args.leakage_games_per_season]
         problems.extend(leakage_problems(plays, sample, builder=build_momentum_states))
-        print(
+        log.info(
             f"{season}: evidence at {len(evidence)} play boundaries across "
             f"{evidence['game_id'].nunique()} games "
             f"(leakage-checked {len(sample)})"
         )
     for problem in problems:
-        print(f"PROBLEM: {problem}")
+        log.info(f"PROBLEM: {problem}")
     if problems:
         raise SystemExit(1)
-    print(
+    log.info(
         "extended leakage check passed: states and process evidence are prefix-stable"
     )
 
@@ -123,16 +125,7 @@ def handle_ingame_momentum(args: Namespace) -> None:
             "`python -m backend ingame-baseline` first"
         ) from exc
     baseline = baseline[baseline["season"].isin(args.seasons)]
-    parameter = baseline_summary[baseline_summary["summary_type"].eq("parameter")].iloc[
-        0
-    ]
-    baseline_params = IngameBaselineParams(
-        possession_points=float(parameter["possession_points"]),
-        field_position_points_per_yard=float(
-            parameter["field_position_points_per_yard"]
-        ),
-        sd_floor_points=float(parameter["sd_floor_points"]),
-    )
+    baseline_params = load_baseline_params(baseline_summary)
 
     evidence = pd.concat(evidence_frames, ignore_index=True).drop(
         columns=["play_index"]
@@ -148,14 +141,10 @@ def handle_ingame_momentum(args: Namespace) -> None:
             f"process evidence covers {len(inputs)} of {len(baseline)} "
             "baseline play boundaries"
         )
-    if not np.allclose(
-        win_probability(inputs, baseline_params),
-        inputs["win_probability"].to_numpy(float),
-        atol=1e-9,
-    ):
-        raise SystemExit(
-            "stored baseline probabilities do not match the frozen parameters"
-        )
+    try:
+        check_frozen_probabilities(inputs, baseline_params)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     inputs = inputs.rename(
         columns={
             "win_probability": "baseline_win_probability",
@@ -165,7 +154,7 @@ def handle_ingame_momentum(args: Namespace) -> None:
 
     development = inputs[inputs["season"].isin(DEVELOPMENT_SEASONS)]
     if recency:
-        params = fit_momentum_recency(development, baseline_params, progress=print)
+        params = fit_momentum_recency(development, baseline_params, progress=log.info)
         inputs["momentum_win_probability"] = momentum_recency_win_probability(
             inputs, baseline_params, params
         )
@@ -189,11 +178,11 @@ def handle_ingame_momentum(args: Namespace) -> None:
         prefix = "momentum"
     store.write_processed(inputs, "ingame", f"{prefix}_predictions.parquet")
     store.write_processed(summary, "ingame", f"{prefix}_summary.parquet")
-    print(
+    log.info(
         f"momentum probabilities at {len(inputs)} play boundaries across "
         f"{inputs['game_id'].nunique()} games (every baseline boundary)"
     )
-    print(format_momentum_diagnostic(summary))
+    log.info(format_momentum_diagnostic(summary))
 
 
 def handle_ingame_stream(args: Namespace) -> None:
@@ -202,7 +191,7 @@ def handle_ingame_stream(args: Namespace) -> None:
     import pandas as pd
 
     from backend.etl import store
-    from backend.model.ingame import MODEL_VERSION, IngameBaselineParams
+    from backend.model.ingame import MODEL_VERSION, load_baseline_params
     from backend.serving.anchors import load_serving_anchors
     from backend.serving.replay import (
         latency_conclusion,
@@ -233,21 +222,10 @@ def handle_ingame_stream(args: Namespace) -> None:
             f"stored predictions carry model versions {versions}; "
             f"the streaming harness serves {MODEL_VERSION}"
         )
-    parameter = baseline_summary[baseline_summary["summary_type"].eq("parameter")].iloc[
-        0
-    ]
-    params = IngameBaselineParams(
-        possession_points=float(parameter["possession_points"]),
-        field_position_points_per_yard=float(
-            parameter["field_position_points_per_yard"]
-        ),
-        sd_floor_points=float(parameter["sd_floor_points"]),
-    )
+    params = load_baseline_params(baseline_summary)
     if args.outcome_free:
-        # Serving must not learn which games to score, or anything else,
-        # from outcome-bearing artifacts: the driver sees only contract
-        # rows from the anchor loader, on its calibration source so
-        # historical replays keep the anchors they were scored with.
+        # The driver sees only anchor-loader rows, never outcome-bearing
+        # artifacts, so serving cannot learn which games to score from them.
         try:
             anchors = load_serving_anchors(season=args.season)
         except (FileNotFoundError, ValueError) as exc:
@@ -289,15 +267,14 @@ def handle_ingame_stream(args: Namespace) -> None:
         )
         event_frames.append(events)
         if number % 50 == 0 or number == len(game_ids):
-            print(
+            log.info(
                 f"replayed {number}/{len(game_ids)} games "
                 f"({sum(len(f) for f in event_frames)} events, "
                 f"{perf_counter() - started:.0f}s elapsed)",
-                flush=True,
             )
 
     for problem in problems:
-        print(f"PROBLEM: {problem}")
+        log.info(f"PROBLEM: {problem}")
     if not event_frames:
         raise SystemExit(1)
     events = pd.concat(event_frames, ignore_index=True)
@@ -345,19 +322,19 @@ def handle_ingame_stream(args: Namespace) -> None:
             summary, "serving", f"stream_replay_summary_{args.season}.parquet"
         )
     mode = " (outcome-free)" if args.outcome_free else ""
-    print(
+    log.info(
         f"{equivalence['status']}{mode}: {equivalence['streamed_rows']} "
         f"streamed probabilities vs {equivalence['stored_rows']} stored "
         f"rows across {equivalence['games']} games "
         f"({equivalence['events']} play events)"
     )
-    print(
+    log.info(
         f"latency per event: median {latency['median_seconds'] * 1e3:.1f} ms, "
         f"p99 {latency['p99_seconds'] * 1e3:.1f} ms, "
         f"mean {latency['mean_seconds'] * 1e3:.1f} ms, "
         f"max {latency['max_seconds'] * 1e3:.1f} ms"
     )
-    print(f"conclusion: {conclusion['diagnostic']}")
+    log.info(f"conclusion: {conclusion['diagnostic']}")
     if problems:
         raise SystemExit(1)
 
@@ -367,7 +344,11 @@ def handle_ingame_market_anchor(args: Namespace) -> None:
     import pandas as pd
 
     from backend.etl import store
-    from backend.model.ingame import IngameBaselineParams, win_probability
+    from backend.model.ingame import (
+        check_frozen_probabilities,
+        load_baseline_params,
+        win_probability,
+    )
     from backend.model.market_anchor import (
         MODEL_VERSION,
         evaluate_market_anchor,
@@ -400,27 +381,14 @@ def handle_ingame_market_anchor(args: Namespace) -> None:
             "`python -m backend ingame-baseline` first"
         ) from exc
     baseline = baseline[baseline["season"].isin(args.seasons)]
-    parameter = baseline_summary[baseline_summary["summary_type"].eq("parameter")].iloc[
-        0
-    ]
-    params = IngameBaselineParams(
-        possession_points=float(parameter["possession_points"]),
-        field_position_points_per_yard=float(
-            parameter["field_position_points_per_yard"]
-        ),
-        sd_floor_points=float(parameter["sd_floor_points"]),
-    )
-    if not np.allclose(
-        win_probability(baseline, params),
-        baseline["win_probability"].to_numpy(float),
-        atol=1e-9,
-    ):
-        raise SystemExit(
-            "stored baseline probabilities do not match the frozen parameters"
-        )
+    params = load_baseline_params(baseline_summary)
+    try:
+        check_frozen_probabilities(baseline, params)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
-    # Identical play boundaries: every stored baseline state must carry a
-    # market anchor, so the anchor is the only variable in the comparison.
+    # Every baseline state needs a market anchor so the anchor is the only
+    # variable in the comparison.
     anchored_games = set(anchors["game_id"])
     missing = baseline[~baseline["game_id"].isin(anchored_games)]
     if not missing.empty:
@@ -459,8 +427,7 @@ def handle_ingame_market_anchor(args: Namespace) -> None:
     )
     summary = evaluate_market_anchor(inputs, anchor_note)
 
-    # The frozen holdout numbers must reproduce exactly from the same
-    # states, or the boundaries are not identical after all.
+    # The frozen holdout numbers must reproduce exactly from the same states.
     frozen = baseline_summary[
         baseline_summary["summary_type"].eq("evaluation")
         & baseline_summary["partition"].eq("holdout")
@@ -483,11 +450,11 @@ def handle_ingame_market_anchor(args: Namespace) -> None:
 
     store.write_processed(inputs, "ingame", "market_anchor_predictions.parquet")
     store.write_processed(summary, "ingame", "market_anchor_summary.parquet")
-    print(
+    log.info(
         f"market-anchored probabilities at {len(inputs)} play boundaries "
         f"across {inputs['game_id'].nunique()} games "
         "(every baseline boundary in "
         + ", ".join(str(season) for season in args.seasons)
         + ")"
     )
-    print(format_market_anchor_diagnostic(summary))
+    log.info(format_market_anchor_diagnostic(summary))

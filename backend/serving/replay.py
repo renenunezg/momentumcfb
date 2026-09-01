@@ -1,13 +1,9 @@
 """Streaming serving harness for the frozen in-game baseline.
 
-Replays a stored game as a simulated live feed: plays arrive one at a time in
-chronological order, and after each event the play-boundary state is rebuilt
-from only the plays seen so far, then scored with the frozen baseline
-parameters and the game's pregame anchor. Serving inputs are outcome-free:
-only the serving anchor columns are read, never actual final scores, so the
-same loop can score a game whose result is unknown. This rebuild-per-play loop
-is the reference serving path; ``stream_problems`` proves each streamed
-probability sequence equals the stored batch predictions exactly.
+Plays arrive one at a time; after each, the play-boundary state is rebuilt
+from the plays seen so far and scored with the frozen parameters and the
+pregame anchor. ``stream_problems`` proves each streamed probability equals
+the stored batch prediction exactly.
 """
 
 from time import perf_counter
@@ -22,10 +18,8 @@ from backend.model.ingame import (
     win_probability,
 )
 
-# Live plays arrive tens of seconds apart, so the streamed probability must be
-# out well before the next snap. A p99 within this budget means the
-# rebuild-per-play reference can serve live traffic without an incremental
-# state builder.
+# Plays arrive tens of seconds apart; a p99 within this budget means the
+# rebuild-per-play loop can serve live traffic without incremental state.
 LIVE_LATENCY_BUDGET_SECONDS = 1.0
 
 EVENT_COLUMNS = [
