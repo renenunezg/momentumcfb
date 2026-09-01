@@ -7,10 +7,12 @@ import pandas as pd
 
 from backend.model.outputs import GameProjection, TeamRating
 
-MODEL_VERSION = "joint_scoring_v2"
+MODEL_VERSION = "joint_scoring_v3"
 PACE_PRIOR_SD = 2.0
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
+MAX_POOL_ITERATIONS = 50
+POOL_TOLERANCE_PPP = 0.001
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +72,21 @@ def _regularized_covariance(
     covariance = np.atleast_2d(covariance).astype(float)
     diagonal = np.diag(np.diag(covariance))
     return (1 - shrinkage) * covariance + shrinkage * diagonal + np.eye(2) * floor
+
+
+def _pool_offsets(
+    parameters: np.ndarray,
+    n_teams: int,
+    fbs_mask: np.ndarray,
+    fcs_mask: np.ndarray,
+) -> tuple[float, float]:
+    """Return the fitted FCS minus FBS mean offense and defense strengths."""
+    offense = parameters[:n_teams]
+    defense = parameters[n_teams : 2 * n_teams]
+    return (
+        float(offense[fcs_mask].mean() - offense[fbs_mask].mean()),
+        float(defense[fcs_mask].mean() - defense[fbs_mask].mean()),
+    )
 
 
 def margin_total_distribution(
@@ -335,16 +352,17 @@ def fit_joint_scoring(
     classifications = catalog["classification"].fillna("").str.lower()
     fbs_mask = classifications.eq("fbs").to_numpy()
     fcs_mask = classifications.eq("fcs").to_numpy()
-    if fbs_mask.any() and fcs_mask.any():
-        initial_offense = parameters[:n_teams]
-        initial_defense = parameters[n_teams : 2 * n_teams]
-        missing_fcs_indices = np.flatnonzero(fcs_mask & ~teams_with_priors)
-        prior_mean[missing_fcs_indices] = (
-            initial_offense[fcs_mask].mean() - initial_offense[fbs_mask].mean()
+    missing_fcs_indices = (
+        np.flatnonzero(fcs_mask & ~teams_with_priors)
+        if fbs_mask.any()
+        else np.array([], dtype=int)
+    )
+    if missing_fcs_indices.size:
+        offense_pool, defense_pool = _pool_offsets(
+            parameters, n_teams, fbs_mask, fcs_mask
         )
-        prior_mean[n_teams + missing_fcs_indices] = (
-            initial_defense[fcs_mask].mean() - initial_defense[fbs_mask].mean()
-        )
+        prior_mean[missing_fcs_indices] = offense_pool
+        prior_mean[n_teams + missing_fcs_indices] = defense_pool
     paired_residuals = np.column_stack(
         [centered_points - design @ parameters, process_points - design @ parameters]
     )
@@ -365,6 +383,26 @@ def fit_joint_scoring(
     parameters, covariance = _solve_ridge(
         design, target, recency * information, prior_mean, prior_sd
     )
+    # The FCS pool is linked to FBS only through crossover games, and the
+    # per-team prior is far too tight for the pool to travel from the initial
+    # fit's level to the level those games identify. Re-anchoring the pool
+    # prior at the fitted pool level and refitting converges on the crossover
+    # evidence in a handful of solves.
+    for _ in range(MAX_POOL_ITERATIONS if missing_fcs_indices.size else 0):
+        offense_pool, defense_pool = _pool_offsets(
+            parameters, n_teams, fbs_mask, fcs_mask
+        )
+        shift = max(
+            abs(offense_pool - prior_mean[missing_fcs_indices[0]]),
+            abs(defense_pool - prior_mean[n_teams + missing_fcs_indices[0]]),
+        )
+        prior_mean[missing_fcs_indices] = offense_pool
+        prior_mean[n_teams + missing_fcs_indices] = defense_pool
+        if shift < POOL_TOLERANCE_PPP:
+            break
+        parameters, covariance = _solve_ridge(
+            design, target, recency * information, prior_mean, prior_sd
+        )
 
     offense = parameters[:n_teams]
     defense = parameters[n_teams : 2 * n_teams]

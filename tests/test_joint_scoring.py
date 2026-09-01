@@ -207,3 +207,57 @@ def test_weekly_frame_retains_future_games_without_training_on_them():
             None,
             datetime(2026, 9, 3, 5, tzinfo=timezone.utc),
         )
+
+
+def _two_division_season() -> pd.DataFrame:
+    """Four FBS and four FCS teams, level within division, crossover margin 28."""
+    rows = []
+    game_id = 500
+
+    def add(week, home, away, home_points, away_points):
+        nonlocal game_id
+        rows.append(
+            {
+                "game_id": game_id,
+                "season": 2026,
+                "week": week,
+                "model_week": week,
+                "home_team_id": home,
+                "home_team": f"T{home}",
+                "home_classification": "fbs" if home <= 4 else "fcs",
+                "away_team_id": away,
+                "away_team": f"T{away}",
+                "away_classification": "fbs" if away <= 4 else "fcs",
+                "neutral_site": True,
+                "home_points": home_points,
+                "away_points": away_points,
+                "game_possessions": 12.0,
+                "home_epa_per_possession": (home_points - 24) / 12.0,
+                "away_epa_per_possession": (away_points - 24) / 12.0,
+            }
+        )
+        game_id += 1
+
+    for week, (home, away) in enumerate([(1, 2), (3, 4), (1, 3), (2, 4), (1, 4), (2, 3)], 1):
+        add(week, home, away, 24, 24)
+        add(week, home + 4, away + 4, 24, 24)
+    for week, fbs in enumerate([1, 2, 3, 4], 7):
+        add(week, fbs, fbs + 4, 38, 10)
+    return pd.DataFrame(rows)
+
+
+def test_fcs_pool_is_anchored_to_crossover_margins():
+    games = _two_division_season()
+    fit = fit_joint_scoring(
+        games,
+        forecast_week=11,
+        as_of=datetime(2026, 12, 1, tzinfo=timezone.utc),
+    )
+    projected = fit.project(games[games["model_week"] >= 7])
+    crossover_margin = sum(
+        projection.expected_home_points - projection.expected_away_points
+        for projection in projected
+    ) / len(projected)
+    # Without pool anchoring the per-team prior holds the FCS pool near the
+    # FBS level and the fitted crossover margin lands close to half the truth.
+    assert crossover_margin > 26.0

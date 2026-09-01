@@ -30,7 +30,9 @@ It produces a joint home and away score distribution with calibrated margin and 
 
 The preseason model starts from prior-season power, scoring environment, and pace.
 It then incorporates current CFBD talent, returning production, transfers, quarterback continuity, recruiting, and coaching continuity.
+The prior-season, talent, and returning-production weights are fitted to 2022 through 2025 opening-week closing margins and validated leave-one-season-out.
 Missing inputs receive neutral contributions and increase uncertainty instead of being guessed.
+FCS teams are anchored to FBS through crossover games, with the pool level iterated to the level those games identify.
 
 The in-game baseline combines the current score and possession state with a frozen pregame anchor.
 Serving code reads only outcome-free anchors and play state.

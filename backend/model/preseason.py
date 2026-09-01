@@ -24,21 +24,27 @@ from backend.odds.markets import (
     flatten_odds_api_offers,
 )
 
-MODEL_VERSION = "preseason_v3"
-# Previous-season carryover was promoted on the unchanged 4,958-game FBS
-# cohort. At weight 1.0, holdout margin MAE improved 13.284 to 12.702 and
-# early-history MAE improved 16.472 to 14.051. Larger weights did not improve
-# development MAE, and 1.5 created invalid negative-score projections.
-PREVIOUS_POWER_WEIGHT = 1.00
+MODEL_VERSION = "preseason_v4"
+# Power weights were fitted by least squares on 364 FBS games from the 2022
+# through 2025 Week 1 and Week 2 slates: the closing margin regressed on the
+# home-minus-away difference of each feature. Leave-one-season-out over 2023
+# through 2025, the fitted weights cut Week 1 walk-forward margin MAE from
+# 15.57 to 13.99 and the Week 1 gap to the closing line from 8.6 to 5.0
+# points. QB continuity and recruiting class points carried no power weight
+# once talent was fitted, so they only shape the environment and uncertainty.
+PREVIOUS_POWER_WEIGHT = 0.87
 PREVIOUS_ENVIRONMENT_WEIGHT = 0.40
 PREVIOUS_PACE_WEIGHT = 0.35
-LATEST_TALENT_POINTS = 1.50
-CURRENT_TALENT_POINTS = 1.50
-RECRUITING_POINTS = 0.80
-RETURNING_POINTS = 1.20
+LATEST_TALENT_POINTS = 3.70
+CURRENT_TALENT_POINTS = 3.30
+RECRUITING_POINTS = 0.00
+RETURNING_POINTS = 1.70
 TRANSFER_QUALITY_POINTS = 1.00
 TRANSFER_COUNT_POINTS = 0.35
-QB_CONTINUITY_POINTS = 1.00
+QB_CONTINUITY_POINTS = 0.00
+# Calibration walk-forwards carry only the previous fit, without talent or
+# returning production, and that regime evaluated best at full weight.
+HISTORICAL_CARRYOVER_WEIGHT = 1.00
 QB_TRANSFER_ENVIRONMENT_POINTS = 0.80
 COACH_CONTINUITY_POINTS = 0.35
 BASE_OFFSEASON_POWER_SD = 6.05
@@ -141,7 +147,7 @@ def load_preseason_ratings(season: int, week: int = 1) -> tuple[pd.DataFrame, st
 def build_historical_carryover_priors(
     previous_fit,
     current_games: pd.DataFrame,
-    power_weight: float = PREVIOUS_POWER_WEIGHT,
+    power_weight: float = HISTORICAL_CARRYOVER_WEIGHT,
     environment_weight: float = PREVIOUS_ENVIRONMENT_WEIGHT,
 ) -> dict[int, tuple[float, float]]:
     """Leakage-free prior means using only the previous season's final fit.
