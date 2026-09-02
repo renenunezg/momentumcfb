@@ -238,7 +238,9 @@ def _two_division_season() -> pd.DataFrame:
         )
         game_id += 1
 
-    for week, (home, away) in enumerate([(1, 2), (3, 4), (1, 3), (2, 4), (1, 4), (2, 3)], 1):
+    for week, (home, away) in enumerate(
+        [(1, 2), (3, 4), (1, 3), (2, 4), (1, 4), (2, 3)], 1
+    ):
         add(week, home, away, 24, 24)
         add(week, home + 4, away + 4, 24, 24)
     for week, fbs in enumerate([1, 2, 3, 4], 7):
