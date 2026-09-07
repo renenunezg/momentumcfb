@@ -299,6 +299,32 @@ def _add_publish_commands(sub) -> None:
     )
     publish_grading.add_argument("--season", type=int, required=True)
 
+    ingest_players = sub.add_parser(
+        "ingest-players",
+        help="snapshot CFBD rosters, rankings, box scores, and play stats",
+    )
+    _seasons_argument(ingest_players, SEASONS)
+    ingest_players.add_argument("--week", type=int, default=None)
+
+    player_values = sub.add_parser(
+        "player-values",
+        help="build opponent-adjusted player value snapshots for each week",
+    )
+    _seasons_argument(player_values, SEASONS)
+
+    heisman = sub.add_parser(
+        "heisman",
+        help="fit the Heisman share model on past ballots and build the board",
+    )
+    heisman.add_argument("--season", type=int, required=True)
+    heisman.add_argument("--week", type=int, default=None)
+
+    publish_players = sub.add_parser(
+        "publish-players",
+        help="publish player values and the Heisman board to the cfb schema",
+    )
+    publish_players.add_argument("--season", type=int, required=True)
+
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="backend")

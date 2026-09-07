@@ -662,3 +662,43 @@ def publish_grading(season: int) -> dict[str, int]:
             )
             for table in ("graded_games", "performance_metrics")
         }
+
+
+def publish_players(season: int) -> dict[str, int]:
+    """Publish player values, the Heisman board, its history, and model meta."""
+    from backend.db import engine
+    from backend.players.pipeline import read_player_artifacts
+
+    artifacts = read_player_artifacts(season)
+    by_season = ("player_values", "heisman_board")
+    full_refresh = ("heisman_history", "player_model_meta")
+    with engine.begin() as conn:
+        for table in by_season:
+            conn.execute(
+                text(f"DELETE FROM {CFB_SCHEMA}.{table} WHERE season = :s"),
+                {"s": season},
+            )
+        for table in full_refresh:
+            conn.execute(text(f"TRUNCATE TABLE {CFB_SCHEMA}.{table}"))
+        for table in (*by_season, *full_refresh):
+            rows = artifacts[table]
+            if rows.empty:
+                continue
+            columns = _table_columns(conn, table)
+            rows[[column for column in rows.columns if column in columns]].to_sql(
+                table,
+                con=conn,
+                schema=CFB_SCHEMA,
+                if_exists="append",
+                index=False,
+                chunksize=2000,
+            )
+    with engine.connect() as conn:
+        return {
+            table: int(
+                conn.execute(
+                    text(f"SELECT count(*) FROM {CFB_SCHEMA}.{table}")
+                ).scalar()
+            )
+            for table in (*by_season, *full_refresh)
+        }

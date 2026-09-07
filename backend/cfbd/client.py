@@ -18,17 +18,27 @@ class CFBDClient:
         self.session = requests.Session()
         self.session.headers["Authorization"] = f"Bearer {key}"
 
-    def get(self, path: str, params: dict | None = None, retries: int = 3) -> list:
+    def get(
+        self,
+        path: str,
+        params: dict | None = None,
+        retries: int = 3,
+        timeout: float = 60,
+    ) -> list:
         if retries < 1:
             raise ValueError("retries must be positive")
         url = f"{CFBD_BASE_URL}{path}"
         for attempt in range(retries):
-            resp = self.session.get(url, params=params, timeout=60)
+            resp = self.session.get(url, params=params, timeout=timeout)
             if resp.status_code == 429:
                 if attempt < retries - 1:
                     time.sleep(5 * (attempt + 1))
                     continue
                 raise CFBDError(f"GET {path} rate limited after {retries} attempts")
+            if resp.status_code >= 500 and attempt < retries - 1:
+                # Gateway errors clear within seconds; the call is idempotent.
+                time.sleep(10 * (attempt + 1))
+                continue
             if resp.status_code != 200:
                 raise CFBDError(
                     f"GET {path} returned {resp.status_code}: {resp.text[:200]}"
