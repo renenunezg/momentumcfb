@@ -115,6 +115,18 @@ jobs:
           poetry run python -m backend grade --season "$SEASON"
           poetry run python -m backend publish-grading --season "$SEASON"
 
+      # Player value and the Heisman board read the same completed games.
+      # The play-stat pull is per game and resumes past weeks already stored.
+      - name: Update player value and the Heisman board
+        shell: bash
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
+        run: |
+          poetry run python -m backend ingest-players --seasons "$SEASON"
+          poetry run python -m backend player-values --seasons "$SEASON"
+          poetry run python -m backend heisman --season "$SEASON"
+          poetry run python -m backend publish-players --season "$SEASON"
+
       - name: Preserve forecast audit artifacts
         if: always()
         uses: actions/upload-artifact@v7

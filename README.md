@@ -123,7 +123,7 @@ poetry run pytest -q
 ```
 
 Run `poetry run python -m backend --help` for the complete command list.
-The commands fall into five groups.
+The commands fall into six groups.
 
 | Group | Commands | Used by |
 |---|---|---|
@@ -132,6 +132,7 @@ The commands fall into five groups.
 | Serving | `ingame-stream`, `serving-anchors`, `serve-game`, `serve-verify` | Anchor builds run in workflows; the others are operator checks that prove streamed output equals batch output |
 | Market | `live-odds`, `kickoff-check`, `kickoff-run`, `live-replay` | Kickoff capture workflow; `kickoff-check` and `live-replay` are read-only diagnostics |
 | Publish | `publish`, `publish-anchors`, `fetch-anchors`, `grade`, `publish-grading` | Workflows; every database write requires `MOMENTUMCFB_DB_WRITES=1` |
+| Players | `ingest-players`, `player-values`, `heisman`, `publish-players` | Weekly workflow; opponent-adjusted player value above replacement and the Heisman ballot forecast behind `/cfb/heisman` |
 
 ## Production workflows
 

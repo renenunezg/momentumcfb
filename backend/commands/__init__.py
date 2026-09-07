@@ -24,6 +24,12 @@ from backend.commands.pipeline import (
     handle_preseason,
     handle_weekly_update,
 )
+from backend.commands.players import (
+    handle_heisman,
+    handle_ingest_players,
+    handle_player_values,
+    handle_publish_players,
+)
 from backend.commands.publishing import (
     handle_fetch_anchors,
     handle_publish,
@@ -61,6 +67,10 @@ HANDLERS: dict[str, Handler] = {
     "fetch-anchors": handle_fetch_anchors,
     "grade": handle_grade,
     "publish-grading": handle_publish_grading,
+    "ingest-players": handle_ingest_players,
+    "player-values": handle_player_values,
+    "heisman": handle_heisman,
+    "publish-players": handle_publish_players,
 }
 
 
