@@ -120,6 +120,10 @@ def test_weekly_update_publishes_pure_model_when_odds_quota_is_exhausted(
 
     calls = []
     scheduled = []
+    schema_checks = []
+    monkeypatch.setattr(
+        publish, "ensure_recommendation_schema", lambda: schema_checks.append(True)
+    )
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     monkeypatch.setattr(
         scheduling,
@@ -135,6 +139,7 @@ def test_weekly_update_publishes_pure_model_when_odds_quota_is_exhausted(
     )
 
     def fake_run_weekly_forecast(*args, **kwargs):
+        assert schema_checks
         calls.append(kwargs)
         if len(calls) == 1:
             raise OddsAPIError("OUT_OF_USAGE_CREDITS")

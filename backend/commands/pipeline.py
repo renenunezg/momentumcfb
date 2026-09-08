@@ -80,8 +80,6 @@ def handle_weekly_update(args: Namespace) -> None:
         weekly_forecast_is_published,
     )
 
-    ensure_recommendation_schema()
-
     as_of = datetime.now(timezone.utc)
     try:
         forecast_week = resolve_ready_forecast_week(
@@ -92,6 +90,7 @@ def handle_weekly_update(args: Namespace) -> None:
     except WeeklyForecastNotReady as exc:
         log.info(f"weekly update not ready: {exc}")
         return
+    ensure_recommendation_schema()
     if args.week is None and weekly_forecast_is_published(
         args.season,
         forecast_week,
