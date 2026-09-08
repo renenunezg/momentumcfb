@@ -123,7 +123,7 @@ class OddsAPIClient:
         commence_from: datetime,
         commence_to: datetime,
         *,
-        markets: tuple[str, ...] = ("spreads", "totals"),
+        markets: tuple[str, ...] = ("h2h", "spreads", "totals"),
         event_ids: tuple[str, ...] = (),
     ) -> OddsSnapshot:
         if commence_from.tzinfo is None or commence_to.tzinfo is None:

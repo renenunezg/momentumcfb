@@ -162,7 +162,7 @@ def ingest_preseason_sources(
                 "endpoint": "/v4/sports/americanfootball_ncaaf/odds",
                 "params": json.dumps(
                     {
-                        "markets": ["spreads", "totals"],
+                        "markets": ["h2h", "spreads", "totals"],
                         "odds_format": "american",
                         "configured_bookmakers": snapshot.configured_bookmakers,
                     },

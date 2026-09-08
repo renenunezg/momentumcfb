@@ -203,6 +203,8 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
             )
             for i in range(1, 10)
             for market, side, point, price in (
+                ("h2h", "home", None, -180),
+                ("h2h", "away", None, 160),
                 ("spreads", "home", -3.0, -110),
                 ("spreads", "away", 3.0, 120),
                 ("totals", "over", 43.0, -110),
@@ -291,6 +293,22 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
     assert spread.loc[4, "outcome"] == "win" and spread.loc[4, "profit_units"] == 1.2
     assert spread.loc[5, "outcome"] == "void" and spread.loc[5, "profit_units"] == 0
     assert grades[grades.game_id.ge(6)].outcome.eq("no_play").all()
+    moneyline = grades[grades.market.eq("h2h")].set_index("game_id")
+    assert moneyline.loc[1, "outcome"] == "win"
+    assert moneyline.loc[1, "profit_units"] == pytest.approx(100 / 180)
+    assert moneyline.loc[3, "outcome"] == "loss"
+    assert moneyline.loc[4, "profit_units"] == pytest.approx(1.6)
+    assert moneyline.loc[5, "outcome"] == "void"
+    assert decisions.loc[decisions.market.eq("h2h"), "point"].isna().all()
+    assert decisions.loc[decisions.market.eq("h2h"), "push_probability"].eq(0).all()
+    tied = grade_recommendations(
+        frozen,
+        games.assign(home_points=20, away_points=20),
+        graded_at=now + pd.Timedelta(days=2),
+    )
+    assert (
+        tied.loc[tied.market.eq("h2h") & tied.game_id.le(5), "outcome"].eq("void").all()
+    )
     totals = grades[grades.market.eq("totals")].set_index("game_id")
     assert totals.loc[1, "outcome"] == "win"
     assert totals.loc[2, "outcome"] == "push"
