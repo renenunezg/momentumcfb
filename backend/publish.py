@@ -870,3 +870,14 @@ def ensure_recommendation_schema():
             raise ValueError(
                 "Apply sql/003_recommendations.sql before refreshing CFB recommendations"
             )
+        if not conn.execute(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pg_constraint "
+                "WHERE conrelid = 'cfb.recommendations'::regclass "
+                "AND conname = 'recommendation_eligibility_v2')"
+            )
+        ).scalar_one():
+            raise ValueError(
+                "Apply sql/004_recommendation_injury_baseline.sql "
+                "before refreshing CFB recommendations"
+            )
