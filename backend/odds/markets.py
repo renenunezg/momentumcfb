@@ -4,7 +4,8 @@ from difflib import SequenceMatcher
 
 import numpy as np
 import pandas as pd
-from scipy.stats import t as student_t
+
+from backend.model.distributions import marginal_cdf
 
 TEAM_NAME_ALIASES = {
     "liusharks": "longislanduniversity",
@@ -182,16 +183,6 @@ def compare_priced_offers(
         eligible = priced[priced["execution_eligibility_verified"].astype(bool)]
         executable = not eligible.empty
         candidate_offers = eligible if executable else priced
-        scale_by_market = {
-            "spreads": projection.margin_sd
-            * np.sqrt(
-                (projection.degrees_of_freedom - 2.0) / projection.degrees_of_freedom
-            ),
-            "totals": projection.total_sd
-            * np.sqrt(
-                (projection.degrees_of_freedom - 2.0) / projection.degrees_of_freedom
-            ),
-        }
         candidates = []
         for offer in candidate_offers.itertuples():
             if offer.price == 0:
@@ -216,8 +207,9 @@ def compare_priced_offers(
                 else projection.total_sd
             )
             probability = float(
-                student_t.cdf(
-                    edge / scale_by_market[offer.market],
+                marginal_cdf(
+                    edge,
+                    uncertainty,
                     projection.degrees_of_freedom,
                 )
             )

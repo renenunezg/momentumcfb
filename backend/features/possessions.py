@@ -438,11 +438,13 @@ def _aggregate_side(
     work = possessions.copy()
     work["team"] = work[team_column]
     work["opponent"] = work[opponent_column]
+    work["has_competitive_epa"] = work["competitive_plays"].gt(0)
     keys = ["season", "week", "season_type", "game_id", "team"]
     grouped = work.groupby(keys, sort=True)
     out = grouped.agg(
         opponent=("opponent", "first"),
         possessions=("possession_id", "size"),
+        competitive_possessions=("has_competitive_epa", "sum"),
         scrimmage_plays=("scrimmage_plays", "sum"),
         competitive_plays=("competitive_plays", "sum"),
         non_turnover_plays=("non_turnover_plays", "sum"),
@@ -458,6 +460,11 @@ def _aggregate_side(
         scrimmage_span_seconds=("scrimmage_span_seconds", "sum"),
         timed_play_intervals=("timed_play_intervals", "sum"),
     ).reset_index()
+    # No observed competitive plays means missing process evidence, not zero EPA.
+    out["epa_total"] = out["epa_total"].where(out["competitive_possessions"].gt(0))
+    out["non_turnover_epa_total"] = out["non_turnover_epa_total"].where(
+        out["non_turnover_plays"].gt(0)
+    )
     out["epa_per_play"] = out["epa_total"] / out["competitive_plays"]
     out["non_turnover_epa_per_play"] = (
         out["non_turnover_epa_total"] / out["non_turnover_plays"]

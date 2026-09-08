@@ -2,10 +2,10 @@
 
 Within a season the predicted vote share is a softmax over the candidate
 pool, which sums to one by construction and matches how a ballot behaves.
-Features are per-game rates plus team record, poll rank, position, and
-conference tier, so a mid-season row is on the same footing as a full
-season. Training rows are the top-ten ballot finishers from the seed CSV
-with everyone else in the pool at zero share.
+Training and evaluation use historical weekly snapshots with candidate
+pools chosen from statistics available at that week. Evaluation trains
+only on earlier seasons and reports winners missing from the pool as misses.
+Shares are conditional on the selected pool, not calibrated win probabilities.
 """
 
 import re
@@ -16,10 +16,13 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
+from backend.etl import store
+from backend.features.scoring import _division_one_schedule, _split_week_zero
 from backend.players.heisman_seed import SEED_PATH
 from backend.players.ingest import read_season_source, read_weekly
 
-MODEL_VERSION = "cfb_heisman_share_v1"
+MODEL_VERSION = "cfb_heisman_share_v2"
+EVALUATION_KIND = "expanding_window_model_weekly"
 CANDIDATE_POOL = 300
 RIDGE_PENALTY = 0.5
 RATE_PRIOR_GAMES = 4.0
@@ -133,20 +136,26 @@ def normalize_name(name: str) -> str:
     return re.sub(r"[^a-z]", "", text)
 
 
-def _regular_box(season: int, through_week: int | None) -> pd.DataFrame:
-    box = read_weekly(season, "box")
+def _regular_box(
+    season: int, through_week: int | None, box: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    if box is None:
+        box = _feature_sources(season)["box"]
     box = box[box["season_type"].eq("regular")]
     if through_week is not None:
         box = box[box["week"].le(through_week)]
     return box
 
 
-def season_stats(season: int, through_week: int | None = None) -> pd.DataFrame:
+def season_stats(
+    season: int, through_week: int | None = None, *, box: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Per-player box totals through a regular-season week (or the season)."""
-    box = _regular_box(season, through_week)
+    box = _regular_box(season, through_week, box)
     passing = box[box["category"].eq("passing") & box["stat_name"].eq("C/ATT")].copy()
-    attempts = passing["stat"].str.split("/", expand=True)
-    passing["pass_attempts"] = pd.to_numeric(attempts[1], errors="coerce")
+    passing["pass_attempts"] = pd.to_numeric(
+        passing["stat"].str.partition("/", expand=False).str[2], errors="coerce"
+    )
 
     keyed = box.copy()
     keyed["feature"] = [
@@ -196,20 +205,35 @@ def season_stats(season: int, through_week: int | None = None) -> pd.DataFrame:
     return stats
 
 
-def team_context(season: int, through_week: int | None = None) -> pd.DataFrame:
+def _feature_sources(season: int) -> dict[str, pd.DataFrame]:
+    """Use the same chronological weeks as team and player-value production."""
+    games = store.read_games(season)
+    schedule = _split_week_zero(_division_one_schedule(games))
+    weeks = schedule.set_index("game_id")["model_week"]
+    games = games[games["id"].isin(weeks.index)].copy()
+    games["week"] = games["id"].map(weeks).astype(int)
+    box = read_weekly(season, "box")
+    box = box[box["game_id"].isin(weeks.index)].copy()
+    box["week"] = box["game_id"].map(weeks).astype(int)
+    return {
+        "box": box,
+        "games": games,
+        **{
+            name: read_season_source(season, name)
+            for name in ("rankings", "teams", "roster")
+        },
+    }
+
+
+def team_context(
+    season: int,
+    through_week: int | None = None,
+    *,
+    sources: dict[str, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
     """Win percentage, latest AP rank, and conference tier per team."""
-    games = pd.read_parquet(
-        f"backend/data/raw/games/{season}.parquet",
-        columns=[
-            "season_type",
-            "week",
-            "completed",
-            "home_team",
-            "away_team",
-            "home_points",
-            "away_points",
-        ],
-    )
+    sources = _feature_sources(season) if sources is None else sources
+    games = sources["games"]
     games = games[
         games["season_type"].eq("regular")
         & games["completed"].fillna(False).astype(bool)
@@ -231,7 +255,7 @@ def team_context(season: int, through_week: int | None = None) -> pd.DataFrame:
     record = pd.concat([home, away]).groupby("team")["win"].agg(["sum", "size"])
     record["win_pct"] = record["sum"] / record["size"]
 
-    rankings = read_season_source(season, "rankings")
+    rankings = sources["rankings"]
     ap = rankings[
         rankings["poll"].eq("AP Top 25") & rankings["season_type"].eq("regular")
     ]
@@ -240,7 +264,7 @@ def team_context(season: int, through_week: int | None = None) -> pd.DataFrame:
     latest = ap[ap["week"].eq(ap["week"].max())] if not ap.empty else ap
     rank = latest.set_index("school")["rank"]
 
-    teams = read_season_source(season, "teams")
+    teams = sources["teams"]
     context = teams[["school", "conference", "classification"]].rename(
         columns={"school": "team"}
     )
@@ -263,13 +287,17 @@ def team_context(season: int, through_week: int | None = None) -> pd.DataFrame:
     ]
 
 
-def featured_players(season: int, through_week: int | None = None) -> pd.DataFrame:
+def featured_players(
+    season: int,
+    through_week: int | None = None,
+    *,
+    sources: dict[str, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
     """Every FBS player with box stats, with model features attached."""
-    stats = season_stats(season, through_week)
-    context = team_context(season, through_week)
-    roster = read_season_source(season, "roster")[["id", "position"]].rename(
-        columns={"id": "athlete_id"}
-    )
+    sources = _feature_sources(season) if sources is None else sources
+    stats = season_stats(season, through_week, box=sources["box"])
+    context = team_context(season, through_week, sources=sources)
+    roster = sources["roster"][["id", "position"]].rename(columns={"id": "athlete_id"})
     roster["athlete_id"] = roster["athlete_id"].astype(str)
     pool = stats.merge(context, on="team", how="inner")
     pool = pool[pool["classification"].eq("fbs")]
@@ -292,76 +320,36 @@ def featured_players(season: int, through_week: int | None = None) -> pd.DataFra
     return pool.reset_index(drop=True)
 
 
-def candidate_pool(
-    players: pd.DataFrame, keep_ids: pd.Series | None = None
-) -> pd.DataFrame:
-    """The most used players on each side of the ball, plus any forced ids.
+def candidate_pool(players: pd.DataFrame) -> pd.DataFrame:
+    """The most used players on each side, without outcome-based additions.
 
     Half the pool comes from each side so a linebacker season is ranked
-    against other defenders' usage, not against pass attempts. Ballot
-    finishers outside the cut (a two-way fullback) are kept so the model
-    always sees every vote-getter.
+    against other defenders' usage, not against pass attempts.
     """
     half = CANDIDATE_POOL // 2
-    offense = players.sort_values("offense_usage", ascending=False).head(half)
-    defense = players.sort_values("defense_usage", ascending=False).head(half)
-    forced = (
-        players[players["athlete_id"].isin(keep_ids)]
-        if keep_ids is not None
-        else players.iloc[0:0]
+    offense = (
+        players[players["offense_usage"].gt(0)]
+        .sort_values(["offense_usage", "athlete_id"], ascending=[False, True])
+        .head(half)
+    )
+    defense = (
+        players[players["defense_usage"].gt(0)]
+        .sort_values(["defense_usage", "athlete_id"], ascending=[False, True])
+        .head(half)
     )
     return (
-        pd.concat([offense, defense, forced])
+        pd.concat([offense, defense])
         .drop_duplicates("athlete_id")
         .reset_index(drop=True)
     )
 
 
-def _roster_fallback(
-    season: int, row, players: pd.DataFrame, context: pd.DataFrame
-) -> pd.DataFrame | None:
-    """A zero-stat candidate row for a ballot player the box never lists.
-
-    Seasons before 2014 carry no defensive box, so a pure defender who
-    finished on the ballot has a roster entry and nothing else.
-    """
-    roster = read_season_source(season, "roster")
-    roster = roster.assign(
-        key=(roster["first_name"].fillna("") + roster["last_name"].fillna("")).map(
-            normalize_name
-        ),
-        team_key=roster["team"].map(normalize_name),
-    )
-    hit = roster[
-        roster["key"].eq(normalize_name(row.player))
-        & roster["team_key"].eq(normalize_name(row.school))
-    ]
-    if len(hit) != 1:
-        return None
-    template = players.iloc[0:1].copy()
-    for column in template.columns:
-        if pd.api.types.is_numeric_dtype(template[column]):
-            template[column] = 0.0
-    template["athlete_id"] = str(hit["id"].iloc[0])
-    template["athlete_name"] = row.player
-    template["team"] = hit["team"].iloc[0]
-    template["position"] = hit["position"].iloc[0]
-    template["season"] = season
-    team = context[context["team"].eq(hit["team"].iloc[0])]
-    if not team.empty:
-        for column in ("win_pct", "ap_rank", "rank_points", "power_conference"):
-            template[column] = team[column].iloc[0]
-    template["games"] = float(players["games"].max())
-    return template
-
-
 def _match_seed(
-    seed: pd.DataFrame, players: pd.DataFrame, season: int
+    seed: pd.DataFrame, players: pd.DataFrame, season: int, *, strict: bool = True
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Attach athlete ids to the season's ballot rows, failing loudly."""
+    """Match labels without adding candidates or changing snapshot features."""
     rows = seed[seed["season"].eq(season)].copy()
     names = players.assign(key=players["athlete_name"].map(normalize_name))
-    context = team_context(season)
     matched = []
     for row in rows.itertuples(index=False):
         key = normalize_name(row.player)
@@ -372,8 +360,12 @@ def _match_seed(
         if hit.empty:
             # Initials and nicknames differ between sources; last name plus
             # first initial within the school is the fallback.
-            parts = row.player.split()
-            pattern = f"^{normalize_name(parts[0])[0]}.*{normalize_name(parts[-1])}$"
+            parts = [
+                part for word in row.player.split() if (part := normalize_name(word))
+            ]
+            if not parts:
+                raise ValueError(f"invalid Heisman ballot player name {row.player!r}")
+            pattern = f"^{parts[0][0]}.*{parts[-1]}$"
             same_school = names[
                 names["team"].map(normalize_name).eq(normalize_name(row.school))
             ]
@@ -382,19 +374,15 @@ def _match_seed(
                 # Wikipedia and CFBD spell some schools differently; a
                 # unique name match across the pool still identifies him.
                 hit = names[names["key"].str.match(pattern)]
-        if hit.empty:
-            fallback = _roster_fallback(season, row, players, context)
-            if fallback is not None:
-                players = pd.concat([players, fallback], ignore_index=True)
-                names = players.assign(key=players["athlete_name"].map(normalize_name))
-                hit = fallback
+        if len(hit) != 1 and not strict:
+            continue
         if len(hit) != 1:
             raise ValueError(
                 f"{season} ballot row {row.player} ({row.school}) matched "
                 f"{len(hit)} candidates"
             )
         matched.append({"athlete_id": hit["athlete_id"].iloc[0], "points": row.points})
-    return pd.DataFrame(matched), players
+    return pd.DataFrame(matched, columns=["athlete_id", "points"]), players
 
 
 def load_seed() -> pd.DataFrame:
@@ -402,16 +390,38 @@ def load_seed() -> pd.DataFrame:
 
 
 def training_rows(seasons: list[int], seed: pd.DataFrame) -> pd.DataFrame:
+    """Snapshots for every cached regular week, using only that week's pool.
+
+    Targets are eventual ballot points conditional on the selected pool.
+    A snapshot containing no eventual vote recipient remains in evaluation
+    but contributes no likelihood when fitting.
+    """
+    if not seasons:
+        raise ValueError("no historical player seasons available for Heisman training")
     frames = []
     for season in seasons:
-        players = featured_players(season)
-        ballot, players = _match_seed(seed, players, season)
-        pool = candidate_pool(players, ballot["athlete_id"])
-        pool = pool.merge(ballot, on="athlete_id", how="left")
-        pool["points"] = pool["points"].fillna(0.0)
-        pool["share"] = pool["points"] / pool["points"].sum()
-        frames.append(pool)
+        sources = _feature_sources(season)
+        regular = _regular_box(season, None, sources["box"])
+        for week in sorted(regular["week"].unique()):
+            players = featured_players(season, int(week), sources=sources)
+            pool = candidate_pool(players)
+            if pool.empty:
+                continue
+            ballot, _ = _match_seed(seed, pool, season, strict=False)
+            pool = pool.merge(ballot, on="athlete_id", how="left")
+            pool["points"] = pd.to_numeric(pool["points"], errors="raise").fillna(0.0)
+            total = float(pool["points"].sum())
+            pool["share"] = pool["points"] / total if total else 0.0
+            pool["week"] = int(week)
+            frames.append(pool)
+    if not frames:
+        raise ValueError("historical player seasons have no regular-week candidates")
     return pd.concat(frames, ignore_index=True)
+
+
+def _snapshot_groups(frame: pd.DataFrame):
+    columns = ["season", "week"] if "week" in frame else ["season"]
+    return frame.groupby(columns).indices.values()
 
 
 class ShareModel:
@@ -428,7 +438,7 @@ class ShareModel:
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         logits = self._design(frame) @ self.beta
         out = np.empty(len(frame))
-        for _, index in frame.groupby("season").indices.items():
+        for index in _snapshot_groups(frame):
             block = logits[index]
             block = np.exp(block - block.max())
             out[index] = block / block.sum()
@@ -439,25 +449,44 @@ class ShareModel:
 
 
 def fit_share_model(rows: pd.DataFrame) -> ShareModel:
+    if rows.empty:
+        raise ValueError("no historical snapshots available for Heisman fitting")
+    valid_groups = [
+        index for index in _snapshot_groups(rows) if rows.iloc[index]["share"].sum() > 0
+    ]
+    if not valid_groups:
+        raise ValueError("historical candidate pools contain no ballot recipients")
+    rows = rows.iloc[np.concatenate(valid_groups)].reset_index(drop=True)
     design = rows[FEATURES].to_numpy(float)
     mean = design.mean(axis=0)
     scale = design.std(axis=0)
     scale[scale == 0] = 1.0
     design = (design - mean) / scale
     share = rows["share"].to_numpy(float)
-    groups = [index for _, index in rows.groupby("season").indices.items()]
+    groups = list(_snapshot_groups(rows))
+    # Each season has equal total weight despite differing numbers of weeks.
+    snapshot_counts = (
+        rows.groupby("season")["week"].nunique() if "week" in rows else None
+    )
+    group_weights = [
+        1.0 / snapshot_counts.loc[rows.iloc[index[0]]["season"]]
+        if snapshot_counts is not None
+        else 1.0
+        for index in groups
+    ]
 
     def loss_and_grad(beta: np.ndarray) -> tuple[float, np.ndarray]:
         logits = design @ beta
         loss = RIDGE_PENALTY * float(beta @ beta)
         grad = 2.0 * RIDGE_PENALTY * beta
-        for index in groups:
+        for index, weight in zip(groups, group_weights):
             block = logits[index]
             block = block - block.max()
             weights = np.exp(block)
             probability = weights / weights.sum()
-            loss -= float(share[index] @ np.log(probability))
-            grad += design[index].T @ (probability - share[index])
+            log_probability = block - np.log(weights.sum())
+            loss -= weight * float(share[index] @ log_probability)
+            grad += weight * (design[index].T @ (probability - share[index]))
         return loss, grad
 
     result = minimize(
@@ -468,36 +497,80 @@ def fit_share_model(rows: pd.DataFrame) -> ShareModel:
     return ShareModel(mean, scale, result.x)
 
 
-def leave_one_season_out(rows: pd.DataFrame) -> pd.DataFrame:
-    """Per-season holdout: fit on the other seasons, score the held-out one."""
+def chronological_weekly_evaluation(
+    rows: pd.DataFrame, seed: pd.DataFrame
+) -> pd.DataFrame:
+    """Evaluate each weekly pool with a model trained on earlier seasons only."""
     records = []
     for season in sorted(rows["season"].unique()):
-        held = rows[rows["season"].eq(season)].copy()
-        model = fit_share_model(rows[rows["season"].ne(season)])
-        held["predicted_share"] = model.predict(held)
-        held = held.sort_values("predicted_share", ascending=False).reset_index(
-            drop=True
-        )
-        held["predicted_rank"] = np.arange(1, len(held) + 1)
-        actual = held.sort_values("share", ascending=False).iloc[0]
-        predicted = held.iloc[0]
-        actual_row = held[held["athlete_id"].eq(actual["athlete_id"])].iloc[0]
-        records.append(
-            {
-                "season": int(season),
-                "actual_winner": actual["athlete_name"],
-                "actual_winner_team": actual["team"],
-                "actual_share": float(actual["share"]),
-                "predicted_winner": predicted["athlete_name"],
-                "predicted_winner_team": predicted["team"],
-                "predicted_winner_share": float(predicted["predicted_share"]),
-                "actual_winner_predicted_share": float(actual_row["predicted_share"]),
-                "actual_winner_predicted_rank": int(actual_row["predicted_rank"]),
-                "winner_hit": bool(actual_row["predicted_rank"] == 1),
-                "top_three_hit": bool(actual_row["predicted_rank"] <= 3),
-            }
-        )
-    return pd.DataFrame(records)
+        train = rows[rows["season"].lt(season)]
+        if train.empty:
+            continue
+        model = fit_share_model(train)
+        ballot = seed[seed["season"].eq(season)]
+        if ballot.empty:
+            raise ValueError(f"no Heisman ballot for evaluation season {season}")
+        actual = ballot.sort_values("points", ascending=False).iloc[0]
+        total_points = float(ballot["points"].sum())
+        for week, held in rows[rows["season"].eq(season)].groupby("week"):
+            held = held.copy()
+            held["predicted_share"] = model.predict(held)
+            held = held.sort_values(
+                ["predicted_share", "athlete_id"], ascending=[False, True]
+            ).reset_index(drop=True)
+            held["predicted_rank"] = np.arange(1, len(held) + 1)
+            matched, _ = _match_seed(
+                ballot[ballot["points"].eq(actual["points"])],
+                held,
+                int(season),
+                strict=False,
+            )
+            winner = held[held["athlete_id"].isin(matched["athlete_id"])]
+            winner_in_pool = not winner.empty
+            actual_rank = (
+                int(winner["predicted_rank"].iloc[0]) if winner_in_pool else None
+            )
+            predicted = held.iloc[0]
+            records.append(
+                {
+                    "season": int(season),
+                    "week": int(week),
+                    "evaluation_kind": EVALUATION_KIND,
+                    "training_seasons": sorted(
+                        int(value) for value in train["season"].unique()
+                    ),
+                    "candidate_count": len(held),
+                    "winner_in_pool": winner_in_pool,
+                    "ballot_share_covered": float(held["points"].sum() / total_points),
+                    "actual_winner": actual["player"],
+                    "actual_winner_team": actual["school"],
+                    "actual_share": float(actual["points"] / total_points),
+                    "predicted_winner": predicted["athlete_name"],
+                    "predicted_winner_team": predicted["team"],
+                    "predicted_winner_share": float(predicted["predicted_share"]),
+                    "actual_winner_predicted_share": float(
+                        winner["predicted_share"].iloc[0]
+                    )
+                    if winner_in_pool
+                    else 0.0,
+                    "actual_winner_predicted_rank": actual_rank,
+                    "winner_hit": actual_rank == 1,
+                    "top_three_hit": actual_rank is not None and actual_rank <= 3,
+                    "winner_value_rank": None,
+                }
+            )
+    return pd.DataFrame(
+        records,
+        columns=[
+            *HISTORY_COLUMNS,
+            "week",
+            "evaluation_kind",
+            "training_seasons",
+            "candidate_count",
+            "winner_in_pool",
+            "ballot_share_covered",
+        ],
+    )
 
 
 def build_board(

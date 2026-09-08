@@ -97,7 +97,7 @@ def test_credit_and_unit_remainder_reconstruct_every_play():
     assert np.allclose(sackers["credit_epa"], 1.05)
 
 
-def test_garbage_time_counts_for_wpa_but_not_epa_value():
+def test_garbage_time_counts_for_wpa_but_not_epa_value(monkeypatch, tmp_path):
     credit = assign_play_credit(STATS, PLAYS)
     credit["weight"] = 1.0
     credit["raw_epa"] = credit["credit_epa"]
@@ -111,6 +111,29 @@ def test_garbage_time_counts_for_wpa_but_not_epa_value():
     assert (garbage["wpa"] != 0).all()
     live = out[out["play_id"].eq("p1")]
     assert (live["plays"] == 1).all()
+
+    # A fresh weekly runner uses the frozen records grading fetched, without
+    # needing past local forecast artifacts or accepting post-kickoff rows.
+    monkeypatch.setattr(value.store, "PROCESSED_DIR", tmp_path)
+    value.store.write_processed(
+        pd.DataFrame(
+            {
+                "game_id": [1, 2],
+                "home_margin": [3.0, 99.0],
+                "margin_sd": 14.0,
+                "as_of": ["2026-08-28T00:00:00Z", "2026-08-30T00:00:00Z"],
+                "start_date": "2026-08-29T16:00:00Z",
+            }
+        ),
+        "players",
+        "published_projections",
+        "2026.parquet",
+    )
+    anchors = value._projection_anchors(
+        2026, pd.DataFrame({"game_id": [1, 2], "model_week": 0})
+    )
+    assert anchors["game_id"].tolist() == [1]
+    assert anchors["home_margin"].tolist() == [3.0]
 
 
 def _games(weeks_completed: set[int]) -> pd.DataFrame:

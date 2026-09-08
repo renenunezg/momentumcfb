@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from backend.model.market_blend import add_market_informed_margins
 from backend.model.preseason import _flatten_cfbd_offers
@@ -53,3 +54,27 @@ def test_cfbd_line_comparisons_fill_the_published_contract():
     assert row["model_home_spread"] == -6.0
     assert row["best_offer_point"] is None
     assert row["best_offer_expected_value_per_unit"] is None
+
+
+def test_player_publish_checks_schema_before_removing_served_rows(monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from backend import db, publish
+    from backend.players import pipeline
+
+    statements = []
+
+    def execute(statement, params):
+        statements.append(str(statement))
+        return SimpleNamespace(scalar=lambda: "NO")
+
+    connection = SimpleNamespace(execute=execute)
+    monkeypatch.setattr(
+        db, "engine", SimpleNamespace(begin=lambda: nullcontext(connection))
+    )
+    monkeypatch.setattr(pipeline, "read_player_artifacts", lambda season: {})
+    monkeypatch.setattr(publish, "_table_columns", lambda connection, table: [])
+    with pytest.raises(ValueError, match="002_heisman_weekly_evaluation.sql"):
+        publish.publish_players(2026)
+    assert all(statement.startswith("SELECT") for statement in statements)

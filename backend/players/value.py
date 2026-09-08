@@ -270,6 +270,25 @@ def _historical_win_probabilities(season: int) -> pd.DataFrame | None:
 
 def _projection_anchors(season: int, games: pd.DataFrame) -> pd.DataFrame:
     """Per game, the projection published for the week it was played."""
+    try:
+        published = store.read_processed(
+            "players",
+            "published_projections",
+            f"{season}.parquet",
+            columns=["game_id", "home_margin", "margin_sd", "as_of", "start_date"],
+        )
+    except FileNotFoundError:
+        published = None
+    if published is not None:
+        published["as_of"] = pd.to_datetime(published["as_of"], utc=True)
+        published["start_date"] = pd.to_datetime(published["start_date"], utc=True)
+        published = published[published["as_of"].lt(published["start_date"])]
+        published = published.sort_values("as_of").drop_duplicates(
+            "game_id", keep="last"
+        )
+        return published.merge(
+            games[["game_id", "model_week"]], on="game_id", validate="one_to_one"
+        )[["game_id", "model_week", "home_margin", "margin_sd"]]
     frames = []
     # Serving anchors are the projections the live model actually served,
     # including the week-zero slate the week-one artifact covers; week 00 is

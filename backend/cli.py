@@ -9,6 +9,21 @@ def _seasons_argument(parser: argparse.ArgumentParser, default: list[int]) -> No
     parser.add_argument("--seasons", type=int, nargs="+", default=default)
 
 
+def _cfbd_budget_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--max-calls",
+        type=int,
+        default=100,
+        help="session call cap; values above 100 require explicit approval",
+    )
+    parser.add_argument(
+        "--min-remaining",
+        type=int,
+        default=40,
+        help="preserve this many CFBD calls for the weekly model",
+    )
+
+
 def _leakage_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--leakage-games-per-season",
@@ -22,6 +37,7 @@ def _add_pipeline_commands(sub) -> None:
     ingest = sub.add_parser("ingest", help="pull CFBD data into raw parquet")
     _seasons_argument(ingest, SEASONS)
     ingest.add_argument("--week", type=int, default=None)
+    _cfbd_budget_arguments(ingest)
 
     features = sub.add_parser(
         "features", help="build possession and team-game features"
@@ -41,10 +57,13 @@ def _add_pipeline_commands(sub) -> None:
     weekly.add_argument("--season", type=int, required=True)
     weekly.add_argument("--week", type=int, default=None)
 
-    sub.add_parser(
+    calibrate = sub.add_parser(
         "calibrate",
         help="tune and diagnose chronological joint scoring projections",
     )
+    calibrate.add_argument("--production-replay", action="store_true")
+    calibrate.add_argument("--seasons", type=int, nargs="+", default=None)
+    calibrate.add_argument("--output-directory", default=None)
 
     preseason = sub.add_parser(
         "preseason",
@@ -305,6 +324,12 @@ def _add_publish_commands(sub) -> None:
     )
     _seasons_argument(ingest_players, SEASONS)
     ingest_players.add_argument("--week", type=int, default=None)
+    ingest_players.add_argument(
+        "--refresh",
+        action="store_true",
+        help="refresh a targeted completed --week for source corrections",
+    )
+    _cfbd_budget_arguments(ingest_players)
 
     player_values = sub.add_parser(
         "player-values",
@@ -314,10 +339,20 @@ def _add_publish_commands(sub) -> None:
 
     heisman = sub.add_parser(
         "heisman",
-        help="fit the Heisman share model on past ballots and build the board",
+        help="build the Heisman board from a previously trained model artifact",
     )
     heisman.add_argument("--season", type=int, required=True)
     heisman.add_argument("--week", type=int, default=None)
+
+    heisman_train = sub.add_parser(
+        "heisman-train",
+        help="build a portable Heisman model from cached historical snapshots",
+    )
+    heisman_train.add_argument("--season", type=int, required=True)
+    heisman_train.add_argument(
+        "--runtime-bundle",
+        help="export a ZIP with the trained model and frozen WPA parameters",
+    )
 
     publish_players = sub.add_parser(
         "publish-players",

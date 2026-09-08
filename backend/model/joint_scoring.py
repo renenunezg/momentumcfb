@@ -7,7 +7,7 @@ import pandas as pd
 
 from backend.model.outputs import GameProjection, TeamRating
 
-MODEL_VERSION = "joint_scoring_v3"
+MODEL_VERSION = "joint_scoring_v5"
 PACE_PRIOR_SD = 2.0
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
@@ -49,6 +49,65 @@ DEFAULT_CONFIG = JointScoringConfig(
     student_t_degrees_of_freedom=500.0,
     score_covariance_scale=1.125,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class JointScoringPriors:
+    """Pure preseason state on one common possession scale.
+
+    Strength SDs describe independent offense and defense priors in PPP.
+    Expected possessions describe each team's pace against an average opponent.
+    Score noise carries the previous season's sample independently of team SDs.
+    """
+
+    strength_means: dict[int, tuple[float, float]]
+    strength_sds: dict[int, tuple[float, float]]
+    expected_possessions: dict[int, float]
+    base_possessions: float
+    score_noise_covariance: np.ndarray | None = None
+    score_noise_games: int = 0
+    score_noise_season: int | None = None
+    score_noise_as_of: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if self.score_noise_covariance is not None:
+            noise = np.asarray(self.score_noise_covariance, dtype=float)
+            if (
+                noise.shape != (2, 2)
+                or not np.isfinite(noise).all()
+                or not np.allclose(noise, noise.T)
+                or np.linalg.eigvalsh(noise).min() <= 0
+                or self.score_noise_games < 2
+                or self.score_noise_games != int(self.score_noise_games)
+                or self.score_noise_season is None
+                or self.score_noise_as_of is None
+                or self.score_noise_as_of.tzinfo is None
+                or self.score_noise_as_of.utcoffset() is None
+            ):
+                raise ValueError("invalid prior-season score noise")
+        elif (
+            self.score_noise_games
+            or self.score_noise_season is not None
+            or self.score_noise_as_of is not None
+        ):
+            raise ValueError("prior-season score noise covariance is required")
+        if not isfinite(self.base_possessions) or self.base_possessions <= 0:
+            raise ValueError("prior base_possessions must be positive")
+        team_ids = set(self.strength_means)
+        if (
+            not team_ids
+            or set(self.strength_sds) != team_ids
+            or set(self.expected_possessions) != team_ids
+        ):
+            raise ValueError(
+                "complete strength, uncertainty and pace priors are required"
+            )
+        for team_id in team_ids:
+            if not all(isfinite(value) for value in self.strength_means[team_id]):
+                raise ValueError("strength prior means must be finite")
+            positive = (*self.strength_sds[team_id], self.expected_possessions[team_id])
+            if not all(isfinite(value) and value > 0 for value in positive):
+                raise ValueError("prior strength SDs and possessions must be positive")
 
 
 def _solve_ridge(
@@ -145,6 +204,7 @@ class JointScoringFit:
     parameter_covariance: np.ndarray
     score_residual_covariance: np.ndarray
     config: JointScoringConfig
+    training_games: int
 
     @property
     def team_index(self) -> dict[int, int]:
@@ -257,15 +317,27 @@ def fit_joint_scoring(
     as_of: datetime,
     config: JointScoringConfig = DEFAULT_CONFIG,
     strength_prior_means: dict[int, tuple[float, float]] | None = None,
+    priors: JointScoringPriors | None = None,
 ) -> JointScoringFit:
     """Fit ratings using only games strictly before the requested model week.
 
     strength_prior_means optionally maps team ID to offense and defense PPP
     prior means. Missing FBS teams default to zero, while missing FCS teams use
     the existing classification fallback learned from the initial fit.
+    Full priors additionally preserve team uncertainty and preseason pace.
     """
+    if priors is not None:
+        if strength_prior_means is not None:
+            raise ValueError("provide full priors or strength_prior_means, not both")
+        strength_prior_means = priors.strength_means
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
+    if (
+        priors is not None
+        and priors.score_noise_as_of is not None
+        and priors.score_noise_as_of >= as_of
+    ):
+        raise ValueError("score noise prior must precede the forecast cutoff")
     training = games[games["model_week"] < forecast_week].copy()
     if "completed" in training:
         training = training[training["completed"].fillna(False).astype(bool)]
@@ -323,7 +395,9 @@ def fit_joint_scoring(
 
     base_ppp = float(np.average(points_per_possession, weights=recency))
     centered_points = points_per_possession - base_ppp
-    centered_epa = epa_per_possession - np.average(epa_per_possession, weights=recency)
+    centered_epa: np.ndarray = epa_per_possession - np.average(
+        epa_per_possession, weights=recency
+    )
     epa_variance = np.average(np.square(centered_epa), weights=recency)
     epa_scale = float(
         np.clip(
@@ -335,9 +409,13 @@ def fit_joint_scoring(
     )
     process_points = epa_scale * centered_epa
     target = 0.5 * (centered_points + process_points)
-    base_possessions = float(np.average(training["game_possessions"]))
+    base_possessions = (
+        priors.base_possessions
+        if priors is not None
+        else float(np.average(training["game_possessions"]))
+    )
     prior_mean = np.zeros(2 * n_teams + 1)
-    teams_with_priors = np.zeros(n_teams, dtype=bool)
+    teams_with_priors: np.ndarray = np.zeros(n_teams, dtype=bool)
     if strength_prior_means:
         for team_id, (offense_prior, defense_prior) in strength_prior_means.items():
             index = team_index.get(team_id)
@@ -347,6 +425,12 @@ def fit_joint_scoring(
                 teams_with_priors[index] = True
     prior_mean[-1] = HFA_PRIOR_POINTS / base_possessions
     prior_sd = np.full(2 * n_teams + 1, config.strength_prior_sd_ppp)
+    if priors is not None:
+        for team_id, (offense_sd, defense_sd) in priors.strength_sds.items():
+            index = team_index.get(team_id)
+            if index is not None:
+                prior_sd[index] = offense_sd
+                prior_sd[n_teams + index] = defense_sd
     prior_sd[-1] = HFA_PRIOR_SD_POINTS / base_possessions
     parameters, covariance = _solve_ridge(design, target, recency, prior_mean, prior_sd)
     classifications = catalog["classification"].fillna("").str.lower()
@@ -426,16 +510,22 @@ def fit_joint_scoring(
     for row, game in enumerate(training.itertuples()):
         pace_design[row, team_index[int(game.home_team_id)]] = 0.5
         pace_design[row, team_index[int(game.away_team_id)]] = 0.5
-    base_possessions = float(np.average(pace_target))
+    pace_prior = np.zeros(n_teams)
+    if priors is not None:
+        for team_id, expected_possessions in priors.expected_possessions.items():
+            index = team_index.get(team_id)
+            if index is not None:
+                pace_prior[index] = 2 * (expected_possessions - base_possessions)
     pace, _ = _solve_ridge(
         pace_design,
         pace_target - base_possessions,
         recency[::2],
-        np.zeros(n_teams),
+        pace_prior,
         np.full(n_teams, PACE_PRIOR_SD),
     )
-    base_possessions += float(pace.mean())
-    pace -= pace.mean()
+    if priors is None:
+        base_possessions += float(pace.mean())
+        pace -= pace.mean()
 
     home_index = training["home_team_id"].map(team_index).to_numpy(int)
     away_index = training["away_team_id"].map(team_index).to_numpy(int)
@@ -460,11 +550,27 @@ def fit_joint_scoring(
             training["away_points"].to_numpy(float) - predicted_away,
         ]
     )
-    score_covariance = _regularized_covariance(
-        score_residuals,
-        floor=4.0,
-        shrinkage=config.covariance_shrinkage,
-    )
+    if n_games < 2:
+        if priors is None or priors.score_noise_covariance is None:
+            raise ValueError(
+                "score noise requires two games or a prior-season estimate"
+            )
+        score_covariance = priors.score_noise_covariance.copy()
+    else:
+        score_covariance = _regularized_covariance(
+            score_residuals,
+            floor=4.0,
+            shrinkage=config.covariance_shrinkage,
+        )
+    if priors is not None and priors.score_noise_covariance is not None:
+        if priors.score_noise_season != int(training["season"].iloc[-1]) - 1:
+            raise ValueError("score noise prior must come from the previous season")
+        # Preserve a full season of noise evidence across the preseason/weekly
+        # boundary. Current in-sample residuals alone are unstable on small slates.
+        score_covariance = (
+            priors.score_noise_games * priors.score_noise_covariance
+            + n_games * score_covariance
+        ) / (priors.score_noise_games + n_games)
     return JointScoringFit(
         season=int(training["season"].iloc[-1]),
         week=forecast_week,
@@ -479,4 +585,5 @@ def fit_joint_scoring(
         parameter_covariance=covariance,
         score_residual_covariance=score_covariance,
         config=config,
+        training_games=n_games,
     )

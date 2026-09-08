@@ -1,14 +1,15 @@
 """Season runners that turn raw player sources into published artifacts."""
 
+import hashlib
 import json
 import logging
 from datetime import datetime
 
 import pandas as pd
 
-from backend.config import PROCESSED_DIR
+from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.etl import store
-from backend.players import heisman, value
+from backend.players import artifacts, heisman, value
 from backend.players.credit import DEFENSE_ROLES, OFFENSE_SHARES
 from backend.players.ingest import players_dir
 
@@ -30,6 +31,11 @@ META_COLUMNS = [
     "heisman_winner_hit_rate",
     "heisman_top_three_rate",
     "heisman_coefficients",
+    "heisman_evaluation_kind",
+    "heisman_evaluation_week",
+    "heisman_evaluation_seasons",
+    "heisman_winner_pool_coverage",
+    "heisman_ballot_share_covered",
 ]
 
 
@@ -57,14 +63,6 @@ def run_player_values(season: int, as_of: datetime) -> pd.DataFrame:
     return outputs["player_values"]
 
 
-def _final_snapshot(season: int) -> pd.DataFrame | None:
-    try:
-        values = store.read_processed(*player_values_artifact(season))
-    except FileNotFoundError:
-        return None
-    return values[values["week"].eq(values["week"].max())]
-
-
 def _seed_seasons(seed: pd.DataFrame, before: int) -> list[int]:
     return sorted(
         int(season)
@@ -73,35 +71,66 @@ def _seed_seasons(seed: pd.DataFrame, before: int) -> list[int]:
     )
 
 
-def run_heisman(season: int, week: int | None, as_of: datetime) -> pd.DataFrame:
-    """Fit the share model on past ballots, validate it, and build the board.
-
-    The current season is never in the training set, so the board it
-    produces is a genuine forecast rather than a fit to the season's votes.
-    """
+def train_heisman_model(
+    season: int, as_of: datetime
+) -> tuple[heisman.ShareModel, list[int], pd.DataFrame]:
+    """Explicit offline training from cached, complete historical sources."""
     seed = heisman.load_seed()
+    expected = sorted(int(year) for year in seed["season"].unique() if year < season)
     training_seasons = _seed_seasons(seed, season)
+    missing = sorted(set(expected) - set(training_seasons))
+    if missing or len(training_seasons) < 2:
+        raise ValueError(
+            f"Heisman training requires cached historical player seasons; missing {missing}. "
+            "Restore the historical inputs or a trained model artifact before inference."
+        )
     rows = heisman.training_rows(training_seasons, seed)
     model = heisman.fit_share_model(rows)
-    history = heisman.leave_one_season_out(rows)
-
-    winner_ranks = []
-    for record in history.itertuples(index=False):
-        snapshot = _final_snapshot(record.season)
-        rank = None
-        if snapshot is not None:
-            winner = rows[
-                rows["season"].eq(record.season)
-                & rows["athlete_name"].eq(record.actual_winner)
-            ]
+    weekly_history = heisman.chronological_weekly_evaluation(rows, seed)
+    # Value ranks must use the same weekly cutoff, never the final season rank.
+    for year, indexes in weekly_history.groupby("season").groups.items():
+        try:
+            values = store.read_processed(*player_values_artifact(int(year)))
+        except FileNotFoundError:
+            continue
+        for index in indexes:
+            record = weekly_history.loc[index]
+            snapshot = values[values["week"].eq(record["week"])]
+            winner, _ = heisman._match_seed(
+                seed[seed["player"].eq(record["actual_winner"])],
+                snapshot,
+                int(year),
+                strict=False,
+            )
             hit = snapshot[snapshot["athlete_id"].isin(winner["athlete_id"])]
             if not hit.empty:
-                rank = int(hit["overall_rank"].iloc[0])
-        winner_ranks.append(rank)
-    history["winner_value_rank"] = pd.array(winner_ranks, dtype="Int64")
-    history = history[heisman.HISTORY_COLUMNS]
-    store.write_processed(history, *HISTORY_ARTIFACT)
+                weekly_history.loc[index, "winner_value_rank"] = int(
+                    hit["overall_rank"].iloc[0]
+                )
+    artifacts.save_heisman_model(
+        model,
+        training_seasons,
+        weekly_history,
+        cutoff_season=season,
+        created_at=as_of,
+        source_provenance={
+            str(year): {
+                "manifest_sha256": hashlib.sha256(
+                    (players_dir(year) / "manifest.parquet").read_bytes()
+                ).hexdigest(),
+                "games_sha256": hashlib.sha256(
+                    (RAW_DIR / "games" / f"{year}.parquet").read_bytes()
+                ).hexdigest(),
+            }
+            for year in training_seasons
+        },
+    )
+    return model, training_seasons, weekly_history
 
+
+def run_heisman(season: int, week: int | None, as_of: datetime) -> pd.DataFrame:
+    """Build a board using a portable model trained only on earlier seasons."""
+    model, training_seasons, weekly_history = artifacts.load_heisman_model(season)
     try:
         player_values = store.read_processed(*player_values_artifact(season))
     except FileNotFoundError:
@@ -110,6 +139,10 @@ def run_heisman(season: int, week: int | None, as_of: datetime) -> pd.DataFrame:
         if player_values is None or player_values.empty:
             raise ValueError(f"no player values for {season}; run player-values first")
         week = int(player_values["week"].max())
+    # The serving table has one row per season. Match the current forecast
+    # week exactly; unavailable weeks remain absent rather than using later data.
+    history = weekly_history[weekly_history["week"].eq(week)].copy()
+    store.write_processed(history[heisman.HISTORY_COLUMNS], *HISTORY_ARTIFACT)
     board = heisman.build_board(model, season, week, player_values, as_of)
     store.write_processed(board, *heisman_board_artifact(season, week))
 
@@ -140,6 +173,13 @@ def run_heisman(season: int, week: int | None, as_of: datetime) -> pd.DataFrame:
                 "heisman_winner_hit_rate": float(history["winner_hit"].mean()),
                 "heisman_top_three_rate": float(history["top_three_hit"].mean()),
                 "heisman_coefficients": model.coefficients().to_json(orient="records"),
+                "heisman_evaluation_kind": heisman.EVALUATION_KIND,
+                "heisman_evaluation_week": week,
+                "heisman_evaluation_seasons": len(history),
+                "heisman_winner_pool_coverage": float(history["winner_in_pool"].mean()),
+                "heisman_ballot_share_covered": float(
+                    history["ballot_share_covered"].mean()
+                ),
             }
         ],
         columns=META_COLUMNS,
@@ -147,7 +187,7 @@ def run_heisman(season: int, week: int | None, as_of: datetime) -> pd.DataFrame:
     store.write_processed(meta, *META_ARTIFACT)
     log.info(
         f"heisman {season} week {week}: {len(board)} candidates; "
-        f"leave-one-season-out winner hit rate "
+        f"chronological week-{week} winner hit rate "
         f"{history['winner_hit'].mean():.2f} over {len(history)} seasons"
     )
     return board

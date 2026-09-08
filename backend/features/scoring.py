@@ -1,6 +1,9 @@
 import numpy as np
 import pandas as pd
 
+from backend.etl import store
+from backend.features.possessions import build_team_games
+
 DIVISION_ONE = {"fbs", "fcs"}
 SCORING_COLUMNS = [
     "home_points",
@@ -10,6 +13,26 @@ SCORING_COLUMNS = [
     "away_epa_per_possession",
 ]
 WEEK_ZERO_MINIMUM_GAP = pd.Timedelta(hours=48)
+
+
+def load_scoring_team_games(season: int) -> pd.DataFrame:
+    """Read current features or upgrade old cached exposure in memory.
+
+    Rebuilding from already-stored possessions avoids API use and leaves frozen
+    artifacts unchanged. Missing competitive exposure must never fall back to
+    all possessions because that dilutes the competitive EPA signal.
+    """
+    team_games = store.read_processed("team_games", f"{season}.parquet")
+    if "offense_competitive_possessions" in team_games:
+        return team_games
+    try:
+        possessions = store.read_processed("possessions", f"{season}.parquet")
+    except FileNotFoundError as exc:
+        raise ValueError(
+            f"{season} team-game features lack competitive possession counts; "
+            "rebuild features from cached PBP before fitting"
+        ) from exc
+    return build_team_games(possessions)
 
 
 def _division_one_schedule(games: pd.DataFrame) -> pd.DataFrame:
@@ -79,14 +102,20 @@ def _join_scoring_features(
         "game_id",
         "team",
         "offense_possessions",
+        "offense_competitive_possessions",
         "offense_epa_total",
         "game_possessions",
     ]
+    if "offense_competitive_possessions" not in team_games:
+        raise ValueError(
+            "team-game features lack competitive possession counts; rebuild features"
+        )
     features = team_games[feature_columns].copy()
     home = features.rename(
         columns={
             "team": "home_team",
             "offense_possessions": "home_offense_possessions",
+            "offense_competitive_possessions": "home_competitive_possessions",
             "offense_epa_total": "home_offense_epa_total",
             "game_possessions": "home_game_possessions",
         }
@@ -95,6 +124,7 @@ def _join_scoring_features(
         columns={
             "team": "away_team",
             "offense_possessions": "away_offense_possessions",
+            "offense_competitive_possessions": "away_competitive_possessions",
             "offense_epa_total": "away_offense_epa_total",
             "game_possessions": "away_game_possessions",
         }
@@ -105,12 +135,12 @@ def _join_scoring_features(
     out["game_possessions"] = out[
         ["home_game_possessions", "away_game_possessions"]
     ].mean(axis=1)
-    out["home_epa_per_possession"] = (
-        out["home_offense_epa_total"] / out["home_offense_possessions"]
-    )
-    out["away_epa_per_possession"] = (
-        out["away_offense_epa_total"] / out["away_offense_possessions"]
-    )
+    out["home_epa_per_possession"] = out["home_offense_epa_total"] / out[
+        "home_competitive_possessions"
+    ].where(out["home_competitive_possessions"].gt(0))
+    out["away_epa_per_possession"] = out["away_offense_epa_total"] / out[
+        "away_competitive_possessions"
+    ].where(out["away_competitive_possessions"].gt(0))
     return out.sort_values(["start_date", "game_id"], kind="stable", ignore_index=True)
 
 

@@ -12,17 +12,22 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 from backend.config import PROCESSED_DIR
 from backend.etl import store
+from backend.model.distributions import marginal_cdf, marginal_interval_half_width
 from backend.serving.market import flatten_closing_lines, flatten_closing_totals
 
 CLOSING_SOURCE = "cfbd_lines_median"
 SCORE_SOURCE = "cfbd_games"
-PROBABILITY_METHOD = (
+LEGACY_PROBABILITY_METHOD = (
     "P(home margin > 0) from the frozen pregame margin marginal: "
     "t.cdf(pure_home_margin / margin_sd, degrees_of_freedom)"
+)
+PROBABILITY_METHOD = (
+    "P(home margin > 0) from the frozen pregame margin marginal: "
+    "t.cdf(pure_home_margin / (margin_sd * sqrt((df - 2) / df)), df); "
+    "normal limit when df is missing or infinite"
 )
 
 # Every model source is graded against the same actual margin; the closing
@@ -109,12 +114,21 @@ def grading_artifact(season: int, name: str) -> tuple[str, str]:
 
 
 def _home_win_probability(frame: pd.DataFrame) -> pd.Series:
-    z = frame["pure_home_margin"] / frame["margin_sd"]
-    df = frame["degrees_of_freedom"]
-    normal = df.isna() | ~np.isfinite(df.astype(float))
-    out = pd.Series(np.nan, index=frame.index, dtype=float)
-    out[normal] = stats.norm.cdf(z[normal])
-    out[~normal] = stats.t.cdf(z[~normal], df[~normal])
+    return pd.Series(
+        marginal_cdf(
+            frame["pure_home_margin"], frame["margin_sd"], frame["degrees_of_freedom"]
+        ),
+        index=frame.index,
+    )
+
+
+def _correct_legacy_probabilities(frame: pd.DataFrame) -> pd.DataFrame:
+    """Repair derived values using frozen parameters without changing forecasts."""
+    out = frame.copy()
+    legacy = out["probability_method"].eq(LEGACY_PROBABILITY_METHOD)
+    if legacy.any():
+        out.loc[legacy, "home_win_probability"] = _home_win_probability(out[legacy])
+        out.loc[legacy, "probability_method"] = PROBABILITY_METHOD
     return out
 
 
@@ -127,7 +141,8 @@ def build_graded_games(
     """Grade every completed game with a pregame published projection.
 
     ``projections`` is the published cfb.game_projections record for the
-    season. ``existing`` holds already graded rows, which are kept verbatim.
+    season. Existing frozen inputs are preserved; the legacy probability
+    scale calculation is repaired from those inputs when present.
     """
     graded_at = graded_at or datetime.now(timezone.utc)
     games = store.read_games(season)
@@ -225,7 +240,7 @@ def _graded_frame(new: pd.DataFrame, existing: pd.DataFrame | None) -> pd.DataFr
     ]
     if not parts:
         return pd.DataFrame(columns=GRADED_GAME_COLUMNS)
-    out = pd.concat(parts, ignore_index=True)
+    out = _correct_legacy_probabilities(pd.concat(parts, ignore_index=True))
     for column in ("start_date", "forecast_as_of", "source_ingested_at", "graded_at"):
         out[column] = pd.to_datetime(out[column], utc=True)
     return out.sort_values(["start_date", "game_id"], kind="stable", ignore_index=True)
@@ -298,15 +313,11 @@ def _source_columns(graded: pd.DataFrame, source: str) -> tuple[pd.Series, pd.Se
 
 
 def _coverage(frame: pd.DataFrame, level: float) -> float | None:
-    sd = frame["margin_sd"]
-    df = frame["degrees_of_freedom"].astype(float)
-    quantile = np.where(
-        np.isfinite(df),
-        stats.t.ppf(0.5 + level / 2, np.where(np.isfinite(df), df, 1.0)),
-        stats.norm.ppf(0.5 + level / 2),
+    width = marginal_interval_half_width(
+        level, frame["margin_sd"], frame["degrees_of_freedom"]
     )
     error = (frame["pure_home_margin"] - frame["actual_margin"]).abs()
-    return float((error <= quantile * sd).mean())
+    return float((error <= width).mean())
 
 
 def _error_stats(prediction: pd.Series, actual: pd.Series) -> dict[str, float | None]:
@@ -328,6 +339,7 @@ def compute_performance_metrics(
     computed_at = computed_at or datetime.now(timezone.utc)
     if graded.empty:
         return pd.DataFrame(columns=PERFORMANCE_METRIC_COLUMNS)
+    graded = _correct_legacy_probabilities(graded)
     season = int(graded["season"].iloc[0])
     rows = []
     for source in PREDICTION_SOURCES:
