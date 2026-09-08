@@ -102,7 +102,7 @@ def offer_selection(
     market_key: str, outcome_name: str | None, home_team: str, away_team: str
 ) -> str | None:
     """Map an Odds API outcome onto home/away or over/under, or None to skip."""
-    if market_key == "spreads":
+    if market_key in {"spreads", "h2h"}:
         if outcome_name == home_team:
             return "home"
         if outcome_name == away_team:
@@ -196,7 +196,16 @@ def priced_candidates(projection, game_offers: pd.DataFrame) -> list[dict]:
     for offer in game_offers.itertuples():
         if not np.isfinite(offer.price) or abs(offer.price) < 100:
             continue
-        if offer.market == "spreads" and offer.selection == "home":
+        if offer.market != "h2h" and not np.isfinite(offer.point):
+            continue
+        if offer.market == "h2h" and offer.selection in {"home", "away"}:
+            edge = projection.home_margin * (1 if offer.selection == "home" else -1)
+            selection = (
+                projection.home_team
+                if offer.selection == "home"
+                else projection.away_team
+            )
+        elif offer.market == "spreads" and offer.selection == "home":
             edge = projection.home_margin + offer.point
             selection = projection.home_team
         elif offer.market == "spreads" and offer.selection == "away":
@@ -211,7 +220,9 @@ def priced_candidates(projection, game_offers: pd.DataFrame) -> list[dict]:
         else:
             continue
         uncertainty = (
-            projection.margin_sd if offer.market == "spreads" else projection.total_sd
+            projection.margin_sd
+            if offer.market in {"spreads", "h2h"}
+            else projection.total_sd
         )
         if not np.isfinite(uncertainty) or uncertainty <= 0 or not np.isfinite(edge):
             continue
@@ -235,7 +246,7 @@ def priced_candidates(projection, game_offers: pd.DataFrame) -> list[dict]:
                 "execution_eligibility_verified": offer.execution_eligibility_verified,
                 "match_score": offer.match_score,
                 "selection": selection,
-                "point": float(offer.point),
+                "point": None if offer.market == "h2h" else float(offer.point),
                 "price": float(offer.price),
                 "provider": offer.provider,
                 "provider_key": offer.provider_key,
@@ -261,9 +272,9 @@ def compare_priced_offers(
     decisions = build_recommendations(projections, offers)
     recommended = {
         game_id: group.sort_values("expected_value_per_unit", ascending=False).iloc[0]
-        for game_id, group in decisions[decisions["status"].eq("recommended")].groupby(
-            "game_id"
-        )
+        for game_id, group in decisions[
+            decisions["status"].eq("recommended") & decisions["market"].ne("h2h")
+        ].groupby("game_id")
     }
     rows = []
     offer_groups = {game_id: group for game_id, group in offers.groupby("game_id")}

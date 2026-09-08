@@ -454,7 +454,7 @@ def weekly_forecast_is_published(
                     "WHERE season = :season AND week = :week "
                     "AND model_version = :model_version) AND NOT EXISTS ("
                     f"SELECT 1 FROM {CFB_SCHEMA}.game_projections p "
-                    "CROSS JOIN (VALUES ('spreads'), ('totals')) m(market) "
+                    "CROSS JOIN (VALUES ('h2h'), ('spreads'), ('totals')) m(market) "
                     "WHERE p.season = :season AND p.week = :week "
                     "AND p.start_date > clock_timestamp() AND NOT EXISTS ("
                     f"SELECT 1 FROM {CFB_SCHEMA}.recommendations r "
@@ -874,10 +874,10 @@ def ensure_recommendation_schema():
             text(
                 "SELECT EXISTS (SELECT 1 FROM pg_constraint "
                 "WHERE conrelid = 'cfb.recommendations'::regclass "
-                "AND conname = 'recommendation_eligibility_v2')"
+                "AND conname = 'recommendation_eligibility_v3')"
             )
         ).scalar_one():
             raise ValueError(
-                "Apply sql/004_recommendation_injury_baseline.sql "
+                "Apply sql/005_recommendation_markets_and_filters.sql "
                 "before refreshing CFB recommendations"
             )

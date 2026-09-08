@@ -9,11 +9,11 @@ import pandas as pd
 from backend.model.distributions import marginal_cdf
 from backend.odds.markets import _american_profit, priced_candidates
 
-POLICY_VERSION = "cfb-picks-v2"
+POLICY_VERSION = "cfb-picks-v3"
 MIN_PROBABILITY_EDGE = 0.045
 MAX_OFFER_AGE = pd.Timedelta(hours=1)
 MAX_FORECAST_AGE = pd.Timedelta(days=7)
-MARKETS = ("spreads", "totals")
+MARKETS = ("h2h", "spreads", "totals")
 RECOMMENDATION_COLUMNS = [
     "game_id",
     "market",
@@ -74,6 +74,12 @@ def _probabilities(projection, offer):
     Half-point lines keep the original CDF. Integer lines reserve the mass
     between the adjacent half points for a returned stake.
     """
+    if offer["market"] == "h2h":
+        mean = projection.home_margin * (1 if offer["side"] == "home" else -1)
+        win = float(
+            marginal_cdf(mean, projection.margin_sd, projection.degrees_of_freedom)
+        )
+        return win, 0.0, 1.0 - win
     point = offer["point"]
     if offer["market"] == "spreads":
         mean = projection.home_margin * (1 if offer["side"] == "home" else -1)
@@ -167,7 +173,7 @@ def build_recommendations(projections, offers, *, decision_at=None):
         ):
             reason = "missing_model_inputs"
         game_offers = groups.get(projection.game_id, offers.iloc[:0]).dropna(
-            subset=["point", "price"]
+            subset=["price"]
         )
         candidates = priced_candidates(projection, game_offers)
         for market in MARKETS:
@@ -202,7 +208,9 @@ def build_recommendations(projections, offers, *, decision_at=None):
             priced = [c for c in candidates if c["market"] == market]
             evaluated = []
             for candidate in priced:
-                if candidate["point"] * 2 != round(candidate["point"] * 2):
+                if candidate["market"] != "h2h" and candidate["point"] * 2 != round(
+                    candidate["point"] * 2
+                ):
                     continue
                 win, push, loss = _probabilities(projection, candidate)
                 profit = _american_profit(candidate["price"])
@@ -295,11 +303,15 @@ def grade_recommendations(recommendations, games, *, graded_at=None):
             margin = float(game["home_points"] - game["away_points"])
             total = float(game["home_points"] + game["away_points"])
             balance = (
-                (margin if pick.side == "home" else -margin) + pick.point
+                (margin if pick.side == "home" else -margin)
+                if pick.market == "h2h"
+                else (margin if pick.side == "home" else -margin) + pick.point
                 if pick.market == "spreads"
                 else (total - pick.point) * (1 if pick.side == "over" else -1)
             )
             result = "win" if balance > 0 else "loss" if balance < 0 else "push"
+            if pick.market == "h2h" and balance == 0:
+                result = "void"
         profit = (
             pick.stake_units * _american_profit(pick.price)
             if result == "win"

@@ -84,7 +84,7 @@ def _add_pipeline_commands(sub) -> None:
     preseason.add_argument(
         "--with-odds-api",
         action="store_true",
-        help="also buy a two-market Odds API snapshot instead of CFBD lines",
+        help="also buy a three-market Odds API snapshot instead of CFBD lines",
     )
 
 
