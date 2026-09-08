@@ -9,7 +9,7 @@ import pandas as pd
 from backend.model.distributions import marginal_cdf
 from backend.odds.markets import _american_profit, priced_candidates
 
-POLICY_VERSION = "cfb-picks-v3"
+POLICY_VERSION = "cfb-picks-v4"
 MIN_PROBABILITY_EDGE = 0.045
 MAX_OFFER_AGE = pd.Timedelta(hours=1)
 MAX_FORECAST_AGE = pd.Timedelta(days=7)
@@ -71,18 +71,24 @@ def _timestamp(value):
 def _probabilities(projection, offer):
     """Round the frozen continuous marginal to integer scores, retaining pushes.
 
+    Sides use the market-informed margin (pure model shrunk toward the
+    pre-decision consensus spread); totals have no market blend and stay pure.
     Half-point lines keep the original CDF. Integer lines reserve the mass
     between the adjacent half points for a returned stake.
     """
     if offer["market"] == "h2h":
-        mean = projection.home_margin * (1 if offer["side"] == "home" else -1)
+        mean = projection.market_informed_home_margin * (
+            1 if offer["side"] == "home" else -1
+        )
         win = float(
             marginal_cdf(mean, projection.margin_sd, projection.degrees_of_freedom)
         )
         return win, 0.0, 1.0 - win
     point = offer["point"]
     if offer["market"] == "spreads":
-        mean = projection.home_margin * (1 if offer["side"] == "home" else -1)
+        mean = projection.market_informed_home_margin * (
+            1 if offer["side"] == "home" else -1
+        )
         threshold = -point
         sd = projection.margin_sd
     else:
@@ -145,10 +151,12 @@ def _offer_reason(offer, paired, now, start):
 def build_recommendations(projections, offers, *, decision_at=None):
     """One best eligible side per game and market, or an explicit No Play.
 
-    Selection uses the pure model marginal. Historical calibration is diagnostic
-    and never gates forward recommendations or replaces their probabilities.
-    The 4.5 percentage-point gate is a versioned starting policy, not a fit
-    to live-season outcomes. Stakes are always one unit, with no compounding.
+    Sides use the market-informed margin so an edge is measured after shrinking
+    toward the market being bet into; totals stay pure. Historical calibration
+    is diagnostic and never gates forward recommendations or replaces their
+    probabilities. The 4.5 percentage-point gate is a versioned starting
+    policy, not a fit to live-season outcomes. Stakes are always one unit,
+    with no compounding.
     """
     now = _timestamp(decision_at or datetime.now(timezone.utc))
     groups = {game_id: group for game_id, group in offers.groupby("game_id")}
@@ -203,7 +211,7 @@ def build_recommendations(projections, offers, *, decision_at=None):
                 status="no_play",
                 reason=reason,
                 stake_units=0.0,
-                model_home_margin=projection.home_margin,
+                model_home_margin=projection.market_informed_home_margin,
             )
             priced = [c for c in candidates if c["market"] == market]
             evaluated = []
