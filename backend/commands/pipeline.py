@@ -1,6 +1,7 @@
 """Data, feature, and forecast command handlers."""
 
 import logging
+import os
 from argparse import Namespace
 
 from backend.config import SEASONS
@@ -134,6 +135,14 @@ def handle_weekly_update(args: Namespace) -> None:
     )
     log.info(f"serving totals: {totals}")
     log.info(f"forecast log: {result.log_directory}")
+    if (
+        os.getenv("GITHUB_ACTIONS") == "true"
+        and result.projections["market_home_spread"].notna().any()
+    ):
+        from backend.odds.scheduling import schedule_weekly_kickoff
+
+        dispatch_at = schedule_weekly_kickoff(result.projections, args.season)
+        log.info(f"kickoff capture rearmed for {dispatch_at}")
 
 
 def handle_calibrate(args: Namespace) -> None:

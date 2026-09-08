@@ -825,6 +825,7 @@ def test_live_schedule_uses_the_freshest_stored_snapshot(tmp_path, monkeypatch):
 
 def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     monkeypatch,
+    tmp_path,
 ):
     # This is the live acceptance boundary: a window is ready only after a
     # provider-backed postkick state exists, while the selected anchor still
@@ -941,6 +942,112 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     problems, _ = kickoff.validate_completed_window(target, frames, leaked)
     assert any("post-kickoff snapshot" in problem for problem in problems)
     assert any("closing snapshot has 0 providers" in problem for problem in problems)
+
+    # Fresh-runner acceptance: use one frozen weekly artifact even with a
+    # missing/stale opening forecast. Its schedule also drives market anchors.
+    import json
+
+    from backend.odds.forecast import load_weekly_capture_forecast
+    from backend.serving import market
+
+    created = starts_at - pd.Timedelta(days=3)
+    metadata = {"season": [2026], "week": [2], "as_of": [created.isoformat()]}
+    directory = tmp_path / "weekly"
+    directory.mkdir()
+    forecast = {
+        "source_manifest": pd.DataFrame(
+            {
+                "season": [2026],
+                "week": [2],
+                "forecast_created_at": [created],
+                "projection_games": [1],
+            }
+        ),
+        "ratings": pd.DataFrame({**metadata, "team_id": [1]}),
+        "unit_ratings": pd.DataFrame({**metadata, "team_id": [1]}),
+        "projections": pd.DataFrame(
+            {
+                **metadata,
+                "game_id": [101],
+                "start_date": [starts_at],
+                "home_margin": [4.0],
+                "margin_sd": [18.0],
+            }
+        ),
+        "market_comparisons": pd.DataFrame({"game_id": [101]}),
+        "schedule_coverage": pd.DataFrame(
+            {
+                "game_id": [101],
+                "start_date": [starts_at],
+                "model_week": [2],
+                "home_team": ["TCU"],
+                "away_team": ["North Carolina"],
+            }
+        ),
+    }
+    for name, frame in forecast.items():
+        frame.to_parquet(directory / f"{name}.parquet", index=False)
+    monkeypatch.setattr(store, "PROCESSED_DIR", tmp_path / "processed")
+    arguments = {"forecast_directory": str(directory), "max_forecast_age_hours": 240}
+    problems, _, _ = kickoff.check_forecast_readiness(
+        2026, 1, as_of=pregame, **arguments
+    )
+    assert problems == []
+    frozen = load_weekly_capture_forecast(directory, 2026)
+    assert frozen["anchors"]["game_id"].tolist() == [101]
+    assert frozen["anchors"]["home_margin"].tolist() == [4.0]
+    actual_target = kickoff.resolve_kickoff_target(
+        2026, frames, as_of=pregame, schedule=frozen["schedule_coverage"]
+    )
+    assert actual_target.game_ids == (101,)
+    runtime = store.PROCESSED_DIR / "serving" / "market_margin_sd.json"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(
+        json.dumps(
+            {
+                "margin_sd": 15.0,
+                "method": "frozen development fit",
+                "development_seasons": list(market.DEVELOPMENT_SEASONS),
+            }
+        )
+    )
+    monkeypatch.setattr(live, "verify_live_snapshots", lambda season: ([], frames))
+    frames["offers"]["commence_time"] = starts_at
+    built = market.build_live_market_anchors(2026, schedule=frozen["schedule_coverage"])
+    assert built["model_week"].tolist() == [2]
+    assert built["closing_snapshot_id"].tolist() == ["close"]
+    assert kickoff.validate_completed_window(actual_target, frames, built)[0] == []
+    kickoff._write_market_anchors(2026, built)
+    assert store.read_processed("serving", "anchors_2026_00.parquet")[
+        "home_margin"
+    ].tolist() == [3.5]
+
+    # Missing, mixed, stale, and post-kickoff artifacts cannot silently fall
+    # back to canonical preseason files or stamp themselves with today's date.
+    problems, _, _ = kickoff.check_forecast_readiness(
+        2026, 1, as_of=created + pd.Timedelta(days=11), **arguments
+    )
+    assert any("weekly forecast age" in problem for problem in problems)
+    forecast["schedule_coverage"].assign(game_id=999).to_parquet(
+        directory / "schedule_coverage.parquet"
+    )
+    problems, _, _ = kickoff.check_forecast_readiness(
+        2026, 1, as_of=pregame, **arguments
+    )
+    assert any("different games" in problem for problem in problems)
+    forecast["schedule_coverage"].to_parquet(directory / "schedule_coverage.parquet")
+    forecast["ratings"].assign(as_of=created + pd.Timedelta(hours=1)).to_parquet(
+        directory / "ratings.parquet"
+    )
+    problems, _, _ = kickoff.check_forecast_readiness(
+        2026, 1, as_of=pregame, **arguments
+    )
+    assert any("different forecast run" in problem for problem in problems)
+    (directory / "ratings.parquet").unlink()
+    problems, _, _ = kickoff.check_forecast_readiness(
+        2026, 1, as_of=pregame, **arguments
+    )
+    assert any("weekly forecast is not ready" in problem for problem in problems)
 
 
 def test_flatten_offers_survives_parquet_nested_arrays(tmp_path):

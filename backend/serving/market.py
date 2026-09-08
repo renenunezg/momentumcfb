@@ -9,6 +9,7 @@ constant fitted on development-season residuals; each row records the method
 so the constant cannot be mistaken for a per-game estimate.
 """
 
+import json
 from math import isfinite
 
 import numpy as np
@@ -218,16 +219,40 @@ def fit_market_margin_sd(
     return margin_sd, method
 
 
+def load_market_margin_sd() -> tuple[float, str]:
+    """Use the reviewed development fit on runners without historical raw data."""
+    path = store.PROCESSED_DIR / "serving" / "market_margin_sd.json"
+    if not path.exists():
+        return fit_market_margin_sd()
+    record = json.loads(path.read_text())
+    value = float(record["margin_sd"])
+    if (
+        not isfinite(value)
+        or value <= 0
+        or record["development_seasons"] != list(DEVELOPMENT_SEASONS)
+        or not record["method"]
+    ):
+        raise ValueError("invalid frozen market margin uncertainty artifact")
+    return value, str(record["method"])
+
+
 def _build_market_anchors(
-    closing: pd.DataFrame, season: int, source: str
+    closing: pd.DataFrame,
+    season: int,
+    source: str,
+    schedule: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    weeks = _schedule_model_weeks(season)
+    weeks = (
+        _schedule_model_weeks(season)
+        if schedule is None
+        else schedule[["game_id", "model_week"]]
+    )
     anchors = closing.merge(weeks, on="game_id", how="inner", validate="one_to_one")
     if anchors.empty:
         raise ValueError(
             f"season {season}: no lined game appears in the stored schedule"
         )
-    margin_sd, method = fit_market_margin_sd()
+    margin_sd, method = load_market_margin_sd()
     anchors["season"] = season
     anchors["home_margin"] = -anchors["closing_spread"]
     anchors["margin_sd"] = margin_sd
@@ -249,7 +274,9 @@ def build_market_anchors(season: int) -> pd.DataFrame:
     return _build_market_anchors(closing, season, "cfbd_lines")
 
 
-def build_live_market_anchors(season: int) -> pd.DataFrame:
+def build_live_market_anchors(
+    season: int, *, schedule: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Build market anchors from append-only pregame Odds API captures."""
     from backend.odds.live import verify_live_snapshots
 
@@ -257,7 +284,7 @@ def build_live_market_anchors(season: int) -> pd.DataFrame:
     if problems:
         raise ValueError("invalid live odds captures: " + "; ".join(problems))
     closing = flatten_live_closing_lines(frames["offers"])
-    return _build_market_anchors(closing, season, "odds_api_live_capture")
+    return _build_market_anchors(closing, season, "odds_api_live_capture", schedule)
 
 
 def cross_check_closing_spreads(

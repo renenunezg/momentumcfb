@@ -220,6 +220,10 @@ def _add_market_commands(sub) -> None:
         help="stop polling after this many consecutive failed polls",
     )
 
+    live.add_argument(
+        "--forecast-directory", help="immutable weekly forecast run directory"
+    )
+
     for name, description in (
         ("kickoff-check", "read-only readiness gate for the next kickoff window"),
         (
@@ -231,6 +235,9 @@ def _add_market_commands(sub) -> None:
         kickoff = sub.add_parser(name, help=description)
         kickoff.add_argument("--season", type=int, required=True)
         kickoff.add_argument("--week", type=int, default=1)
+        kickoff.add_argument(
+            "--forecast-directory", help="immutable weekly forecast run directory"
+        )
         kickoff.add_argument(
             "--game-id",
             type=int,
@@ -248,6 +255,11 @@ def _add_market_commands(sub) -> None:
         kickoff.add_argument("--max-offer-staleness-seconds", type=float, default=300.0)
         kickoff.add_argument("--min-providers", type=int, default=2)
         if name == "kickoff-check":
+            kickoff.add_argument(
+                "--forecast-only",
+                action="store_true",
+                help="validate frozen forecast without checking live odds",
+            )
             kickoff.add_argument("--max-poll-age-minutes", type=float, default=15.0)
         else:
             kickoff.add_argument("--lookback-hours", type=float, default=1.0)

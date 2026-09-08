@@ -67,7 +67,7 @@ def _calibration_anchors(season: int) -> pd.DataFrame:
     anchors = table[table["season"].eq(season)]
     if anchors.empty:
         raise ValueError(f"no pregame anchors for season {season} in {location}")
-    return _validated(anchors, f"{location} season {season}")
+    return validate_serving_anchors(anchors, f"{location} season {season}")
 
 
 def _projection_anchors(
@@ -91,7 +91,7 @@ def _projection_anchors(
         if not frame["week"].eq(week).all():
             raise ValueError(f"{location} targets weeks other than {week}")
         frame = frame.rename(columns={"week": "model_week"})
-    return _validated(frame, location)
+    return validate_serving_anchors(frame, location)
 
 
 def _require_columns(location: str, available: list[str], needed: list[str]) -> None:
@@ -100,7 +100,7 @@ def _require_columns(location: str, available: list[str], needed: list[str]) -> 
         raise ValueError(f"{location} is missing anchor columns: {', '.join(missing)}")
 
 
-def _validated(anchors: pd.DataFrame, origin: str) -> pd.DataFrame:
+def validate_serving_anchors(anchors: pd.DataFrame, origin: str) -> pd.DataFrame:
     """Enforce the serving anchor contract on one loaded source."""
     duplicated = anchors["game_id"].duplicated()
     if duplicated.any():
