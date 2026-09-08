@@ -62,6 +62,11 @@ def _add_pipeline_commands(sub) -> None:
         help="tune and diagnose chronological joint scoring projections",
     )
     calibrate.add_argument("--production-replay", action="store_true")
+    calibrate.add_argument(
+        "--recommendations",
+        action="store_true",
+        help="calibrate integer-score probabilities on fixed chronological research splits",
+    )
     calibrate.add_argument("--seasons", type=int, nargs="+", default=None)
     calibrate.add_argument("--output-directory", default=None)
 

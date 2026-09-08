@@ -74,7 +74,13 @@ def handle_weekly_update(args: Namespace) -> None:
         run_weekly_forecast,
     )
     from backend.odds.client import OddsAPIClient, OddsAPIError
-    from backend.publish import publish, weekly_forecast_is_published
+    from backend.publish import (
+        ensure_recommendation_schema,
+        publish,
+        weekly_forecast_is_published,
+    )
+
+    ensure_recommendation_schema()
 
     as_of = datetime.now(timezone.utc)
     try:
@@ -146,6 +152,39 @@ def handle_weekly_update(args: Namespace) -> None:
 
 
 def handle_calibrate(args: Namespace) -> None:
+    if getattr(args, "recommendations", False):
+        if getattr(args, "production_replay", False) or getattr(args, "seasons", None):
+            raise SystemExit(
+                "--recommendations uses fixed splits and cannot combine with --production-replay or --seasons"
+            )
+        from pathlib import Path
+
+        from backend.config import PROCESSED_DIR
+        from backend.model.pick_calibration import run_recommendation_calibration
+
+        destination = (
+            Path(args.output_directory)
+            if args.output_directory
+            else PROCESSED_DIR / "recommendation_calibration"
+        )
+        manifest, report = run_recommendation_calibration(destination)
+        log.info("\n%s", report[report.season.eq("all")].to_string(index=False))
+        for market, result in manifest["parameters"].items():
+            log.info(
+                "%s: %s; paired log-loss change %.6f, 95%% CI %s; probability-score gate %s; model edge supported %s; push calibration %s",
+                market,
+                result["candidate"],
+                result["evaluation_log_loss_change"],
+                result["evaluation_log_loss_change_95ci"],
+                result["probability_score_gate_passed"],
+                result["model_edge_supported"],
+                result["push_calibration_status"],
+            )
+        log.info(
+            "Saved %s. Diagnostic research only. Forward recommendations continue using pure-model probabilities and the configured price/input flags; this report does not gate them.",
+            destination,
+        )
+        return
     if getattr(args, "production_replay", False):
         _handle_production_replay(args)
         return

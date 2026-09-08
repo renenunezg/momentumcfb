@@ -8,7 +8,11 @@ from scipy.special import gammaln
 from scipy.stats import f
 
 from backend.model.distributions import marginal_interval_half_width, marginal_scale
-from backend.model.joint_scoring import JointScoringConfig, fit_joint_scoring
+from backend.model.joint_scoring import (
+    JointScoringConfig,
+    JointScoringPriors,
+    fit_joint_scoring,
+)
 
 DEVELOPMENT_SEASONS = (2019, 2020, 2021, 2022)
 HOLDOUT_SEASONS = (2023, 2024, 2025)
@@ -236,6 +240,8 @@ def walk_forward_season(
     games: pd.DataFrame,
     config: JointScoringConfig,
     strength_prior_means: dict[int, tuple[float, float]] | None = None,
+    *,
+    priors: JointScoringPriors | None = None,
 ) -> pd.DataFrame:
     """Project each game using completed games from earlier model weeks only."""
     _validate_games(games)
@@ -246,7 +252,9 @@ def walk_forward_season(
         if training.empty:
             continue
         target = games[games["model_week"].eq(forecast_week)]
-        as_of = pd.to_datetime(target["start_date"], utc=True).min()
+        as_of = pd.to_datetime(target["start_date"], utc=True).min() - pd.Timedelta(
+            microseconds=1
+        )
         latest_training_start = pd.to_datetime(training["start_date"], utc=True).max()
         if latest_training_start >= as_of:
             raise ValueError(
@@ -260,6 +268,7 @@ def walk_forward_season(
             as_of=as_of.to_pydatetime(),
             config=config,
             strength_prior_means=strength_prior_means,
+            priors=priors,
         )
         projected = pd.DataFrame(
             projection.to_record() for projection in fitted.project(target)

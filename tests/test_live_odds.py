@@ -1108,3 +1108,36 @@ def test_odds_team_alias_matches_the_canonical_cfbd_game():
 
     assert game_id == 401856769
     assert score == 1.0
+
+    shared_prefixes = pd.DataFrame(
+        {
+            "game_id": [1, 2],
+            "start_date": ["2026-09-05T00:00:00Z"] * 2,
+            "home_team": ["Alabama", "Alabama State"],
+            "away_team": ["Miami", "Miami (OH)"],
+        }
+    )
+    assert match_event(
+        "2026-09-05T00:00:00Z",
+        "Alabama State Hornets",
+        "Miami (OH) RedHawks",
+        shared_prefixes,
+    ) == (2, 1.0)
+    # Equally plausible duplicated fixtures cannot select an arbitrary game.
+    # A missing fixture cannot fall back to the similarly named school.
+    assert (
+        match_event(
+            "2026-09-05T00:00:00Z",
+            "Alabama State Hornets",
+            "Miami (OH) RedHawks",
+            shared_prefixes.iloc[:1],
+        )[0]
+        is None
+    )
+    ambiguous = pd.concat([schedule, schedule.assign(game_id=2)], ignore_index=True)
+    assert (
+        match_event("2026-09-05T00:00:00Z", "Kansas Jayhawks", "LIU Sharks", ambiguous)[
+            0
+        ]
+        is None
+    )
