@@ -63,6 +63,7 @@ def test_player_publish_checks_schema_before_removing_served_rows(monkeypatch):
     from backend import db, publish
     from backend.players import pipeline
 
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     statements = []
 
     def execute(statement, params):
@@ -70,8 +71,9 @@ def test_player_publish_checks_schema_before_removing_served_rows(monkeypatch):
         return SimpleNamespace(scalar=lambda: "NO")
 
     connection = SimpleNamespace(execute=execute)
-    monkeypatch.setattr(
-        db, "engine", SimpleNamespace(begin=lambda: nullcontext(connection))
+    # Avoid invoking the lazy database constructor while installing the fake.
+    monkeypatch.setitem(
+        db.__dict__, "engine", SimpleNamespace(begin=lambda: nullcontext(connection))
     )
     monkeypatch.setattr(pipeline, "read_player_artifacts", lambda season: {})
     monkeypatch.setattr(publish, "_table_columns", lambda connection, table: [])
