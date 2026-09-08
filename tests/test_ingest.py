@@ -116,12 +116,20 @@ def test_weekly_update_publishes_pure_model_when_odds_quota_is_exhausted(
     from backend import publish
     from backend.model import weekly
     from backend.odds import client as odds_client
+    from backend.odds import scheduling
 
     calls = []
+    scheduled = []
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(
+        scheduling,
+        "schedule_weekly_kickoff",
+        lambda projections, season: scheduled.append(season),
+    )
     result = SimpleNamespace(
         week=1,
         ratings=[object()],
-        projections=[object()],
+        projections=pd.DataFrame({"market_home_spread": [float("nan")]}),
         market_comparisons=[object()],
         log_directory=tmp_path,
     )
@@ -144,6 +152,11 @@ def test_weekly_update_publishes_pure_model_when_odds_quota_is_exhausted(
     assert calls[0]["odds_client"] is not None
     assert calls[1]["odds_client"] is None
     assert "publishing the pure-model forecast" in capsys.readouterr().out
+    assert scheduled == []
+
+    result.projections["market_home_spread"] = -3.5
+    cli.main(["weekly-update", "--season", "2026"])
+    assert scheduled == [2026]
 
 
 def test_cfbd_quota_gate_counts_retries_and_persists_across_commands(
