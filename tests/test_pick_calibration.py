@@ -64,7 +64,11 @@ def test_pick_calibration_preserves_price_math_and_withholds_evaluation_outcomes
     assert set(report.method) == {"raw", "market_reference", "calibrated"}
     assert report.games.gt(0).all()
 
-    sample = predictions.iloc[[0]]
+    # Production prices sides from the market-informed margin; research frames
+    # carry only the pure margin, so pin them equal for the price-math parity.
+    sample = predictions.iloc[[0]].assign(
+        market_informed_home_margin=lambda f: f.home_margin
+    )
     for market, side, line in [
         ("spreads", "home", -3.0),
         ("spreads", "away", 3.5),
