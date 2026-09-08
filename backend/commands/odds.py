@@ -8,10 +8,27 @@ log = logging.getLogger(__name__)
 
 def handle_kickoff_check(args: Namespace) -> None:
     from backend.odds.kickoff import (
+        KickoffReadiness,
+        check_forecast_readiness,
         check_kickoff_readiness,
         format_readiness,
     )
 
+    if args.forecast_only:
+        problems, warnings, details = check_forecast_readiness(
+            args.season,
+            args.week,
+            forecast_directory=args.forecast_directory,
+            max_forecast_age_hours=args.max_forecast_age_hours,
+            max_source_age_hours=args.max_source_age_hours,
+        )
+        result = KickoffReadiness(
+            None, tuple(problems), tuple(warnings), tuple(details)
+        )
+        log.info(format_readiness(result))
+        if not result.ready:
+            raise SystemExit(1)
+        return
     result = check_kickoff_readiness(
         args.season,
         args.week,
@@ -21,6 +38,7 @@ def handle_kickoff_check(args: Namespace) -> None:
         post_minutes=args.post_minutes,
         interval_seconds=args.interval_seconds,
         min_quota=args.min_quota,
+        forecast_directory=args.forecast_directory,
         max_forecast_age_hours=args.max_forecast_age_hours,
         max_source_age_hours=args.max_source_age_hours,
         max_poll_age_minutes=args.max_poll_age_minutes,
@@ -49,6 +67,7 @@ def handle_kickoff_run(args: Namespace) -> None:
             min_quota=args.min_quota,
             max_failures=args.max_failures,
             max_wait_hours=args.max_wait_hours,
+            forecast_directory=args.forecast_directory,
             max_forecast_age_hours=args.max_forecast_age_hours,
             max_source_age_hours=args.max_source_age_hours,
             max_offer_staleness_seconds=args.max_offer_staleness_seconds,
@@ -67,9 +86,16 @@ def handle_kickoff_run(args: Namespace) -> None:
 
 
 def handle_live_odds(args: Namespace) -> None:
+    from backend.odds.forecast import load_weekly_capture_forecast
     from backend.odds.live import load_division_one_schedule, run_live_polling
 
-    schedule = load_division_one_schedule(args.season)
+    schedule = (
+        load_weekly_capture_forecast(args.forecast_directory, args.season)[
+            "schedule_coverage"
+        ]
+        if args.forecast_directory
+        else load_division_one_schedule(args.season)
+    )
     completed = run_live_polling(
         args.season,
         schedule,

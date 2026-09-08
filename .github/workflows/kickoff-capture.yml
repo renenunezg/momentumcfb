@@ -1,9 +1,9 @@
-name: Opening kickoff capture
+name: Kickoff capture
 
 on:
   # Supabase pg_cron dispatches only the market-capture window.
-  # The frozen pregame forecast is restored from the explicitly named
-  # successful forecast run and is never rebuilt or republished here.
+  # Pin the latest successful weekly artifact, or an explicit forecast run.
+  # Frozen predictions are never rebuilt or republished here.
   repository_dispatch:
     types: [kickoff-capture]
   workflow_dispatch:
@@ -13,13 +13,19 @@ on:
         required: false
         type: string
       forecast_run_id:
-        description: Successful opening forecast run containing the frozen artifacts
-        required: true
+        description: Successful forecast run (defaults to the latest successful weekly artifact)
+        required: false
         type: string
       forecast_artifact:
         description: Exact artifact name produced by that forecast run
-        required: true
+        required: false
         type: string
+
+      validate_only:
+        description: Validate frozen inputs and runtime without API calls or publication
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -37,6 +43,9 @@ jobs:
       REQUESTED_SEASON: ${{ github.event.client_payload.season || inputs.season }}
       FORECAST_RUN_ID: ${{ github.event.client_payload.forecast_run_id || inputs.forecast_run_id }}
       FORECAST_ARTIFACT: ${{ github.event.client_payload.forecast_artifact || inputs.forecast_artifact }}
+      VALIDATE_ONLY: ${{ github.event.client_payload.validate_only || inputs.validate_only || 'false' }}
+      MARKET_RUNTIME_URL: ${{ vars.MARKET_RUNTIME_URL }}
+      MARKET_RUNTIME_SHA256: ${{ vars.MARKET_RUNTIME_SHA256 }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       ODDS_API_BOOKMAKERS: ${{ secrets.ODDS_API_BOOKMAKERS }}
       ODDS_API_REGIONS: ${{ secrets.ODDS_API_REGIONS }}
@@ -72,26 +81,105 @@ jobs:
               season="$calendar_year"
             fi
           fi
-          if [[ ! "$FORECAST_RUN_ID" =~ ^[0-9]+$ ]]; then
-            echo "forecast_run_id must identify one successful forecast run"
-            exit 1
-          fi
-          if [[ ! "$FORECAST_ARTIFACT" =~ ^[A-Za-z0-9._-]+$ ]]; then
-            echo "forecast_artifact contains unsupported characters"
-            exit 1
-          fi
           echo "SEASON=$season" >> "$GITHUB_ENV"
+
+      - name: Resolve a successful immutable forecast artifact
+        id: forecast
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            let runId = process.env.FORECAST_RUN_ID;
+            let name = process.env.FORECAST_ARTIFACT;
+            if (!runId && name) throw new Error('forecast_artifact requires forecast_run_id');
+            if (!runId) {
+              // Successful no-op weekly runs have no artifact; keep the last
+              // published forecast instead of falling back to opening week.
+              for await (const page of github.paginate.iterator(github.rest.actions.listArtifactsForRepo, {owner, repo, per_page: 100})) {
+                for (const artifact of page.data) {
+                  if (artifact.expired || !/^weekly-cfb-[0-9]+$/.test(artifact.name)) continue;
+                  const id = artifact.workflow_run.id;
+                  const {data: run} = await github.rest.actions.getWorkflowRun({owner, repo, run_id: id});
+                  if (run.conclusion === 'success' && run.head_branch === 'main' && run.path === '.github/workflows/weekly-update.yml') {
+                    runId = String(id);
+                    name = artifact.name;
+                    break;
+                  }
+                }
+                if (runId) break;
+              }
+            }
+            if (!/^[0-9]+$/.test(runId || '')) throw new Error('No successful weekly forecast artifact is available');
+            const {data: run} = await github.rest.actions.getWorkflowRun({owner, repo, run_id: Number(runId)});
+            if (run.conclusion !== 'success' || run.head_branch !== 'main') throw new Error('Forecast must be a successful main run');
+            const weekly = run.path === '.github/workflows/weekly-update.yml';
+            if (!weekly && !['.github/workflows/opening-forecast.yml', '.github/workflows/kickoff-forecast.yml'].includes(run.path)) throw new Error('Run is not a forecast workflow');
+            name ||= weekly ? `weekly-cfb-${runId}` : `opening-forecast-${runId}`;
+            if (weekly && name !== `weekly-cfb-${runId}`) throw new Error('Weekly capture requires the forecast audit artifact');
+            if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error('Invalid forecast artifact name');
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {owner, repo, run_id: Number(runId), per_page: 100});
+            if (!artifacts.some(a => a.name === name && !a.expired)) throw new Error('Requested immutable artifact is missing or expired');
+            core.exportVariable('FORECAST_RUN_ID', runId);
+            core.exportVariable('FORECAST_ARTIFACT', name);
+            core.setOutput('weekly', String(weekly));
+            core.setOutput('path', weekly ? 'backend/data/processed/weekly/forecast_log' : 'backend/data');
+            core.info(`Pinned ${name} from successful run ${runId} (${run.head_sha})`);
 
       - name: Restore the frozen pregame forecast
         uses: actions/download-artifact@v7
         with:
           name: ${{ env.FORECAST_ARTIFACT }}
-          path: backend/data
+          path: ${{ steps.forecast.outputs.path }}
           repository: ${{ github.repository }}
           run-id: ${{ env.FORECAST_RUN_ID }}
           github-token: ${{ github.token }}
 
+      - name: Select the matching weekly forecast directory
+        if: steps.forecast.outputs.weekly == 'true'
+        run: |
+          poetry run python - <<'PYCODE'
+          import os
+          from pathlib import Path
+          root = Path('backend/data/processed/weekly/forecast_log')
+          candidates = sorted(root.glob(f'{int(os.environ["SEASON"])}_*'))
+          if not candidates:
+              raise ValueError('Pinned artifact has no forecast for the requested season')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'FORECAST_DIRECTORY={candidates[-1].resolve()}\n')
+          PYCODE
+
+      - name: Validate frozen forecast before any API calls
+        run: |
+          arguments=(--season "$SEASON" --forecast-only --max-forecast-age-hours 240 --max-source-age-hours 240)
+          if [[ -n "${FORECAST_DIRECTORY:-}" ]]; then
+            arguments+=(--forecast-directory "$FORECAST_DIRECTORY")
+          fi
+          poetry run python -m backend kickoff-check "${arguments[@]}"
+
+      - name: Restore reviewed market uncertainty runtime
+        run: |
+          poetry run python - <<'PYCODE'
+          import hashlib
+          import os
+          from urllib.request import urlopen
+          from backend.etl import store
+          from backend.serving.market import load_market_margin_sd
+          url = os.environ['MARKET_RUNTIME_URL']
+          expected = os.environ['MARKET_RUNTIME_SHA256']
+          if not url.startswith('https://') or len(expected) != 64:
+              raise ValueError('Market runtime requires HTTPS and a reviewed SHA256')
+          with urlopen(url, timeout=60) as response:
+              payload = response.read(10001)
+          if len(payload) > 10000 or hashlib.sha256(payload).hexdigest() != expected:
+              raise ValueError('Market runtime checksum or size is invalid')
+          path = store.PROCESSED_DIR / 'serving' / 'market_margin_sd.json'
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_bytes(payload)
+          print('Validated frozen market uncertainty:', load_market_margin_sd())
+          PYCODE
+
       - name: Verify required secrets
+        if: env.VALIDATE_ONLY != 'true'
         shell: bash
         run: |
           missing=()
@@ -111,23 +199,31 @@ jobs:
       # A fresh runner needs one provider snapshot for market coverage and
       # quota provenance before the fail-closed kickoff window is planned.
       - name: Bootstrap the live odds store
-        run: >-
-          poetry run python -m backend live-odds
-          --season "$SEASON" --polls 1 --min-quota 20
+        if: env.VALIDATE_ONLY != 'true'
+        run: |
+          arguments=(--season "$SEASON" --polls 1 --min-quota 20)
+          if [[ -n "${FORECAST_DIRECTORY:-}" ]]; then
+            arguments+=(--forecast-directory "$FORECAST_DIRECTORY")
+          fi
+          poetry run python -m backend live-odds "${arguments[@]}"
 
       - name: Capture the kickoff window
-        run: >-
-          poetry run python -m backend kickoff-run
-          --season "$SEASON" --max-wait-hours 4 --min-quota 20
-          --max-forecast-age-hours 240 --max-source-age-hours 240
-
-      - name: Prove the frozen market anchors
+        if: env.VALIDATE_ONLY != 'true'
         run: |
-          poetry run python -m backend serving-anchors \
-            --season "$SEASON" --source market --market-feed live-odds
-          poetry run python -m backend live-replay --season "$SEASON"
+          arguments=(--season "$SEASON" --max-wait-hours 3 --min-quota 20 --max-forecast-age-hours 240 --max-source-age-hours 240)
+          if [[ -n "${FORECAST_DIRECTORY:-}" ]]; then
+            arguments+=(--forecast-directory "$FORECAST_DIRECTORY")
+          fi
+          poetry run python -m backend kickoff-run "${arguments[@]}"
+
+      # kickoff-run already writes only after its closing-anchor validation.
+      # Do not rebuild anchors from unrelated unvalidated provider snapshots.
+      - name: Prove the frozen market anchors
+        if: env.VALIDATE_ONLY != 'true'
+        run: poetry run python -m backend live-replay --season "$SEASON"
 
       - name: Publish market serving anchors
+        if: env.VALIDATE_ONLY != 'true'
         env:
           MOMENTUMCFB_DB_WRITES: "1"
         run: poetry run python -m backend publish-anchors --season "$SEASON" --week 0

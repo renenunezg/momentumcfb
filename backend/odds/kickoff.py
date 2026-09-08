@@ -14,6 +14,10 @@ import pandas as pd
 from backend.etl import store
 from backend.model.ingame import SERVING_ANCHOR_COLUMNS
 from backend.odds.client import OddsAPIClient, OddsAPIError
+from backend.odds.forecast import (
+    check_weekly_capture_readiness,
+    load_weekly_capture_forecast,
+)
 from backend.odds.live import (
     CLOSING_MARKETS,
     LIVE_MARKETS,
@@ -95,16 +99,21 @@ def _artifact_frame(season: int, week: int, name: str) -> pd.DataFrame:
     return store.read_preseason_forecast_artifact(season, week, name)
 
 
-def check_preseason_readiness(
+def check_forecast_readiness(
     season: int,
     week: int,
     *,
     as_of=None,
+    forecast_directory: str | None = None,
     max_forecast_age_hours: float = 48.0,
     max_source_age_hours: float = 48.0,
 ) -> tuple[list[str], list[str], list[str]]:
     """Validate the final local forecast and its outcome-free anchors."""
     now = _utc(as_of)
+    if forecast_directory is not None:
+        return check_weekly_capture_readiness(
+            forecast_directory, season, as_of=now, max_age_hours=max_forecast_age_hours
+        )
     problems: list[str] = []
     warnings: list[str] = []
     details: list[str] = []
@@ -253,12 +262,15 @@ def resolve_kickoff_target(
     as_of=None,
     game_ids: list[int] | tuple[int, ...] | None = None,
     cluster_minutes: float = 15.0,
+    schedule: pd.DataFrame | None = None,
 ) -> KickoffTarget:
     """Resolve explicit games or the next stored market-covered kickoff cluster."""
     if cluster_minutes < 0:
         raise ValueError("--cluster-minutes must be nonnegative")
     now = _utc(as_of)
-    schedule = load_division_one_schedule(season).copy()
+    schedule = (
+        load_division_one_schedule(season) if schedule is None else schedule
+    ).copy()
     schedule["game_id"] = pd.to_numeric(schedule["game_id"], errors="coerce")
     schedule["kickoff"] = pd.to_datetime(
         schedule["start_date"], utc=True, errors="coerce"
@@ -550,6 +562,7 @@ def check_kickoff_readiness(
     post_minutes: float = 5.0,
     interval_seconds: float = 120.0,
     min_quota: int = 50,
+    forecast_directory: str | None = None,
     max_forecast_age_hours: float = 48.0,
     max_source_age_hours: float = 48.0,
     max_poll_age_minutes: float = 15.0,
@@ -558,13 +571,16 @@ def check_kickoff_readiness(
 ) -> KickoffReadiness:
     """Run the read-only authoritative gate for the next kickoff window."""
     now = _utc(as_of)
-    problems, warnings, details = check_preseason_readiness(
+    problems, warnings, details = check_forecast_readiness(
         season,
         week,
         as_of=now,
+        forecast_directory=forecast_directory,
         max_forecast_age_hours=max_forecast_age_hours,
         max_source_age_hours=max_source_age_hours,
     )
+    if forecast_directory and problems:
+        return KickoffReadiness(None, tuple(problems), tuple(warnings), tuple(details))
     try:
         OddsAPIClient().ensure_single_quota_region()
     except OddsAPIError as exc:
@@ -579,6 +595,13 @@ def check_kickoff_readiness(
             as_of=now,
             game_ids=game_ids,
             cluster_minutes=cluster_minutes,
+            schedule=(
+                load_weekly_capture_forecast(forecast_directory, season)[
+                    "schedule_coverage"
+                ]
+                if forecast_directory
+                else None
+            ),
         )
         plan = plan_kickoff_window(
             target,
@@ -839,6 +862,7 @@ def run_kickoff_window(
     min_quota: int = 50,
     max_failures: int = 3,
     max_wait_hours: float = 2.0,
+    forecast_directory: str | None = None,
     max_forecast_age_hours: float = 48.0,
     max_source_age_hours: float = 48.0,
     max_offer_staleness_seconds: float = 300.0,
@@ -853,10 +877,11 @@ def run_kickoff_window(
     except OddsAPIError as exc:
         raise ValueError(str(exc)) from exc
     current = _utc(now())
-    problems, warnings, details = check_preseason_readiness(
+    problems, warnings, details = check_forecast_readiness(
         season,
         week,
         as_of=current,
+        forecast_directory=forecast_directory,
         max_forecast_age_hours=max_forecast_age_hours,
         max_source_age_hours=max_source_age_hours,
     )
@@ -867,6 +892,12 @@ def run_kickoff_window(
     for detail in details:
         progress(f"OK: {detail}")
 
+    schedule = (
+        load_weekly_capture_forecast(forecast_directory, season)["schedule_coverage"]
+        if forecast_directory
+        else load_division_one_schedule(season)
+    )
+
     replay_problems, frames = verify_live_snapshots(season)
     if replay_problems:
         raise ValueError("; ".join(replay_problems))
@@ -876,6 +907,7 @@ def run_kickoff_window(
         as_of=current,
         game_ids=game_ids,
         cluster_minutes=cluster_minutes,
+        schedule=schedule,
     )
     plan = plan_kickoff_window(
         target,
@@ -923,7 +955,7 @@ def run_kickoff_window(
     )
     completed = run_live_polling(
         season,
-        load_division_one_schedule(season),
+        schedule,
         polls=active_plan.polls,
         interval_seconds=interval_seconds,
         lookback_hours=lookback_hours,
@@ -945,7 +977,11 @@ def run_kickoff_window(
     replay_problems, frames = verify_live_snapshots(season)
     if replay_problems:
         raise ValueError("; ".join(replay_problems))
-    built = build_live_market_anchors(season)
+    built = build_live_market_anchors(
+        season,
+        schedule=schedule if forecast_directory else None,
+    )
+    built = built[built["game_id"].isin(target.game_ids)].reset_index(drop=True)
     validation_problems, target_details = validate_completed_window(
         target,
         frames,
