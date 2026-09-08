@@ -874,10 +874,10 @@ def ensure_recommendation_schema():
             text(
                 "SELECT EXISTS (SELECT 1 FROM pg_constraint "
                 "WHERE conrelid = 'cfb.recommendations'::regclass "
-                "AND conname = 'recommendation_eligibility_v3')"
+                "AND conname = 'recommendation_eligibility_v4')"
             )
         ).scalar_one():
             raise ValueError(
-                "Apply sql/005_recommendation_markets_and_filters.sql "
+                "Apply sql/006_recommendation_market_total.sql "
                 "before refreshing CFB recommendations"
             )
