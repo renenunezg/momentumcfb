@@ -54,7 +54,6 @@ jobs:
       ODDS_API_BOOKMAKERS: ${{ secrets.ODDS_API_BOOKMAKERS }}
       ODDS_API_REGIONS: ${{ secrets.ODDS_API_REGIONS }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      CFBD_USAGE_FILE: ${{ runner.temp }}/cfbd-weekly-usage.json
       HEISMAN_MODEL_RUN_ID: ${{ inputs.heisman_model_run_id || vars.HEISMAN_MODEL_RUN_ID }}
       OPENING_FORECAST_RUN_ID: ${{ inputs.opening_forecast_run_id || vars.OPENING_FORECAST_RUN_ID }}
       PLAYER_RUNTIME_BUNDLE_URL: ${{ inputs.player_runtime_bundle_url || vars.PLAYER_RUNTIME_BUNDLE_URL }}
@@ -91,6 +90,7 @@ jobs:
             fi
           fi
           echo "SEASON=$season" >> "$GITHUB_ENV"
+          echo "CFBD_USAGE_FILE=$RUNNER_TEMP/cfbd-weekly-usage.json" >> "$GITHUB_ENV"
 
       - name: Restore player ingestion checkpoints and trained model
         id: player-cache
