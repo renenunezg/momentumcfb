@@ -9,7 +9,7 @@ import pandas as pd
 from backend.model.distributions import marginal_cdf
 from backend.odds.markets import _american_profit, priced_candidates
 
-POLICY_VERSION = "cfb-picks-v1"
+POLICY_VERSION = "cfb-picks-v2"
 MIN_PROBABILITY_EDGE = 0.045
 MAX_OFFER_AGE = pd.Timedelta(hours=1)
 MAX_FORECAST_AGE = pd.Timedelta(days=7)
@@ -159,7 +159,10 @@ def build_recommendations(projections, offers, *, decision_at=None):
             reason = "stale_forecast"
         elif any(
             pd.isna(getattr(projection, f"{side}_missing_input_count", None))
-            or getattr(projection, f"{side}_missing_input_count", 1) != 0
+            # Preseason and weekly counts always include unavailable injury
+            # data. Preserve that flag without making every game a No Play.
+            # Any additional missing model input still blocks a pick.
+            or not 0 <= getattr(projection, f"{side}_missing_input_count", -1) <= 1
             for side in ("home", "away")
         ):
             reason = "missing_model_inputs"

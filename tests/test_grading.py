@@ -211,6 +211,11 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         ]
     ).reindex(columns=OFFER_COLUMNS)
     projections.loc[projections.game_id.eq(4), "model_total"] = 36.0
+    # Production includes the universal unavailable-injury flag on both teams.
+    projections.loc[
+        projections.game_id.eq(5),
+        ["home_missing_input_count", "away_missing_input_count"],
+    ] = 1
     # Gates apply per offer. Neither stale nor incomplete evidence earns a pick.
     projections.loc[projections.game_id.eq(6), "home_missing_input_count"] = 2
     offers.loc[offers.game_id.eq(7), "provider_last_update"] = now - pd.Timedelta(
