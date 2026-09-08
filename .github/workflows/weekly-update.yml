@@ -33,6 +33,19 @@ on:
         description: Reviewed SHA256 of the initial player runtime ZIP
         required: false
         type: string
+      opening_forecast_bundle_url:
+        description: HTTPS URL of the reviewed preseason runtime ZIP
+        required: false
+        type: string
+      opening_forecast_bundle_sha256:
+        description: Reviewed SHA256 of the preseason runtime ZIP
+        required: false
+        type: string
+      max_calls:
+        description: Shared CFBD call budget for this run (approval required above 100)
+        required: false
+        default: "100"
+        type: string
 
 permissions:
   contents: read
@@ -58,6 +71,10 @@ jobs:
       OPENING_FORECAST_RUN_ID: ${{ inputs.opening_forecast_run_id || vars.OPENING_FORECAST_RUN_ID }}
       PLAYER_RUNTIME_BUNDLE_URL: ${{ inputs.player_runtime_bundle_url || vars.PLAYER_RUNTIME_BUNDLE_URL }}
       PLAYER_RUNTIME_BUNDLE_SHA256: ${{ inputs.player_runtime_bundle_sha256 || vars.PLAYER_RUNTIME_BUNDLE_SHA256 }}
+
+      OPENING_FORECAST_BUNDLE_URL: ${{ inputs.opening_forecast_bundle_url || vars.OPENING_FORECAST_BUNDLE_URL }}
+      OPENING_FORECAST_BUNDLE_SHA256: ${{ inputs.opening_forecast_bundle_sha256 || vars.OPENING_FORECAST_BUNDLE_SHA256 }}
+      CFBD_MAX_CALLS: ${{ inputs.max_calls || '100' }}
 
     steps:
       - name: Check out repository
@@ -123,6 +140,46 @@ jobs:
           github-token: ${{ github.token }}
           path: backend/data/
 
+      - name: Restore pinned Heisman model artifact
+        if: env.HEISMAN_MODEL_RUN_ID != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: heisman-model-${{ env.SEASON }}
+          run-id: ${{ env.HEISMAN_MODEL_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: backend/data/processed/
+
+      - name: Bootstrap reviewed runtime bundles
+        if: env.PLAYER_RUNTIME_BUNDLE_URL != '' || env.OPENING_FORECAST_BUNDLE_URL != ''
+        run: |
+          poetry run python - <<'PY'
+          import hashlib
+          import os
+          from urllib.request import urlopen
+          from backend.players.artifacts import install_runtime_bundle
+          from backend.model.preseason import install_preseason_runtime_bundle
+          for prefix, install in (
+              ('OPENING_FORECAST', install_preseason_runtime_bundle),
+              ('PLAYER_RUNTIME', install_runtime_bundle),
+          ):
+              url = os.environ[f'{prefix}_BUNDLE_URL']
+              if not url:
+                  continue
+              expected = os.environ[f'{prefix}_BUNDLE_SHA256']
+              if not url.startswith('https://') or len(expected) != 64:
+                  raise ValueError('Runtime bootstrap requires HTTPS and a reviewed SHA256')
+              with urlopen(url, timeout=60) as response:
+                  bundle = response.read(10_000_001)
+              if len(bundle) > 10_000_000 or hashlib.sha256(bundle).hexdigest() != expected:
+                  raise ValueError('Runtime bundle checksum or size is invalid')
+              install(bundle, int(os.environ['SEASON']))
+          PY
+
+      - name: Validate trained Heisman model before CFBD calls
+        run: |
+          poetry run python -c 'import os; from backend.players.artifacts import load_heisman_model; load_heisman_model(int(os.environ["SEASON"]))'
+          poetry run python -c 'from backend.etl import store; from backend.model.ingame import load_baseline_params; load_baseline_params(store.read_processed("ingame", "baseline_summary.parquet"))'
+
       - name: Validate frozen preseason state before CFBD calls
         run: |
           poetry run python -c 'import os; from backend.etl import store; from backend.model.preseason import load_score_noise_prior, scoring_priors_from_ratings; season = int(os.environ["SEASON"]); scoring_priors_from_ratings(store.read_preseason_forecast_artifact(season, 1, "ratings"), load_score_noise_prior(season))'
@@ -145,7 +202,7 @@ jobs:
         run: poetry run pytest tests/test_joint_scoring.py -q
 
       - name: Refresh season data from CFBD
-        run: poetry run python -m backend ingest --seasons "$SEASON"
+        run: poetry run python -m backend ingest --seasons "$SEASON" --max-calls "$CFBD_MAX_CALLS"
 
       - name: Rebuild features
         run: poetry run python -m backend features --seasons "$SEASON"
@@ -175,39 +232,6 @@ jobs:
       # A model artifact contains coefficients, version/seed provenance and
       # chronological weekly evaluation. Historical raw data is never fetched
       # or used to retrain implicitly on a fresh production runner.
-      - name: Restore pinned Heisman model artifact
-        if: env.HEISMAN_MODEL_RUN_ID != ''
-        uses: actions/download-artifact@v7
-        with:
-          name: heisman-model-${{ env.SEASON }}
-          run-id: ${{ env.HEISMAN_MODEL_RUN_ID }}
-          github-token: ${{ github.token }}
-          path: backend/data/processed/
-
-      - name: Bootstrap reviewed player runtime bundle
-        if: env.PLAYER_RUNTIME_BUNDLE_URL != ''
-        run: |
-          poetry run python - <<'PY'
-          import hashlib
-          import os
-          from urllib.request import urlopen
-          from backend.players.artifacts import install_runtime_bundle
-          url = os.environ['PLAYER_RUNTIME_BUNDLE_URL']
-          expected = os.environ['PLAYER_RUNTIME_BUNDLE_SHA256']
-          if not url.startswith('https://') or len(expected) != 64:
-              raise ValueError('Player runtime bootstrap requires HTTPS and a reviewed SHA256')
-          with urlopen(url, timeout=60) as response:
-              bundle = response.read(10_000_001)
-          if len(bundle) > 10_000_000 or hashlib.sha256(bundle).hexdigest() != expected:
-              raise ValueError('Player runtime bundle checksum or size is invalid')
-          install_runtime_bundle(bundle, int(os.environ['SEASON']))
-          PY
-
-      - name: Validate trained Heisman model before player API calls
-        run: |
-          poetry run python -c 'import os; from backend.players.artifacts import load_heisman_model; load_heisman_model(int(os.environ["SEASON"]))'
-          poetry run python -c 'from backend.etl import store; from backend.model.ingame import load_baseline_params; load_baseline_params(store.read_processed("ingame", "baseline_summary.parquet"))'
-
       - name: Preserve validated player runtime artifact
         uses: actions/upload-artifact@v7
         with:
@@ -225,7 +249,7 @@ jobs:
         env:
           MOMENTUMCFB_DB_WRITES: "1"
         run: |
-          poetry run python -m backend ingest-players --seasons "$SEASON"
+          poetry run python -m backend ingest-players --seasons "$SEASON" --max-calls "$CFBD_MAX_CALLS"
           poetry run python -m backend player-values --seasons "$SEASON"
           poetry run python -m backend heisman --season "$SEASON"
           poetry run python -m backend publish-players --season "$SEASON"

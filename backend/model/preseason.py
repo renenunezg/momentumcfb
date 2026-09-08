@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
+from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
@@ -195,6 +197,34 @@ def load_score_noise_prior(season: int) -> pd.DataFrame:
     ):
         raise ValueError("score noise prior must describe the previous season")
     return frame
+
+
+def install_preseason_runtime_bundle(bundle: bytes, season: int) -> None:
+    """Restore the reviewed preseason state without rebuilding a frozen forecast."""
+    names = [
+        f"preseason/{kind}/{season}_01.parquet"
+        for kind in ("ratings", "score_noise_prior")
+    ]
+    with ZipFile(BytesIO(bundle)) as archive:
+        if sorted(archive.namelist()) != sorted(names):
+            raise ValueError("preseason runtime bundle contains unexpected files")
+        if any(item.file_size > 10_000_000 for item in archive.infolist()):
+            raise ValueError("preseason runtime bundle exceeds the data size limit")
+        payloads = [archive.read(name) for name in names]
+    ratings, noise = [pd.read_parquet(BytesIO(data)) for data in payloads]
+    priors = scoring_priors_from_ratings(ratings, noise)
+    if (
+        not ratings["season"].eq(season).all()
+        or not ratings["model_version"].str.startswith("preseason_").all()
+        or priors.score_noise_season != season - 1
+    ):
+        raise ValueError("preseason runtime bundle has incompatible season or model")
+    for name, data in zip(names, payloads, strict=True):
+        path = store.PROCESSED_DIR / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_bytes(data)
+        temporary.replace(path)
 
 
 def load_preseason_ratings(season: int, week: int = 1) -> tuple[pd.DataFrame, str]:
