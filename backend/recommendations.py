@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from backend.model.distributions import marginal_cdf
+from backend.model.market_blend import DEFAULT_MARKET_WEIGHT
 from backend.odds.markets import _american_profit, priced_candidates
 
 POLICY_VERSION = "cfb-picks-v4"
@@ -48,6 +49,7 @@ RECOMMENDATION_COLUMNS = [
     "stake_units",
     "model_home_margin",
     "model_total",
+    "market_total",
     "margin_sd",
     "total_sd",
     "degrees_of_freedom",
@@ -72,7 +74,9 @@ def _probabilities(projection, offer):
     """Round the frozen continuous marginal to integer scores, retaining pushes.
 
     Sides use the market-informed margin (pure model shrunk toward the
-    pre-decision consensus spread); totals have no market blend and stay pure.
+    pre-decision consensus spread). Totals use the model total shrunk toward
+    the median posted total across the decision-time offers, supplied on the
+    projection.
     Half-point lines keep the original CDF. Integer lines reserve the mass
     between the adjacent half points for a returned stake.
     """
@@ -148,11 +152,23 @@ def _offer_reason(offer, paired, now, start):
     return None
 
 
+def _consensus_total(game_offers):
+    """Median posted total across a game's offers, or NaN without one."""
+    if game_offers.empty or "market" not in game_offers:
+        return float("nan")
+    points = pd.to_numeric(
+        game_offers.loc[game_offers["market"].eq("totals"), "point"], errors="coerce"
+    ).dropna()
+    return float(points.median()) if len(points) else float("nan")
+
+
 def build_recommendations(projections, offers, *, decision_at=None):
     """One best eligible side per game and market, or an explicit No Play.
 
-    Sides use the market-informed margin so an edge is measured after shrinking
-    toward the market being bet into; totals stay pure. Historical calibration
+    Sides use the market-informed margin and totals the model total blended
+    toward the median posted total, so every edge is measured after shrinking
+    toward the market being bet into. Each pick records that market total.
+    Historical calibration
     is diagnostic and never gates forward recommendations or replaces their
     probabilities. The 4.5 percentage-point gate is a versioned starting
     policy, not a fit to live-season outcomes. Stakes are always one unit,
@@ -184,6 +200,13 @@ def build_recommendations(projections, offers, *, decision_at=None):
             subset=["price"]
         )
         candidates = priced_candidates(projection, game_offers)
+        market_total = _consensus_total(game_offers)
+        priced_projection = projection
+        if np.isfinite(market_total) and np.isfinite(projection.model_total):
+            priced_projection = projection._replace(
+                model_total=(1.0 - DEFAULT_MARKET_WEIGHT) * projection.model_total
+                + DEFAULT_MARKET_WEIGHT * market_total
+            )
         for market in MARKETS:
             row = {
                 key: getattr(projection, key, None)
@@ -212,6 +235,8 @@ def build_recommendations(projections, offers, *, decision_at=None):
                 reason=reason,
                 stake_units=0.0,
                 model_home_margin=projection.market_informed_home_margin,
+                model_total=priced_projection.model_total,
+                market_total=market_total if np.isfinite(market_total) else None,
             )
             priced = [c for c in candidates if c["market"] == market]
             evaluated = []
@@ -220,7 +245,7 @@ def build_recommendations(projections, offers, *, decision_at=None):
                     candidate["point"] * 2
                 ):
                     continue
-                win, push, loss = _probabilities(projection, candidate)
+                win, push, loss = _probabilities(priced_projection, candidate)
                 profit = _american_profit(candidate["price"])
                 edge = win / (win + loss) - 1 / (profit + 1)
                 ev = win * profit - loss
