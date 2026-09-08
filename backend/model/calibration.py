@@ -5,8 +5,9 @@ from itertools import product
 import numpy as np
 import pandas as pd
 from scipy.special import gammaln
-from scipy.stats import f, t
+from scipy.stats import f
 
+from backend.model.distributions import marginal_interval_half_width, marginal_scale
 from backend.model.joint_scoring import JointScoringConfig, fit_joint_scoring
 
 DEVELOPMENT_SEASONS = (2019, 2020, 2021, 2022)
@@ -129,9 +130,7 @@ def _config_id(config: JointScoringConfig) -> str:
 def _student_t_nll(
     error: np.ndarray, standard_deviation: np.ndarray, degrees_of_freedom: np.ndarray
 ) -> np.ndarray:
-    scale = standard_deviation * np.sqrt(
-        (degrees_of_freedom - 2.0) / degrees_of_freedom
-    )
+    scale = marginal_scale(standard_deviation, degrees_of_freedom)
     return (
         np.log(scale)
         + 0.5 * np.log(degrees_of_freedom * np.pi)
@@ -350,10 +349,7 @@ def _interval_coverage(
     degrees_of_freedom: np.ndarray,
     level: float,
 ) -> float:
-    scale = standard_deviation * np.sqrt(
-        (degrees_of_freedom - 2.0) / degrees_of_freedom
-    )
-    width = t.ppf((1.0 + level) / 2.0, degrees_of_freedom) * scale
+    width = marginal_interval_half_width(level, standard_deviation, degrees_of_freedom)
     return float(np.mean(np.abs(error) <= width))
 
 

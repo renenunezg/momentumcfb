@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from backend import cli
 from backend.etl import ingest, store
@@ -10,6 +11,9 @@ from backend.odds.client import OddsAPIError
 class FakeCFBDClient:
     def __init__(self):
         self.calls = []
+
+    def ensure_budget(self, calls):
+        assert calls <= 100
 
     def get(self, path, params):
         self.calls.append((path, params))
@@ -140,3 +144,226 @@ def test_weekly_update_publishes_pure_model_when_odds_quota_is_exhausted(
     assert calls[0]["odds_client"] is not None
     assert calls[1]["odds_client"] is None
     assert "publishing the pure-model forecast" in capsys.readouterr().out
+
+
+def test_cfbd_quota_gate_counts_retries_and_persists_across_commands(
+    tmp_path, monkeypatch
+):
+    from backend.cfbd import client as cfbd
+
+    requests = []
+
+    def response(status, remaining):
+        return SimpleNamespace(
+            status_code=status,
+            headers={"X-CallLimit-Remaining": str(remaining)},
+            text="unavailable",
+            json=lambda: [],
+        )
+
+    responses = iter([response(503, 99), response(200, 98)])
+
+    def get(*args, **kwargs):
+        requests.append(args)
+        return next(responses)
+
+    monkeypatch.setattr(cfbd.time, "sleep", lambda _: None)
+    usage = tmp_path / "usage.json"
+    client = cfbd.CFBDClient("test", max_calls=3, usage_file=usage)
+    monkeypatch.setattr(client.session, "get", get)
+    with pytest.raises(cfbd.CFBDError, match="session budget"):
+        client.ensure_budget(4)
+    assert requests == []
+    client.ensure_budget(2)
+    client.get("/teams", {})
+    assert len(requests) == client.calls_used == 2
+
+    resumed = cfbd.CFBDClient("test", max_calls=3, usage_file=usage)
+    with pytest.raises(cfbd.CFBDError, match="session budget"):
+        resumed.ensure_budget(2)
+    assert resumed.remaining == 98
+
+    for headers, error in [
+        ({"X-CallLimit-Remaining": "41"}, "preserving a 40-call reserve"),
+        ({}, "omitted X-CallLimit-Remaining"),
+    ]:
+        constrained = cfbd.CFBDClient("test")
+        monkeypatch.setattr(
+            constrained.session,
+            "get",
+            lambda *a, **k: SimpleNamespace(
+                status_code=200,
+                headers=headers,
+                json=lambda: [],
+            ),
+        )
+        constrained.ensure_budget(3)
+        constrained.get("/teams", {})
+        with pytest.raises(cfbd.CFBDError, match=error):
+            constrained.get("/roster", {})
+        assert constrained.calls_used == 1
+
+
+def test_player_ingestion_resumes_completed_week_chunks_without_future_calls(
+    tmp_path, monkeypatch
+):
+    from backend.players import ingest as players
+
+    monkeypatch.setattr(players, "RAW_DIR", tmp_path)
+    games = pd.DataFrame(
+        [
+            {
+                "id": 1,
+                "week": 1,
+                "season_type": "regular",
+                "completed": True,
+                "home_team": "A",
+                "away_team": "B",
+            },
+            {
+                "id": 2,
+                "week": 2,
+                "season_type": "regular",
+                "completed": False,
+                "home_team": "A",
+                "away_team": "C",
+            },
+            {
+                "id": 3,
+                "week": 1,
+                "season_type": "postseason",
+                "completed": False,
+                "home_team": "A",
+                "away_team": "C",
+            },
+        ]
+    )
+    ingest.write_parquet(games, tmp_path / "games" / "2026.parquet")
+    teams = pd.DataFrame(
+        [
+            {"school": "A", "classification": "fbs", "conference": "Alpha"},
+            {"school": "B", "classification": "fbs", "conference": "Beta"},
+            {"school": "C", "classification": "fbs", "conference": "Future"},
+        ]
+    )
+    ingest.write_parquet(teams, players.players_dir(2026) / "teams.parquet")
+    calls = []
+    estimates = []
+    fail_beta = True
+
+    class PlayerClient:
+        def ensure_budget(self, estimated):
+            estimates.append(estimated)
+
+        def get(self, endpoint, params, **kwargs):
+            nonlocal fail_beta
+            calls.append((endpoint, params))
+            if endpoint == "/roster":
+                return [{"id": "athlete", "team": "A"}]
+            if endpoint == "/rankings":
+                return []
+            if endpoint == "/conferences":
+                return [
+                    {"name": name, "abbreviation": name}
+                    for name in ["Alpha", "Beta", "Future"]
+                ]
+            assert params["week"] == 1 and params["seasonType"] == "regular"
+            if endpoint == "/games/players":
+                return [
+                    {
+                        "id": 1,
+                        "teams": [
+                            {
+                                "team": "A",
+                                "categories": [
+                                    {
+                                        "name": "passing",
+                                        "types": [
+                                            {
+                                                "name": "YDS",
+                                                "athletes": [
+                                                    {
+                                                        "id": "athlete",
+                                                        "name": "Quarterback",
+                                                        "stat": "200",
+                                                    }
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            assert endpoint == "/plays/stats"
+            if params["conference"] == "Beta" and fail_beta:
+                fail_beta = False
+                raise RuntimeError("interrupted")
+            return [
+                {
+                    "gameId": 1,
+                    "playId": 10,
+                    "athleteId": "athlete",
+                    "statType": "passing",
+                    "stat": 20,
+                }
+            ]
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        players.ingest_player_sources(PlayerClient(), 2026)
+    before_resume = len(calls)
+    manifest = players.ingest_player_sources(PlayerClient(), 2026)
+    resumed_calls = calls[before_resume:]
+    assert [
+        params["conference"]
+        for endpoint, params in resumed_calls
+        if endpoint == "/plays/stats"
+    ] == ["Beta"]
+    assert not any(endpoint == "/games/players" for endpoint, _ in resumed_calls)
+    assert estimates == [6, 1]
+    assert set(manifest["source"]) >= {"box_regular_01", "play_stats_regular_01"}
+    stats = pd.read_parquet(players.weekly_path(2026, "play_stats", "regular", 1))
+    assert stats["game_id"].tolist() == [1]
+
+    calls.clear()
+    players.ingest_player_sources(PlayerClient(), 2026)
+    assert calls == []
+    # A pre-checkpoint cache is adopted from its game ids without refetching.
+    (players.players_dir(2026) / "completed_games.json").unlink()
+    players.ingest_player_sources(PlayerClient(), 2026)
+    assert calls == []
+
+    # A late completed game must not be marked covered when the provider
+    # returns a nonempty but partial box or uncapped conference response.
+    extra = games.iloc[[0]].assign(id=4)
+    ingest.write_parquet(pd.concat([games, extra]), tmp_path / "games" / "2026.parquet")
+    with pytest.raises(ValueError, match="Incomplete box snapshot"):
+        players.ingest_player_sources(PlayerClient(), 2026)
+    existing_box = pd.read_parquet(players.weekly_path(2026, "box", "regular", 1))
+    assert existing_box["game_id"].tolist() == [1]
+
+    original_get = PlayerClient.get
+
+    def complete_box(self, endpoint, params, **kwargs):
+        rows = original_get(self, endpoint, params, **kwargs)
+        if endpoint == "/games/players":
+            rows.append({**rows[0], "id": 4})
+        return rows
+
+    monkeypatch.setattr(PlayerClient, "get", complete_box)
+    with pytest.raises(ValueError, match="Incomplete play stats"):
+        players.ingest_player_sources(PlayerClient(), 2026)
+    updated_games = pd.concat([games, extra]).query("completed and week == 1")
+    incomplete_parts = players._parts_directory(2026, "regular", 1, updated_games)
+    assert not list(incomplete_parts.glob("*.parquet"))
+
+    # Explicit correction refresh still refetches the requested completed week.
+    ingest.write_parquet(games, tmp_path / "games" / "2026.parquet")
+    monkeypatch.setattr(PlayerClient, "get", original_get)
+    calls.clear()
+    players.ingest_player_sources(PlayerClient(), 2026, only_week=1, refresh=True)
+    assert any(endpoint == "/games/players" for endpoint, _ in calls)
+    assert [
+        params["conference"] for endpoint, params in calls if endpoint == "/plays/stats"
+    ] == ["Alpha", "Beta"]

@@ -1,7 +1,11 @@
+from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
+from pandas.testing import assert_frame_equal
 
 from backend.features.scoring import (
     build_scoring_games,
@@ -9,6 +13,14 @@ from backend.features.scoring import (
 )
 from backend.model.calibration import fbs_calibration_cohort
 from backend.model.joint_scoring import fit_joint_scoring
+from backend.model.preseason import (
+    score_noise_prior_from_fit,
+    scoring_priors_from_ratings,
+)
+from backend.model.production_evaluation import (
+    PregameSnapshot,
+    replay_production_season,
+)
 from backend.model.weekly import (
     WeeklyForecastNotReady,
     resolve_forecast_week,
@@ -58,7 +70,7 @@ def _mini_season() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_joint_model_is_leak_free_and_reconciles_outputs():
+def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
     games = _mini_season()
     as_of = datetime(2026, 9, 15, tzinfo=timezone.utc)
     fitted = fit_joint_scoring(games, forecast_week=3, as_of=as_of)
@@ -135,6 +147,152 @@ def test_joint_model_is_leak_free_and_reconciles_outputs():
     assert min(expected_scores) == 0.0
     assert all(score >= 0.0 for score in expected_scores)
 
+    # Teams awaiting their opener retain distinct preseason pace and uncertainty.
+    opener = games.iloc[[-1]].copy()
+    opener["game_id"] = 999
+    opener[["home_team_id", "away_team_id"]] = [5, 6]
+    opener[["home_team", "away_team"]] = ["E", "F"]
+    preseason = pd.DataFrame(
+        {
+            "team_id": [1, 2, 3, 4, 5, 6],
+            "offense_points": [0.0] * 6,
+            "defense_points": [0.0] * 6,
+            "expected_possessions": [12.0, 12.0, 12.0, 12.0, 10.0, 14.0],
+            "power_rating_sd": [6.0, 6.0, 6.0, 6.0, 3.0, 9.0],
+        }
+    )
+    with_opener = pd.concat([games, opener], ignore_index=True)
+    full_prior_fit = fit_joint_scoring(
+        with_opener,
+        forecast_week=3,
+        as_of=as_of,
+        priors=scoring_priors_from_ratings(preseason),
+    )
+    full_ratings = {rating.team_id: rating for rating in full_prior_fit.ratings()}
+    assert full_ratings[5].expected_possessions == pytest.approx(10.0)
+    assert full_ratings[6].expected_possessions == pytest.approx(14.0)
+    assert full_ratings[5].power_rating_sd < full_ratings[6].power_rating_sd
+    wider = preseason.copy()
+    wider.loc[wider["team_id"].eq(5), "power_rating_sd"] = 9.0
+    wider_fit = fit_joint_scoring(
+        with_opener,
+        forecast_week=3,
+        as_of=as_of,
+        priors=scoring_priors_from_ratings(wider),
+    )
+    assert (
+        wider_fit.project(opener)[0].margin_sd
+        > full_prior_fit.project(opener)[0].margin_sd
+    )
+
+    # A small opening slate must not discard the previous season's noise state.
+    noise = score_noise_prior_from_fit(
+        replace(
+            fitted,
+            season=2025,
+            as_of=datetime(2026, 1, 20, tzinfo=timezone.utc),
+            training_games=1000,
+            score_residual_covariance=np.eye(2) * 100,
+        )
+    )
+    noise_path = tmp_path / "score_noise_prior.parquet"
+    noise.to_parquet(noise_path, index=False)
+    noise = pd.read_parquet(noise_path)
+    carried = scoring_priors_from_ratings(preseason, noise)
+    carried_fit = fit_joint_scoring(with_opener, 3, as_of, priors=carried)
+    before = full_prior_fit.project(opener)[0]
+    after = carried_fit.project(opener)[0]
+    assert after.home_margin == before.home_margin
+    assert after.model_total == before.model_total
+    assert after.margin_sd > before.margin_sd
+    np.testing.assert_allclose(
+        carried_fit.score_residual_covariance,
+        (
+            1000 * np.eye(2) * 100
+            + full_prior_fit.training_games * full_prior_fit.score_residual_covariance
+        )
+        / (1000 + full_prior_fit.training_games),
+    )
+    with pytest.raises(ValueError, match="previous season"):
+        fit_joint_scoring(
+            with_opener,
+            3,
+            as_of,
+            priors=replace(carried, score_noise_season=2026),
+        )
+    with pytest.raises(ValueError, match="forecast cutoff"):
+        fit_joint_scoring(
+            with_opener,
+            3,
+            as_of,
+            priors=replace(carried, score_noise_as_of=as_of),
+        )
+    one_game = with_opener.copy()
+    one_game["completed"] = False
+    one_game.loc[one_game.index[0], "completed"] = True
+    one_game_fit = fit_joint_scoring(one_game, 3, as_of, priors=carried)
+    assert np.isfinite(one_game_fit.project(opener)[0].margin_sd)
+    np.testing.assert_allclose(one_game_fit.score_residual_covariance, np.eye(2) * 100)
+
+    replay_games = games.copy()
+    replay_games["completed"] = True
+    replay_games["season_type"] = "regular"
+    replay_games["start_date"] = pd.to_datetime(
+        [f"2026-09-{week * 7:02d}T18:00:00Z" for week in games["week"]], utc=True
+    )
+    prior_ratings = preseason[preseason["team_id"].le(4)].copy()
+    prior_ratings["model_version"] = "preseason_test"
+    snapshot = PregameSnapshot(
+        ratings=prior_ratings,
+        projections=pd.DataFrame(
+            p.to_record() for p in fitted.project(replay_games[games["week"].eq(1)])
+        ),
+        as_of=pd.Timestamp("2026-09-01T00:00:00Z"),
+        path=Path("synthetic-pregame-snapshot"),
+        digest="synthetic-test-digest",
+        score_noise_prior=noise,
+    )
+    replay = replay_production_season(2026, games=replay_games, snapshots=[snapshot])
+    prediction_columns = [
+        "game_id",
+        "expected_home_points",
+        "expected_away_points",
+        "home_margin",
+        "model_total",
+        "margin_sd",
+        "total_sd",
+    ]
+    for week in (2, 3):
+        weekly_target = replay_games[replay_games["week"].eq(week)]
+        cutoff = weekly_target["start_date"].min() - pd.Timedelta(microseconds=1)
+        direct = fit_joint_scoring(
+            replay_games,
+            week,
+            cutoff.to_pydatetime(),
+            priors=scoring_priors_from_ratings(prior_ratings, noise),
+        )
+        expected = pd.DataFrame(p.to_record() for p in direct.project(weekly_target))
+        actual = replay[replay["model_week"].eq(week)]
+        assert_frame_equal(
+            actual[prediction_columns].reset_index(drop=True),
+            expected[prediction_columns].reset_index(drop=True),
+        )
+    changed_results = replay_games.copy()
+    changed_results.loc[changed_results["week"].eq(3), "home_points"] = 100
+    changed_replay = replay_production_season(
+        2026, games=changed_results, snapshots=[snapshot]
+    )
+    assert_frame_equal(
+        replay.loc[replay["model_week"].eq(3), prediction_columns],
+        changed_replay.loc[changed_replay["model_week"].eq(3), prediction_columns],
+    )
+    with pytest.raises(ValueError, match="no preseason snapshot before cutoff"):
+        replay_production_season(
+            2026,
+            games=replay_games,
+            snapshots=[replace(snapshot, as_of=replay_games["start_date"].min())],
+        )
+
 
 def test_weekly_frame_retains_future_games_without_training_on_them():
     games = _mini_season()
@@ -162,6 +320,7 @@ def test_weekly_frame_retains_future_games_without_training_on_them():
                     "game_id": game.game_id,
                     "team": team,
                     "offense_possessions": game.game_possessions,
+                    "offense_competitive_possessions": game.game_possessions,
                     "offense_epa_total": epa * game.game_possessions,
                     "game_possessions": game.game_possessions,
                 }

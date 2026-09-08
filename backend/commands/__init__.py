@@ -26,6 +26,7 @@ from backend.commands.pipeline import (
 )
 from backend.commands.players import (
     handle_heisman,
+    handle_heisman_train,
     handle_ingest_players,
     handle_player_values,
     handle_publish_players,
@@ -70,6 +71,7 @@ HANDLERS: dict[str, Handler] = {
     "ingest-players": handle_ingest_players,
     "player-values": handle_player_values,
     "heisman": handle_heisman,
+    "heisman-train": handle_heisman_train,
     "publish-players": handle_publish_players,
 }
 

@@ -17,9 +17,26 @@ on:
         description: Optional model week override
         required: false
         type: string
+      heisman_model_run_id:
+        description: Run containing the versioned heisman-model-SEASON artifact (initial bootstrap)
+        required: false
+        type: string
+      opening_forecast_run_id:
+        description: Run containing the immutable opening-forecast-RUN_ID artifact
+        required: false
+        type: string
+      player_runtime_bundle_url:
+        description: HTTPS URL of an exported player runtime ZIP for initial bootstrap
+        required: false
+        type: string
+      player_runtime_bundle_sha256:
+        description: Reviewed SHA256 of the initial player runtime ZIP
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: weekly-cfb-update
@@ -37,6 +54,11 @@ jobs:
       ODDS_API_BOOKMAKERS: ${{ secrets.ODDS_API_BOOKMAKERS }}
       ODDS_API_REGIONS: ${{ secrets.ODDS_API_REGIONS }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      CFBD_USAGE_FILE: ${{ runner.temp }}/cfbd-weekly-usage.json
+      HEISMAN_MODEL_RUN_ID: ${{ inputs.heisman_model_run_id || vars.HEISMAN_MODEL_RUN_ID }}
+      OPENING_FORECAST_RUN_ID: ${{ inputs.opening_forecast_run_id || vars.OPENING_FORECAST_RUN_ID }}
+      PLAYER_RUNTIME_BUNDLE_URL: ${{ inputs.player_runtime_bundle_url || vars.PLAYER_RUNTIME_BUNDLE_URL }}
+      PLAYER_RUNTIME_BUNDLE_SHA256: ${{ inputs.player_runtime_bundle_sha256 || vars.PLAYER_RUNTIME_BUNDLE_SHA256 }}
 
     steps:
       - name: Check out repository
@@ -69,6 +91,41 @@ jobs:
             fi
           fi
           echo "SEASON=$season" >> "$GITHUB_ENV"
+
+      - name: Restore player ingestion checkpoints and trained model
+        id: player-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            backend/data/raw/players/${{ env.SEASON }}/
+            backend/data/processed/players/models/
+            backend/data/processed/ingame/baseline_summary.parquet
+          key: cfb-players-v2-${{ env.SEASON }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: cfb-players-v2-${{ env.SEASON }}-
+
+      - name: Restore frozen preseason forecast
+        id: preseason-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            backend/data/processed/preseason/ratings/
+            backend/data/processed/preseason/score_noise_prior/
+            backend/data/processed/preseason/forecast_log/
+          key: cfb-preseason-v1-${{ env.SEASON }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: cfb-preseason-v1-${{ env.SEASON }}-
+
+      - name: Restore pinned opening forecast artifact
+        if: env.OPENING_FORECAST_RUN_ID != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: opening-forecast-${{ env.OPENING_FORECAST_RUN_ID }}
+          run-id: ${{ env.OPENING_FORECAST_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: backend/data/
+
+      - name: Validate frozen preseason state before CFBD calls
+        run: |
+          poetry run python -c 'import os; from backend.etl import store; from backend.model.preseason import load_score_noise_prior, scoring_priors_from_ratings; season = int(os.environ["SEASON"]); scoring_priors_from_ratings(store.read_preseason_forecast_artifact(season, 1, "ratings"), load_score_noise_prior(season))'
 
       - name: Verify required secrets
         shell: bash
@@ -115,8 +172,54 @@ jobs:
           poetry run python -m backend grade --season "$SEASON"
           poetry run python -m backend publish-grading --season "$SEASON"
 
-      # Player value and the Heisman board read the same completed games.
-      # The play-stat pull is per game and resumes past weeks already stored.
+      # A model artifact contains coefficients, version/seed provenance and
+      # chronological weekly evaluation. Historical raw data is never fetched
+      # or used to retrain implicitly on a fresh production runner.
+      - name: Restore pinned Heisman model artifact
+        if: env.HEISMAN_MODEL_RUN_ID != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: heisman-model-${{ env.SEASON }}
+          run-id: ${{ env.HEISMAN_MODEL_RUN_ID }}
+          github-token: ${{ github.token }}
+          path: backend/data/processed/
+
+      - name: Bootstrap reviewed player runtime bundle
+        if: env.PLAYER_RUNTIME_BUNDLE_URL != ''
+        run: |
+          poetry run python - <<'PY'
+          import hashlib
+          import os
+          from urllib.request import urlopen
+          from backend.players.artifacts import install_runtime_bundle
+          url = os.environ['PLAYER_RUNTIME_BUNDLE_URL']
+          expected = os.environ['PLAYER_RUNTIME_BUNDLE_SHA256']
+          if not url.startswith('https://') or len(expected) != 64:
+              raise ValueError('Player runtime bootstrap requires HTTPS and a reviewed SHA256')
+          with urlopen(url, timeout=60) as response:
+              bundle = response.read(10_000_001)
+          if len(bundle) > 10_000_000 or hashlib.sha256(bundle).hexdigest() != expected:
+              raise ValueError('Player runtime bundle checksum or size is invalid')
+          install_runtime_bundle(bundle, int(os.environ['SEASON']))
+          PY
+
+      - name: Validate trained Heisman model before player API calls
+        run: |
+          poetry run python -c 'import os; from backend.players.artifacts import load_heisman_model; load_heisman_model(int(os.environ["SEASON"]))'
+          poetry run python -c 'from backend.etl import store; from backend.model.ingame import load_baseline_params; load_baseline_params(store.read_processed("ingame", "baseline_summary.parquet"))'
+
+      - name: Preserve validated player runtime artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: heisman-model-${{ env.SEASON }}
+          path: |
+            backend/data/processed/players/models/heisman_${{ env.SEASON }}.json
+            backend/data/processed/ingame/baseline_summary.parquet
+          if-no-files-found: error
+          retention-days: 90
+
+      # Only completed schedule weeks and their active FBS conferences are
+      # fetched, with a hard shared job budget and durable per-chunk resume.
       - name: Update player value and the Heisman board
         shell: bash
         env:
@@ -126,6 +229,26 @@ jobs:
           poetry run python -m backend player-values --seasons "$SEASON"
           poetry run python -m backend heisman --season "$SEASON"
           poetry run python -m backend publish-players --season "$SEASON"
+
+      - name: Preserve player checkpoints even after partial failure
+        if: always() && steps.player-cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            backend/data/raw/players/${{ env.SEASON }}/
+            backend/data/processed/players/models/
+            backend/data/processed/ingame/baseline_summary.parquet
+          key: ${{ steps.player-cache.outputs.cache-primary-key }}
+
+      - name: Preserve frozen preseason forecast
+        if: always() && steps.preseason-cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            backend/data/processed/preseason/ratings/
+            backend/data/processed/preseason/score_noise_prior/
+            backend/data/processed/preseason/forecast_log/
+          key: ${{ steps.preseason-cache.outputs.cache-primary-key }}
 
       - name: Preserve forecast audit artifacts
         if: always()

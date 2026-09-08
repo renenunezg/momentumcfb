@@ -10,9 +10,11 @@ def handle_ingest_players(args: Namespace) -> None:
     from backend.cfbd.client import CFBDClient
     from backend.players.ingest import ingest_player_sources
 
-    client = CFBDClient()
+    client = CFBDClient(max_calls=args.max_calls, min_remaining=args.min_remaining)
     for season in args.seasons:
-        manifest = ingest_player_sources(client, season, only_week=args.week)
+        manifest = ingest_player_sources(
+            client, season, only_week=args.week, refresh=args.refresh
+        )
         log.info(f"players {season}: {len(manifest)} sources snapshotted")
 
 
@@ -61,6 +63,22 @@ def handle_heisman(args: Namespace) -> None:
             ]
         ].to_string(index=False)
     )
+
+
+def handle_heisman_train(args: Namespace) -> None:
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from backend.players.artifacts import export_runtime_bundle
+    from backend.players.pipeline import train_heisman_model
+
+    _, seasons, history = train_heisman_model(args.season, datetime.now(timezone.utc))
+    log.info(
+        "Heisman model trained on %s; %s weekly evaluation rows", seasons, len(history)
+    )
+    if args.runtime_bundle:
+        bundle = export_runtime_bundle(args.season, Path(args.runtime_bundle))
+        log.info("wrote validated player runtime bundle to %s", bundle)
 
 
 def handle_publish_players(args: Namespace) -> None:

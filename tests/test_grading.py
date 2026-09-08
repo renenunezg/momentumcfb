@@ -2,9 +2,14 @@
 
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
+import pytest
+from scipy import stats
 
 from backend import grading
+from backend.model.calibration import _interval_coverage
+from backend.odds.markets import OFFER_COLUMNS, compare_priced_offers
 
 
 def _projection(game_id, as_of, margin=7.0):
@@ -26,6 +31,7 @@ def _projection(game_id, as_of, margin=7.0):
         "home_missing_input_count": 0,
         "away_missing_input_count": 0,
         "home_margin": margin,
+        "home_spread": -margin,
         "pure_home_margin": margin,
         "market_informed_home_margin": margin - 1.0,
         "market_weight": 0.5,
@@ -119,3 +125,40 @@ def test_grades_only_pregame_projections_and_keeps_stored_rows(monkeypatch, tmp_
     assert overall.loc["closing_market", "margin_mae"] == 0.5
     assert overall.loc["pure_model", "model_minus_market_mae"] == 2.5
     assert bool(overall.loc["pure_model", "thin_sample"]) is True
+
+    # Grading, priced probabilities and calibration share the same SD contract.
+    student = projections.iloc[[0]].assign(degrees_of_freedom=7.0)
+    student_grade = grading.build_graded_games(2026, student)
+    expected = stats.t.cdf(7.0 / (14.0 * np.sqrt(5.0 / 7.0)), 7.0)
+    assert student_grade.iloc[0].home_win_probability == pytest.approx(expected)
+    offers = pd.DataFrame(
+        [
+            {
+                "game_id": 1,
+                "market": "spreads",
+                "selection": "home",
+                "point": 0.0,
+                "price": -110.0,
+                "execution_eligibility_verified": False,
+            }
+        ]
+    ).reindex(columns=OFFER_COLUMNS)
+    priced = compare_priced_offers(student, offers)
+    assert priced.iloc[0].best_offer_model_cover_probability == pytest.approx(expected)
+    boundary = student_grade.assign(actual_margin=7.0 + 18.0)
+    assert grading._coverage(boundary, 0.8) == 0.0
+    assert grading._coverage(boundary, 0.8) == _interval_coverage(
+        np.array([18.0]), np.array([14.0]), np.array([7.0]), 0.8
+    )
+
+    # Repair the known derived-probability bug without changing frozen inputs.
+    legacy = student_grade.assign(
+        home_win_probability=stats.t.cdf(0.5, 7.0),
+        probability_method=grading.LEGACY_PROBABILITY_METHOD,
+    )
+    migrated = grading.build_graded_games(2026, student, existing=legacy)
+    assert migrated.iloc[0].home_win_probability == pytest.approx(expected)
+    frozen_columns = [
+        c for c in legacy if c not in {"home_win_probability", "probability_method"}
+    ]
+    pd.testing.assert_frame_equal(migrated[frozen_columns], legacy[frozen_columns])

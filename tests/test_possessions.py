@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 from pandas.testing import assert_frame_equal
 
 from backend.features.possessions import (
@@ -6,10 +7,11 @@ from backend.features.possessions import (
     build_team_games,
     classify_plays,
 )
+from backend.features.scoring import build_weekly_scoring_games, load_scoring_team_games
 from backend.features.units import build_unit_games
 
 
-def test_raw_plays_build_deterministic_possession_and_team_game_features():
+def test_raw_plays_build_deterministic_possession_and_team_game_features(monkeypatch):
     common = {
         "game_id": 1,
         "season": 2026,
@@ -245,3 +247,65 @@ def test_raw_plays_build_deterministic_possession_and_team_game_features():
     assert abs(a_units["rush_ppa"] - 0.6) < 1e-9
     assert a_units["pass_ppa"] == 3.0
     assert unit_games["rush_plays"].sum() == 3
+
+    garbage = {
+        **rows[7],
+        "id": 10,
+        "drive_id": "garbage-drive",
+        "drive_number": 3,
+        "clock": {"minutes": 0, "seconds": 10},
+        "offense_score": 56,
+        "ppa": 9.0,
+    }
+    extended = pd.DataFrame([*rows, garbage])
+    extended_possessions = build_possessions(extended)
+    extended_teams = build_team_games(extended_possessions)
+    schedule = pd.DataFrame(
+        [
+            {
+                "id": 1,
+                "season": 2026,
+                "week": 1,
+                "season_type": "regular",
+                "start_date": "2026-09-01T18:00:00Z",
+                "completed": True,
+                "home_id": 1,
+                "home_team": "A",
+                "home_classification": "fbs",
+                "away_id": 2,
+                "away_team": "B",
+                "away_classification": "fbs",
+                "home_points": 56,
+                "away_points": 0,
+                "neutral_site": False,
+            }
+        ]
+    )
+    before = build_weekly_scoring_games(schedule, team_games).iloc[0]
+    after = build_weekly_scoring_games(schedule, extended_teams).iloc[0]
+    assert after["home_epa_per_possession"] == before["home_epa_per_possession"]
+    assert after["away_epa_per_possession"] == before["away_epa_per_possession"]
+    assert after["game_possessions"] == before["game_possessions"] + 0.5
+    assert after["home_points"] == 56
+    assert after["home_competitive_possessions"] == 2
+
+    # Existing cached aggregates must be reconstructed, never silently diluted.
+    old_teams = extended_teams.drop(columns="offense_competitive_possessions")
+    with pytest.raises(ValueError, match="competitive possession counts"):
+        build_weekly_scoring_games(schedule, old_teams)
+    monkeypatch.setattr(
+        "backend.features.scoring.store.read_processed",
+        lambda kind, _: old_teams if kind == "team_games" else extended_possessions,
+    )
+    assert_frame_equal(load_scoring_team_games(2026), extended_teams)
+
+    only_garbage = extended.copy()
+    b_plays = only_garbage["offense"].eq("B")
+    only_garbage.loc[b_plays, "period"] = 4
+    only_garbage.loc[b_plays, "defense_score"] = 56
+    missing_process = build_weekly_scoring_games(
+        schedule, build_team_games(build_possessions(only_garbage))
+    ).iloc[0]
+    assert missing_process["away_competitive_possessions"] == 0
+    assert pd.isna(missing_process["away_epa_per_possession"])
+    assert missing_process["away_points"] == 0

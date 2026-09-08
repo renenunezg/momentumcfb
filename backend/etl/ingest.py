@@ -115,6 +115,7 @@ def ingest_preseason_sources(
     manifest_rows = []
     sources = dict(PRESEASON_SOURCES)
     sources["prior_talent"] = ("/talent", lambda year: {"year": year - 1})
+    client.ensure_budget(len(sources))
 
     games_frame = None
     for name, (endpoint, build_params) in sources.items():
@@ -191,6 +192,9 @@ def ingest_season(
     season: int,
     only_week: int | None = None,
 ) -> None:
+    client.ensure_budget(
+        4 + len(SEASON_TYPES) * (1 if only_week is not None else MAX_REGULAR_WEEK)
+    )
     ingest_games(client, season)
     ingest_cfbd_plays(client, season, only_week)
     ingest_lines(client, season)

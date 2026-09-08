@@ -7,6 +7,7 @@ log = logging.getLogger(__name__)
 
 
 def handle_grade(args: Namespace) -> None:
+    from backend.etl import store
     from backend.grading import (
         build_graded_games,
         compute_performance_metrics,
@@ -15,6 +16,10 @@ def handle_grade(args: Namespace) -> None:
     from backend.publish import fetch_graded_games, fetch_published_projections
 
     projections = fetch_published_projections(args.season)
+    # Player WPA needs the same immutable pregame inputs on an ephemeral runner.
+    store.write_processed(
+        projections, "players", "published_projections", f"{args.season}.parquet"
+    )
     existing = None if args.regrade else fetch_graded_games(args.season)
     graded = build_graded_games(args.season, projections, existing)
     metrics = compute_performance_metrics(graded)

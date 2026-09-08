@@ -5,13 +5,18 @@ from pathlib import Path
 import pandas as pd
 
 from backend.etl import store
-from backend.features.scoring import SCORING_COLUMNS, build_weekly_scoring_games
+from backend.features.scoring import (
+    SCORING_COLUMNS,
+    build_weekly_scoring_games,
+    load_scoring_team_games,
+)
 from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.market_blend import add_market_informed_margins
 from backend.model.preseason import (
     MISSING_INPUT_COLUMNS,
     load_preseason_ratings,
-    strength_prior_means_from_ratings,
+    load_score_noise_prior,
+    scoring_priors_from_ratings,
 )
 from backend.model.unit_ratings import fit_unit_ratings
 from backend.odds.markets import compare_priced_offers, flatten_odds_api_offers
@@ -38,13 +43,14 @@ def load_weekly_games(season: int) -> pd.DataFrame:
     """Load the current schedule plus completed-game scoring features."""
     raw_games = store.read_games(season)
     try:
-        team_games = store.read_processed("team_games", f"{season}.parquet")
+        team_games = load_scoring_team_games(season)
     except FileNotFoundError:
         team_games = pd.DataFrame(
             columns=[
                 "game_id",
                 "team",
                 "offense_possessions",
+                "offense_competitive_possessions",
                 "offense_epa_total",
                 "game_possessions",
             ]
@@ -300,12 +306,13 @@ def run_weekly_forecast(
     )
 
     preseason_ratings, prior_source = load_preseason_ratings(season)
-    strength_priors = strength_prior_means_from_ratings(preseason_ratings)
+    score_noise_prior = load_score_noise_prior(season)
+    priors = scoring_priors_from_ratings(preseason_ratings, score_noise_prior)
     fitted = fit_joint_scoring(
         games,
         forecast_week,
         created_at,
-        strength_prior_means=strength_priors,
+        priors=priors,
     )
     ratings = pd.DataFrame(rating.to_record() for rating in fitted.ratings())
     projections = pd.DataFrame(
@@ -405,6 +412,7 @@ def run_weekly_forecast(
         created_at,
         {
             "ratings": ratings,
+            "score_noise_prior": score_noise_prior,
             "unit_ratings": unit_ratings,
             "projections": projections,
             "schedule_coverage": coverage,

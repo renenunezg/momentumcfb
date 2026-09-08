@@ -673,6 +673,27 @@ def publish_players(season: int) -> dict[str, int]:
     by_season = ("player_values", "heisman_board")
     full_refresh = ("heisman_history", "player_model_meta")
     with engine.begin() as conn:
+        required_evaluation = {
+            "heisman_evaluation_kind",
+            "heisman_evaluation_week",
+            "heisman_evaluation_seasons",
+            "heisman_winner_pool_coverage",
+            "heisman_ballot_share_covered",
+        }
+        missing = required_evaluation - set(_table_columns(conn, "player_model_meta"))
+        rank_nullable = conn.execute(
+            text(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_schema = :schema AND table_name = 'heisman_history' "
+                "AND column_name = 'actual_winner_predicted_rank'"
+            ),
+            {"schema": CFB_SCHEMA},
+        ).scalar()
+        if missing or rank_nullable != "YES":
+            raise ValueError(
+                "Heisman weekly evaluation requires sql/002_heisman_weekly_evaluation.sql "
+                "before publishing; existing serving tables were preserved"
+            )
         for table in by_season:
             conn.execute(
                 text(f"DELETE FROM {CFB_SCHEMA}.{table} WHERE season = :s"),

@@ -12,7 +12,14 @@ def handle_ingest(args: Namespace) -> None:
     from backend.cfbd.client import CFBDClient
     from backend.etl.ingest import ingest_season
 
-    client = CFBDClient()
+    client = CFBDClient(max_calls=args.max_calls, min_remaining=args.min_remaining)
+    from backend.config import MAX_REGULAR_WEEK
+    from backend.etl.ingest import SEASON_TYPES
+
+    client.ensure_budget(
+        len(args.seasons)
+        * (4 + len(SEASON_TYPES) * (1 if args.week is not None else MAX_REGULAR_WEEK))
+    )
     for season in args.seasons:
         ingest_season(client, season, only_week=args.week)
 
@@ -130,12 +137,17 @@ def handle_weekly_update(args: Namespace) -> None:
 
 
 def handle_calibrate(args: Namespace) -> None:
+    if getattr(args, "production_replay", False):
+        _handle_production_replay(args)
+        return
+    if getattr(args, "seasons", None) or getattr(args, "output_directory", None):
+        raise SystemExit("--seasons and --output-directory require --production-replay")
     from datetime import timedelta
 
     import pandas as pd
 
     from backend.etl import store
-    from backend.features.scoring import build_scoring_games
+    from backend.features.scoring import build_scoring_games, load_scoring_team_games
     from backend.model.calibration import (
         fbs_calibration_cohort,
         format_diagnostic,
@@ -147,7 +159,7 @@ def handle_calibrate(args: Namespace) -> None:
     games_by_season = {
         season: build_scoring_games(
             store.read_games(season),
-            store.read_processed("team_games", f"{season}.parquet"),
+            load_scoring_team_games(season),
         )
         for season in SEASONS
     }
@@ -169,6 +181,8 @@ def handle_calibrate(args: Namespace) -> None:
         strength_priors_by_season=priors_by_season,
         progress=log.info,
     )
+    result.predictions["evaluation_contract"] = "historical_carryover"
+    result.summary["evaluation_contract"] = "historical_carryover"
     store.write_processed(
         result.predictions,
         "calibration",
@@ -181,8 +195,55 @@ def handle_calibrate(args: Namespace) -> None:
     )
     log.info(format_diagnostic(result.summary))
     log.info(
+        "Historical carryover calibration excludes rich preseason inputs and "
+        "production week-zero grouping; use --production-replay for that contract."
+    )
+    log.info(
         f"wrote {len(result.predictions)} predictions and "
         f"{len(result.summary)} calibration rows"
+    )
+
+
+def _handle_production_replay(args: Namespace) -> None:
+    from pathlib import Path
+
+    import pandas as pd
+
+    from backend.config import PROCESSED_DIR
+    from backend.model.production_evaluation import (
+        replay_production_season,
+        summarize_production_replay,
+    )
+
+    if not args.seasons:
+        raise SystemExit("--production-replay requires explicit --seasons")
+    predictions = pd.concat(
+        [replay_production_season(season) for season in args.seasons], ignore_index=True
+    )
+    summary = summarize_production_replay(predictions)
+    destination = (
+        Path(args.output_directory)
+        if args.output_directory
+        else PROCESSED_DIR / "calibration" / "production_replay"
+    )
+    destination.mkdir(parents=True, exist_ok=True)
+    predictions.to_parquet(destination / "predictions.parquet", index=False)
+    summary.to_parquet(destination / "summary.parquet", index=False)
+    log.info(
+        summary[
+            [
+                "group_value",
+                "evaluation_stage",
+                "metric",
+                "n_games",
+                "mae",
+                "coverage_80",
+            ]
+        ].to_string(index=False)
+    )
+    log.info(
+        f"wrote fixed-config retrospective production replay to {destination}; "
+        "no tuning, live grades, or frozen baseline artifacts changed"
     )
 
 

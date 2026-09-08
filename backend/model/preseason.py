@@ -6,9 +6,11 @@ import numpy as np
 import pandas as pd
 
 from backend.etl import store
-from backend.features.scoring import build_scoring_games
+from backend.features.scoring import build_scoring_games, load_scoring_team_games
 from backend.model.joint_scoring import (
     DEFAULT_CONFIG,
+    JointScoringFit,
+    JointScoringPriors,
     fit_joint_scoring,
     margin_total_distribution,
 )
@@ -24,7 +26,7 @@ from backend.odds.markets import (
     flatten_odds_api_offers,
 )
 
-MODEL_VERSION = "preseason_v4"
+MODEL_VERSION = "preseason_v5"
 # Power weights were fitted by least squares on 364 FBS games from the 2022
 # through 2025 Week 1 and Week 2 slates: the closing margin regressed on the
 # home-minus-away difference of each feature. Leave-one-season-out over 2023
@@ -72,9 +74,10 @@ class PreseasonForecastResult:
     log_directory: Path
 
 
-def strength_prior_means_from_ratings(
+def scoring_priors_from_ratings(
     ratings: pd.DataFrame,
-) -> dict[int, tuple[float, float]]:
+    score_noise_prior: pd.DataFrame | None = None,
+) -> JointScoringPriors:
     """Convert published preseason point ratings into weekly-engine priors.
 
     The joint engine stores offense and defense strengths per possession,
@@ -82,12 +85,15 @@ def strength_prior_means_from_ratings(
     The average expected possession count recovers the common scale used when
     those ratings were built. This keeps market data out of the rating state:
     only the pure preseason team ratings enter the weekly fit.
+    Split published power variance equally between independent offense and
+    defense priors, preserving the uncertainty added for missing inputs.
     """
     required = {
         "team_id",
         "offense_points",
         "defense_points",
         "expected_possessions",
+        "power_rating_sd",
     }
     missing = sorted(required - set(ratings.columns))
     if missing:
@@ -96,6 +102,8 @@ def strength_prior_means_from_ratings(
         )
     if ratings.empty:
         raise ValueError("preseason ratings must not be empty")
+    if ratings["team_id"].isna().any() or ratings["team_id"].duplicated().any():
+        raise ValueError("preseason ratings must contain unique, nonmissing team IDs")
     base_possessions = float(
         pd.to_numeric(ratings["expected_possessions"], errors="coerce").mean()
     )
@@ -103,22 +111,96 @@ def strength_prior_means_from_ratings(
         raise ValueError("preseason expected possessions must have a positive mean")
 
     means = {}
+    sds = {}
+    possessions = {}
     for row in ratings.itertuples():
+        team_id = int(row.team_id)
         offense = float(row.offense_points) / base_possessions
         defense = float(row.defense_points) / base_possessions
-        if np.isfinite(offense) and np.isfinite(defense):
-            means[int(row.team_id)] = (offense, defense)
-    if not means:
-        raise ValueError("preseason ratings contain no finite strength priors")
-    return means
+        means[team_id] = (offense, defense)
+        sd = float(row.power_rating_sd) / (np.sqrt(2) * base_possessions)
+        sds[team_id] = (sd, sd)
+        possessions[team_id] = float(row.expected_possessions)
+    if score_noise_prior is not None:
+        required_noise = {
+            "home_variance",
+            "away_variance",
+            "score_covariance",
+            "training_games",
+            "season",
+            "as_of",
+        }
+        if len(score_noise_prior) != 1 or not required_noise <= set(score_noise_prior):
+            raise ValueError("one complete prior-season score noise record is required")
+        row = score_noise_prior.iloc[0]
+        noise = np.array(
+            [
+                [row.home_variance, row.score_covariance],
+                [row.score_covariance, row.away_variance],
+            ],
+            dtype=float,
+        )
+        noise_games = float(row.training_games)
+        noise_season = float(row.season)
+        noise_as_of = pd.to_datetime(row.as_of, utc=True, errors="coerce")
+        if (
+            not np.isfinite([noise_games, noise_season]).all()
+            or noise_games != int(noise_games)
+            or noise_season != int(noise_season)
+            or pd.isna(noise_as_of)
+        ):
+            raise ValueError("invalid score noise season, game count or cutoff")
+        return JointScoringPriors(
+            means,
+            sds,
+            possessions,
+            base_possessions,
+            noise,
+            int(noise_games),
+            int(noise_season),
+            noise_as_of.to_pydatetime(),
+        )
+    return JointScoringPriors(means, sds, possessions, base_possessions)
+
+
+def score_noise_prior_from_fit(fitted: JointScoringFit) -> pd.DataFrame:
+    """Portable previous-season noise state, requiring no historical CI ingest."""
+    covariance = fitted.score_residual_covariance
+    return pd.DataFrame(
+        [
+            {
+                "season": fitted.season,
+                "as_of": fitted.as_of.isoformat(),
+                "training_games": fitted.training_games,
+                "home_variance": covariance[0, 0],
+                "away_variance": covariance[1, 1],
+                "score_covariance": covariance[0, 1],
+            }
+        ]
+    )
+
+
+def load_score_noise_prior(season: int) -> pd.DataFrame:
+    try:
+        frame = store.read_preseason_forecast_artifact(season, 1, "score_noise_prior")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"{season}: frozen preseason score_noise_prior is required; "
+            "restore it with the opening forecast artifact before weekly fitting"
+        ) from exc
+    if (
+        len(frame) != 1
+        or "season" not in frame
+        or not frame["season"].eq(season - 1).all()
+    ):
+        raise ValueError("score noise prior must describe the previous season")
+    return frame
 
 
 def load_preseason_ratings(season: int, week: int = 1) -> tuple[pd.DataFrame, str]:
     """Load the pure preseason prior locally or from the serving database."""
     try:
-        ratings = store.read_processed(
-            "preseason", "ratings", f"{season}_{week:02d}.parquet"
-        )
+        ratings = store.read_preseason_forecast_artifact(season, week, "ratings")
         return ratings, "local_preseason_artifact"
     except FileNotFoundError:
         from sqlalchemy import text
@@ -128,8 +210,10 @@ def load_preseason_ratings(season: int, week: int = 1) -> tuple[pd.DataFrame, st
         query = text(
             "SELECT team_id, team, conference, classification, "
             "offense_points, defense_points, expected_possessions, "
+            "power_rating_sd, "
             f"missing_input_count FROM {CFB_SCHEMA}.team_ratings "
-            "WHERE season = :season AND week = :week"
+            "WHERE season = :season AND week = :week "
+            "AND model_version LIKE 'preseason_%'"
         )
         with engine.connect() as connection:
             ratings = pd.read_sql(
@@ -203,7 +287,7 @@ def _neutral_zscore(values: pd.Series) -> pd.Series:
 def _latest_season_fit(season: int):
     games = build_scoring_games(
         store.read_games(season),
-        store.read_processed("team_games", f"{season}.parquet"),
+        load_scoring_team_games(season),
     )
     forecast_week = int(games["model_week"].max()) + 1
     as_of = pd.to_datetime(
@@ -220,7 +304,7 @@ def _latest_unit_ratings(
 ) -> pd.DataFrame:
     games = build_scoring_games(
         store.read_games(season),
-        store.read_processed("team_games", f"{season}.parquet"),
+        load_scoring_team_games(season),
     )
     forecast_week = int(games["model_week"].max()) + 1
     fitted = fit_unit_ratings(
@@ -916,6 +1000,7 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
     comparisons["forecast_created_at"] = forecast_created_at.isoformat()
     outputs = {
         "ratings": ratings,
+        "score_noise_prior": score_noise_prior_from_fit(previous_fit),
         "unit_ratings": unit_ratings,
         "projections": projections,
         "schedule_coverage": coverage,
