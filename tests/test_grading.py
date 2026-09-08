@@ -231,6 +231,11 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
     # Sides are priced from the market-informed margin, not the pure margin.
     blended = projections.set_index("game_id").market_informed_home_margin
     assert decisions.model_home_margin.eq(decisions.game_id.map(blended)).all()
+    # Totals price from the model total blended toward the posted total.
+    totals = decisions[decisions.market.eq("totals")]
+    assert totals.market_total.eq(43.0).all()
+    assert totals[totals.game_id.ne(4)].model_total.eq(46.5).all()
+    assert totals[totals.game_id.eq(4)].model_total.eq(39.5).all()
     home = decisions[(decisions.game_id.eq(1)) & decisions.market.eq("spreads")].iloc[0]
     assert home.side == "home" and home.point == -3 and home.price == -110
     assert home.push_probability > 0
