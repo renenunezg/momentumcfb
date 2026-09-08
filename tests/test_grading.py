@@ -162,3 +162,153 @@ def test_grades_only_pregame_projections_and_keeps_stored_rows(monkeypatch, tmp_
         c for c in legacy if c not in {"home_win_probability", "probability_method"}
     ]
     pd.testing.assert_frame_equal(migrated[frozen_columns], legacy[frozen_columns])
+
+
+def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
+    from backend.model import pick_calibration
+    from backend.recommendations import build_recommendations, grade_recommendations
+
+    # Forward picks and their settlement must work without research approval or
+    # market-relative calibration, even when that research finds no model edge.
+    def research_must_not_gate_picks(*args, **kwargs):
+        raise AssertionError("historical calibration entered the recommendation path")
+
+    monkeypatch.setattr(
+        pick_calibration, "outcome_probabilities", research_must_not_gate_picks
+    )
+    monkeypatch.setattr(
+        pick_calibration, "calibrate_probabilities", research_must_not_gate_picks
+    )
+
+    now = pd.Timestamp("2026-08-29T12:00:00Z")
+    projections = pd.DataFrame(
+        [_projection(i, now, margin=14 if i < 4 else -14) for i in range(1, 10)]
+    )
+    offers = pd.DataFrame(
+        [
+            dict(
+                game_id=i,
+                market=market,
+                selection=side,
+                point=point,
+                price=price,
+                provider="Book A",
+                provider_key="book_a",
+                provider_last_update=now,
+                market_fetched_at=now,
+                execution_eligibility_verified=True,
+                match_score=1.0,
+                odds_api_event_id=f"event-{i}",
+                commence_time="2026-08-29T16:00:00Z",
+            )
+            for i in range(1, 10)
+            for market, side, point, price in (
+                ("spreads", "home", -3.0, -110),
+                ("spreads", "away", 3.0, 120),
+                ("totals", "over", 43.0, -110),
+                ("totals", "under", 43.0, -110),
+            )
+        ]
+    ).reindex(columns=OFFER_COLUMNS)
+    projections.loc[projections.game_id.eq(4), "model_total"] = 36.0
+    # Gates apply per offer. Neither stale nor incomplete evidence earns a pick.
+    projections.loc[projections.game_id.eq(6), "home_missing_input_count"] = 2
+    offers.loc[offers.game_id.eq(7), "provider_last_update"] = now - pd.Timedelta(
+        hours=2
+    )
+    offers.loc[offers.game_id.eq(8), "odds_api_event_id"] = None
+    offers = offers[~(offers.game_id.eq(9) & offers.selection.isin(["home", "under"]))]
+    decisions = build_recommendations(projections, offers, decision_at=now)
+    assert decisions[decisions.game_id.le(5)].status.eq("recommended").all()
+    assert decisions[decisions.game_id.ge(6)].status.eq("no_play").all()
+    home = decisions[(decisions.game_id.eq(1)) & decisions.market.eq("spreads")].iloc[0]
+    assert home.side == "home" and home.point == -3 and home.price == -110
+    assert home.push_probability > 0
+    assert home.expected_value_per_unit == pytest.approx(
+        home.win_probability * 100 / 110
+        - (1 - home.win_probability - home.push_probability)
+    )
+    assert decisions[decisions.game_id.eq(9)].reason.eq("unpaired_market").all()
+    assert (
+        build_recommendations(
+            projections, offers, decision_at=now + pd.Timedelta(days=1)
+        )
+        .status.eq("no_play")
+        .all()
+    )
+    # An eligible smaller edge wins over an unverified book with a higher EV.
+    bad_book = offers[offers.game_id.eq(1)].assign(
+        provider_key="bad", odds_api_event_id=None, price=300
+    )
+    selected = build_recommendations(
+        projections.iloc[:1], pd.concat([offers, bad_book]), decision_at=now
+    )
+    assert selected.provider_key.eq("book_a").all()
+
+    frozen = decisions.assign(outcome="pending")
+    games = pd.DataFrame(
+        [
+            dict(
+                id=i,
+                start_date="2026-08-29T16:00:00Z",
+                completed=True,
+                home_team="Home",
+                away_team="Away",
+                home_points=home_score,
+                away_points=away_score,
+            )
+            for i, home_score, away_score in (
+                (1, 24, 20),
+                (2, 23, 20),
+                (3, 20, 23),
+                (4, 20, 24),
+                (5, 24, 20),
+                (6, 24, 20),
+                (7, 24, 20),
+                (8, 24, 20),
+                (9, 24, 20),
+            )
+        ]
+    )
+    # Missing kickoff data is not a postponement. Identity must be checked
+    # even when the source also changes the kickoff.
+    assert grade_recommendations(frozen, games.assign(start_date=None)).empty
+    with pytest.raises(ValueError, match="identity changed"):
+        grade_recommendations(frozen, games.assign(start_date=None, home_team="Wrong"))
+    # Re-scheduling invalidates the recommendation at its original kickoff.
+    games.loc[games.id.eq(5), "start_date"] = "2026-08-30T16:00:00Z"
+    grades = grade_recommendations(frozen, games, graded_at=now + pd.Timedelta(days=2))
+    spread = grades[grades.market.eq("spreads")].set_index("game_id")
+    assert spread.loc[1, "outcome"] == "win"
+    assert spread.loc[1, "profit_units"] == pytest.approx(100 / 110)
+    assert spread.loc[2, "outcome"] == "push" and spread.loc[2, "profit_units"] == 0
+    assert spread.loc[3, "outcome"] == "loss" and spread.loc[3, "profit_units"] == -1
+    assert spread.loc[4, "outcome"] == "win" and spread.loc[4, "profit_units"] == 1.2
+    assert spread.loc[5, "outcome"] == "void" and spread.loc[5, "profit_units"] == 0
+    assert grades[grades.game_id.ge(6)].outcome.eq("no_play").all()
+    totals = grades[grades.market.eq("totals")].set_index("game_id")
+    assert totals.loc[1, "outcome"] == "win"
+    assert totals.loc[2, "outcome"] == "push"
+    assert totals.loc[4, "outcome"] == "loss"
+    mismatch = offers[offers.game_id.eq(1)].assign(
+        commence_time=now - pd.Timedelta(hours=1)
+    )
+    assert (
+        build_recommendations(projections.iloc[:1], mismatch, decision_at=now)
+        .reason.eq("kickoff_mismatch")
+        .all()
+    )
+    # Regional-feed quotes can qualify without a user-specified bookmaker list.
+    regional = offers[offers.game_id.eq(1)].assign(execution_eligibility_verified=False)
+    assert (
+        build_recommendations(projections.iloc[:1], regional, decision_at=now)
+        .status.eq("recommended")
+        .all()
+    )
+    # A final-score correction never silently rewrites an already settled pick.
+    settled = frozen.drop(columns="outcome").merge(
+        grades[["game_id", "market", "outcome"]], on=["game_id", "market"]
+    )
+    assert grade_recommendations(
+        settled, games.assign(home_points=99), graded_at=now + pd.Timedelta(days=3)
+    ).empty

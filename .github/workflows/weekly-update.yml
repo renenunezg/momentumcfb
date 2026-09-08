@@ -198,10 +198,14 @@ jobs:
             exit 1
           fi
 
+      - name: Validate recommendation schema before API calls
+        run: poetry run python -c 'from backend.publish import ensure_recommendation_schema; ensure_recommendation_schema()'
+
       - name: Run weekly regression gate
         run: poetry run pytest tests/test_joint_scoring.py -q
 
       - name: Refresh season data from CFBD
+        id: ingest
         run: poetry run python -m backend ingest --seasons "$SEASON" --max-calls "$CFBD_MAX_CALLS"
 
       - name: Rebuild features
@@ -222,6 +226,7 @@ jobs:
       # before kickoff, the CFBD closing line, and the final score. It runs
       # after the forecast so a not-ready week still grades completed games.
       - name: Grade completed games and publish performance
+        if: ${{ !cancelled() && steps.ingest.outcome == 'success' }}
         shell: bash
         env:
           MOMENTUMCFB_DB_WRITES: "1"

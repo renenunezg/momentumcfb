@@ -198,6 +198,10 @@ _TIMESTAMP_COLUMNS = {
     "source_ingested_at",
     "graded_at",
     "computed_at",
+    "decision_at",
+    "market_fetched_at",
+    "provider_last_update",
+    "provider_start_date",
 }
 
 
@@ -435,8 +439,9 @@ def weekly_forecast_is_published(
     week: int,
     model_version: str,
 ) -> bool:
-    """Return whether this weekly model version already reached serving."""
+    """Require both the forecast and decisions for its remaining games."""
     from backend.db import engine
+    from backend.recommendations import POLICY_VERSION
 
     with engine.connect() as conn:
         if not _table_exists(conn, "team_ratings"):
@@ -447,13 +452,20 @@ def weekly_forecast_is_published(
                     "SELECT EXISTS ("
                     f"SELECT 1 FROM {CFB_SCHEMA}.team_ratings "
                     "WHERE season = :season AND week = :week "
-                    "AND model_version = :model_version"
-                    ")"
+                    "AND model_version = :model_version) AND NOT EXISTS ("
+                    f"SELECT 1 FROM {CFB_SCHEMA}.game_projections p "
+                    "CROSS JOIN (VALUES ('spreads'), ('totals')) m(market) "
+                    "WHERE p.season = :season AND p.week = :week "
+                    "AND p.start_date > clock_timestamp() AND NOT EXISTS ("
+                    f"SELECT 1 FROM {CFB_SCHEMA}.recommendations r "
+                    "WHERE r.game_id = p.game_id AND r.market = m.market "
+                    "AND (r.status = 'recommended' OR r.policy_version = :policy)))"
                 ),
                 {
                     "season": season,
                     "week": week,
                     "model_version": model_version,
+                    "policy": POLICY_VERSION,
                 },
             ).scalar()
         )
@@ -484,7 +496,43 @@ def publish(
     # between publishes cannot survive as a duplicate row.
     game_ids = [int(g) for g in projections["game_id"]]
 
+    from backend.odds.markets import OFFER_COLUMNS
+    from backend.recommendations import build_recommendations
+
+    offers_path = (
+        _artifact_dir(source, "market_offers") / f"{season}_{week:02d}.parquet"
+    )
+    offers = (
+        pd.read_parquet(offers_path)
+        if offers_path.exists()
+        else pd.DataFrame(columns=OFFER_COLUMNS)
+    )
+    decisions = build_recommendations(projections, offers)
+
     with engine.begin() as conn:
+        if not _table_exists(conn, "recommendations"):
+            raise ValueError(
+                "Apply sql/003_recommendations.sql before publishing CFB picks"
+            )
+        # Publication, rather than the artifact date, decides whether a record
+        # was available before kickoff. Old artifacts cannot backfill picks.
+        upcoming_ids = set(
+            decisions.loc[decisions["reason"].ne("not_pregame"), "game_id"]
+        )
+        locked_ids = set(
+            conn.execute(
+                text(
+                    f"SELECT game_id FROM {CFB_SCHEMA}.game_projections "
+                    "WHERE game_id = ANY(:ids) AND start_date <= clock_timestamp()"
+                ),
+                {"ids": game_ids},
+            ).scalars()
+        )
+        game_ids = sorted(upcoming_ids - locked_ids)
+        projections = projections[projections["game_id"].isin(game_ids)]
+        market = market[market["game_id"].isin(game_ids)]
+        decisions = decisions[decisions["game_id"].isin(game_ids)]
+        _publish_recommendations(conn, decisions)
         if teams is not None:
             # A dimension with no natural version: replace it wholesale so a
             # rebrand or a reclassification cannot leave a stale row behind.
@@ -577,6 +625,7 @@ def publish(
         "team_ratings",
         "game_projections",
         "market_comparisons",
+        "recommendations",
         "backtest_predictions",
     ]
     with engine.connect() as conn:
@@ -723,3 +772,101 @@ def publish_players(season: int) -> dict[str, int]:
             )
             for table in (*by_season, *full_refresh)
         }
+
+
+def _publish_recommendations(conn, decisions):
+    from backend.recommendations import RECOMMENDATION_COLUMNS
+
+    if decisions.empty:
+        return
+    rows = _serving_frame(decisions, RECOMMENDATION_COLUMNS)
+    # Keep the original pick visible as void if the schedule moves, rather
+    # than showing its old price as a recommendation for the new kickoff.
+    conn.execute(
+        text(
+            f"UPDATE {CFB_SCHEMA}.recommendations SET outcome = 'void', "
+            "profit_units = 0, graded_at = clock_timestamp() "
+            "WHERE game_id = :game_id AND market = :market AND start_date <> :start_date "
+            "AND home_team = :home_team AND away_team = :away_team "
+            "AND decision_at < :decision_at "
+            "AND status = 'recommended' AND outcome = 'pending'"
+        ),
+        rows[
+            ["game_id", "market", "start_date", "home_team", "away_team", "decision_at"]
+        ].to_dict("records"),
+    )
+    columns = ", ".join(RECOMMENDATION_COLUMNS)
+    values = ", ".join(f":{c}" for c in RECOMMENDATION_COLUMNS)
+    updates = ", ".join(
+        f"{c} = excluded.{c}"
+        for c in RECOMMENDATION_COLUMNS
+        if c not in {"game_id", "market"}
+    )
+    conn.execute(
+        text(
+            f"INSERT INTO {CFB_SCHEMA}.recommendations ({columns}) VALUES ({values}) "
+            f"ON CONFLICT (game_id, market) DO UPDATE SET {updates}, published_at = clock_timestamp() "
+            f"WHERE {CFB_SCHEMA}.recommendations.status = 'no_play' "
+            f"AND {CFB_SCHEMA}.recommendations.outcome = 'pending' "
+            f"AND {CFB_SCHEMA}.recommendations.start_date > clock_timestamp() "
+            f"AND excluded.start_date > clock_timestamp() "
+            f"AND excluded.decision_at > {CFB_SCHEMA}.recommendations.decision_at"
+        ),
+        rows.to_dict("records"),
+    )
+
+
+def fetch_recommendations(season):
+    from backend.db import engine
+
+    with engine.connect() as conn:
+        return pd.read_sql_query(
+            text(
+                f"SELECT * FROM {CFB_SCHEMA}.recommendations WHERE season = :s ORDER BY game_id, market"
+            ),
+            conn,
+            params={"s": season},
+        )
+
+
+def publish_recommendation_grades(season):
+    from backend.db import engine
+    from backend.etl import store
+    from backend.recommendations import SETTLEMENT_COLUMNS
+
+    grades = store.read_processed("grading", f"recommendations_{season}.parquet")
+    if grades.empty:
+        return 0
+    rows = _serving_frame(grades, SETTLEMENT_COLUMNS)
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                f"UPDATE {CFB_SCHEMA}.recommendations SET outcome = :outcome, "
+                "home_points = :home_points, away_points = :away_points, "
+                "profit_units = :profit_units, graded_at = :graded_at "
+                "WHERE game_id = :game_id AND market = :market AND decision_at = :decision_at "
+                "AND season = :season "
+                "AND outcome = 'pending'"
+            ),
+            rows.assign(season=season).to_dict("records"),
+        )
+        return result.rowcount
+
+
+def ensure_recommendation_schema():
+    """Fail before paid data refreshes when the serving migration is missing."""
+    from backend.db import engine
+    from backend.recommendations import RECOMMENDATION_COLUMNS
+
+    with engine.connect() as conn:
+        required = set(RECOMMENDATION_COLUMNS) | {
+            "outcome",
+            "profit_units",
+            "graded_at",
+        }
+        if not _table_exists(
+            conn, "recommendation_performance"
+        ) or not required.issubset(_table_columns(conn, "recommendations")):
+            raise ValueError(
+                "Apply sql/003_recommendations.sql before refreshing CFB recommendations"
+            )

@@ -13,7 +13,12 @@ def handle_grade(args: Namespace) -> None:
         compute_performance_metrics,
         write_grading_artifacts,
     )
-    from backend.publish import fetch_graded_games, fetch_published_projections
+    from backend.publish import (
+        fetch_graded_games,
+        fetch_published_projections,
+        fetch_recommendations,
+    )
+    from backend.recommendations import grade_recommendations
 
     projections = fetch_published_projections(args.season)
     # Player WPA needs the same immutable pregame inputs on an ephemeral runner.
@@ -22,6 +27,12 @@ def handle_grade(args: Namespace) -> None:
     )
     existing = None if args.regrade else fetch_graded_games(args.season)
     graded = build_graded_games(args.season, projections, existing)
+
+    picks = fetch_recommendations(args.season)
+    settlements = grade_recommendations(picks, store.read_games(args.season))
+    store.write_processed(
+        settlements, "grading", f"recommendations_{args.season}.parquet"
+    )
     metrics = compute_performance_metrics(graded)
     write_grading_artifacts(args.season, graded, metrics)
 
@@ -50,8 +61,10 @@ def handle_grade(args: Namespace) -> None:
 
 
 def handle_publish_grading(args: Namespace) -> None:
-    from backend.publish import publish_grading
+    from backend.publish import publish_grading, publish_recommendation_grades
 
     stored = publish_grading(args.season)
+    settled = publish_recommendation_grades(args.season)
+    log.info(f"cfb.recommendations: {settled} newly settled for season {args.season}")
     for table, count in stored.items():
         log.info(f"cfb.{table}: {count} rows stored for season {args.season}")

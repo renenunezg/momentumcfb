@@ -79,11 +79,24 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
     projections = fitted.project(target)
 
     changed_future = games.copy()
-    changed_future.loc[changed_future["model_week"].eq(3), "home_points"] = 100
+    changed_future.loc[
+        changed_future["model_week"].eq(3),
+        [
+            "home_points",
+            "away_points",
+            "game_possessions",
+            "home_epa_per_possession",
+            "away_epa_per_possession",
+        ],
+    ] = [100, 200, 1000, 500, -500]
     refitted = fit_joint_scoring(changed_future, forecast_week=3, as_of=as_of)
 
     assert [rating.to_record() for rating in ratings] == [
         rating.to_record() for rating in refitted.ratings()
+    ]
+    assert [p.to_record() for p in projections] == [
+        p.to_record()
+        for p in refitted.project(changed_future[changed_future.model_week.eq(3)])
     ]
     rating_by_id = {rating.team_id: rating for rating in ratings}
     for rating in ratings:

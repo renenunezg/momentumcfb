@@ -1,6 +1,9 @@
+import json
 import re
 import unicodedata
 from difflib import SequenceMatcher
+from functools import cache
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -9,23 +12,39 @@ from backend.model.distributions import marginal_cdf
 
 TEAM_NAME_ALIASES = {
     "liusharks": "longislanduniversity",
+    "umassminutemen": "massachusetts",
+    "albany": "ualbany",
+    "youngstownstpenguins": "youngstownstate",
+    "appalachianstatemountaineers": "appstate",
+    "citadelbulldogs": "thecitadel",
+    "houstonbaptisthuskies": "houstonchristian",
+    "southeasternlouisianalions": "selouisiana",
+    "southernmississippigoldeneagles": "southernmiss",
+    "nichollsstatecolonels": "nicholls",
+    "samhoustonstatebearkats": "samhouston",
 }
+
+
+@cache
+def _team_labels():
+    # Exact FBS/FCS school-plus-mascot labels from the CFBD team catalogue.
+    # Unknown provider names cannot earn confidence from a shared prefix.
+    return json.loads(Path(__file__).with_name("team_labels.json").read_text())
 
 
 def _normalized_name(value: str) -> str:
     ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore")
     normalized = re.sub(r"[^a-z0-9]", "", ascii_value.decode().lower())
-    return TEAM_NAME_ALIASES.get(normalized, normalized)
+    return TEAM_NAME_ALIASES.get(normalized, _team_labels().get(normalized, normalized))
 
 
 def _name_score(left: str, right: str) -> float:
     normalized_left = _normalized_name(left)
     normalized_right = _normalized_name(right)
-    if normalized_left.startswith(normalized_right) or normalized_right.startswith(
-        normalized_left
-    ):
+    if normalized_left and normalized_left == normalized_right:
         return 1.0
-    return SequenceMatcher(None, normalized_left, normalized_right).ratio()
+    # Approximate matches remain diagnostic evidence, not recommendation proof.
+    return min(0.94, SequenceMatcher(None, normalized_left, normalized_right).ratio())
 
 
 def match_event(
@@ -39,17 +58,16 @@ def match_event(
     if candidates.empty:
         return None, 0.0
     candidates["match_score"] = candidates.apply(
-        lambda game: (
-            0.5
-            * (
-                _name_score(home_team, game.home_team)
-                + _name_score(away_team, game.away_team)
-            )
+        lambda game: min(
+            _name_score(home_team, game.home_team),
+            _name_score(away_team, game.away_team),
         ),
         axis=1,
     )
     best = candidates.sort_values("match_score", ascending=False).iloc[0]
-    if float(best.match_score) < 0.65:
+    if float(best.match_score) < 0.95:
+        return None, float(best.match_score)
+    if candidates["match_score"].eq(best.match_score).sum() != 1:
         return None, float(best.match_score)
     return int(best.game_id), float(best.match_score)
 
@@ -63,6 +81,7 @@ def _stored_sequence(value) -> list | np.ndarray:
 OFFER_COLUMNS = [
     "game_id",
     "odds_api_event_id",
+    "commence_time",
     "provider_key",
     "provider",
     "market",
@@ -136,6 +155,7 @@ def flatten_odds_api_offers(
                         {
                             "game_id": game_id,
                             "odds_api_event_id": event.id,
+                            "commence_time": event.commence_time,
                             "provider_key": bookmaker.get("key"),
                             "provider": bookmaker.get("title"),
                             "market": market_key,
@@ -171,70 +191,90 @@ def _fair_american(probability: float) -> float:
     return 100.0 * (1.0 - probability) / probability
 
 
+def priced_candidates(projection, game_offers: pd.DataFrame) -> list[dict]:
+    candidates = []
+    for offer in game_offers.itertuples():
+        if not np.isfinite(offer.price) or abs(offer.price) < 100:
+            continue
+        if offer.market == "spreads" and offer.selection == "home":
+            edge = projection.home_margin + offer.point
+            selection = projection.home_team
+        elif offer.market == "spreads" and offer.selection == "away":
+            edge = -projection.home_margin + offer.point
+            selection = projection.away_team
+        elif offer.market == "totals" and offer.selection == "over":
+            edge = projection.model_total - offer.point
+            selection = "Over"
+        elif offer.market == "totals" and offer.selection == "under":
+            edge = offer.point - projection.model_total
+            selection = "Under"
+        else:
+            continue
+        uncertainty = (
+            projection.margin_sd if offer.market == "spreads" else projection.total_sd
+        )
+        if not np.isfinite(uncertainty) or uncertainty <= 0 or not np.isfinite(edge):
+            continue
+        probability = float(
+            marginal_cdf(
+                edge,
+                uncertainty,
+                projection.degrees_of_freedom,
+            )
+        )
+        expected_value = probability * _american_profit(float(offer.price)) - (
+            1.0 - probability
+        )
+        candidates.append(
+            {
+                "market": offer.market,
+                "side": offer.selection,
+                "market_fetched_at": offer.market_fetched_at,
+                "odds_api_event_id": getattr(offer, "odds_api_event_id", None),
+                "provider_start_date": getattr(offer, "commence_time", None),
+                "execution_eligibility_verified": offer.execution_eligibility_verified,
+                "match_score": offer.match_score,
+                "selection": selection,
+                "point": float(offer.point),
+                "price": float(offer.price),
+                "provider": offer.provider,
+                "provider_key": offer.provider_key,
+                "provider_last_update": offer.provider_last_update,
+                "event_link": offer.event_link,
+                "market_link": offer.market_link,
+                "bet_link": offer.bet_link,
+                "edge_points": edge,
+                "edge_standardized": edge / uncertainty,
+                "model_cover_probability": probability,
+                "model_fair_price": _fair_american(probability),
+                "expected_value_per_unit": expected_value,
+            }
+        )
+    return candidates
+
+
 def compare_priced_offers(
     projections: pd.DataFrame, offers: pd.DataFrame
 ) -> pd.DataFrame:
+    from backend.recommendations import build_recommendations
+
+    decisions = build_recommendations(projections, offers)
+    recommended = {
+        game_id: group.sort_values("expected_value_per_unit", ascending=False).iloc[0]
+        for game_id, group in decisions[decisions["status"].eq("recommended")].groupby(
+            "game_id"
+        )
+    }
     rows = []
+    offer_groups = {game_id: group for game_id, group in offers.groupby("game_id")}
     for projection in projections.itertuples():
-        game_offers = offers[offers["game_id"].eq(projection.game_id)].dropna(
+        game_offers = offer_groups.get(projection.game_id, offers.iloc[:0]).dropna(
             subset=["point"]
         )
         priced = game_offers.dropna(subset=["price"])
-        eligible = priced[priced["execution_eligibility_verified"].astype(bool)]
+        eligible = priced[priced["execution_eligibility_verified"].eq(True)]
         executable = not eligible.empty
-        candidate_offers = eligible if executable else priced
-        candidates = []
-        for offer in candidate_offers.itertuples():
-            if offer.price == 0:
-                continue
-            if offer.market == "spreads" and offer.selection == "home":
-                edge = projection.home_margin + offer.point
-                selection = projection.home_team
-            elif offer.market == "spreads" and offer.selection == "away":
-                edge = -projection.home_margin + offer.point
-                selection = projection.away_team
-            elif offer.market == "totals" and offer.selection == "over":
-                edge = projection.model_total - offer.point
-                selection = "Over"
-            elif offer.market == "totals" and offer.selection == "under":
-                edge = offer.point - projection.model_total
-                selection = "Under"
-            else:
-                continue
-            uncertainty = (
-                projection.margin_sd
-                if offer.market == "spreads"
-                else projection.total_sd
-            )
-            probability = float(
-                marginal_cdf(
-                    edge,
-                    uncertainty,
-                    projection.degrees_of_freedom,
-                )
-            )
-            expected_value = probability * _american_profit(float(offer.price)) - (
-                1.0 - probability
-            )
-            candidates.append(
-                {
-                    "market": offer.market,
-                    "selection": selection,
-                    "point": float(offer.point),
-                    "price": float(offer.price),
-                    "provider": offer.provider,
-                    "provider_key": offer.provider_key,
-                    "provider_last_update": offer.provider_last_update,
-                    "event_link": offer.event_link,
-                    "market_link": offer.market_link,
-                    "bet_link": offer.bet_link,
-                    "edge_points": edge,
-                    "edge_standardized": edge / uncertainty,
-                    "model_cover_probability": probability,
-                    "model_fair_price": _fair_american(probability),
-                    "expected_value_per_unit": expected_value,
-                }
-            )
+        candidates = priced_candidates(projection, eligible if executable else priced)
         row = {
             "game_id": projection.game_id,
             "start_date": projection.start_date,
@@ -249,9 +289,43 @@ def compare_priced_offers(
             "priced_offer_available": bool(candidates),
             "executable_offer_available": executable,
         }
+        decision = recommended.get(projection.game_id)
         if candidates:
             best = max(candidates, key=lambda item: item["expected_value_per_unit"])
-            row.update({f"best_offer_{key}": value for key, value in best.items()})
+            if decision is not None:
+                matching = [
+                    c
+                    for c in candidates
+                    if c["market"] == decision.market
+                    and c["side"] == decision.side
+                    and c["point"] == decision.point
+                    and c["price"] == decision.price
+                    and c["provider_key"] == decision.provider_key
+                ]
+                if matching:
+                    best = matching[0].copy()
+                    best["expected_value_per_unit"] = decision.expected_value_per_unit
+                    best["model_cover_probability"] = decision.win_probability
+                    best["model_fair_price"] = _fair_american(
+                        decision.win_probability / (1 - decision.push_probability)
+                    )
+                else:
+                    decision = None
+            row.update(
+                {
+                    f"best_offer_{key}": value
+                    for key, value in best.items()
+                    if key
+                    not in {
+                        "side",
+                        "market_fetched_at",
+                        "execution_eligibility_verified",
+                        "match_score",
+                        "odds_api_event_id",
+                        "provider_start_date",
+                    }
+                }
+            )
             row["review_status"] = (
                 "requires_current_source_review"
                 if best["edge_points"] >= 4.0 and best["expected_value_per_unit"] > 0
@@ -259,7 +333,9 @@ def compare_priced_offers(
             )
         else:
             row["review_status"] = "no_priced_offer"
-        row["recommendation_status"] = "not_recommended"
+        row["recommendation_status"] = (
+            "recommended" if decision is not None else "not_recommended"
+        )
         rows.append(row)
     comparisons = pd.DataFrame(rows)
     if "best_offer_expected_value_per_unit" not in comparisons:
