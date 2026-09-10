@@ -7,7 +7,7 @@ import pandas as pd
 
 from backend.model.outputs import GameProjection, TeamRating
 
-MODEL_VERSION = "joint_scoring_v8"
+MODEL_VERSION = "joint_scoring_v9"
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
 MAX_POOL_ITERATIONS = 50
@@ -78,9 +78,17 @@ class JointScoringConfig:
 # calibrated (0.96). Correlating offense and defense at 0.5 and tightening the
 # pace prior to one possession moved the total slope to 0.88 and cut total MAE
 # from 13.37 to 13.11 with margin MAE unchanged (12.85 to 12.84).
+# joint_scoring_v9: with the pool, crossover and tempo terms in place the
+# strength prior that forecasts best moved from 0.45 to 0.40 PPP (FBS cohort
+# joint log loss 8.4528 to 8.4518 on 2020 through 2022 and 8.3940 to 8.3918
+# on 2023 through 2025), and the looser prior was over-rating teams that
+# started strong: same-tier favourites of 14 or more points fell 1.4 points
+# short of the model at 0.45 and 0.7 at 0.40. Teams with preseason ratings
+# carry their own prior SD (6.05 points, about 0.36 PPP with complete
+# inputs), so this value governs the research paths and teams without one.
 DEFAULT_CONFIG = JointScoringConfig(
     rating_half_life_weeks=float("inf"),
-    strength_prior_sd_ppp=0.45,
+    strength_prior_sd_ppp=0.40,
     covariance_shrinkage=0.8,
     student_t_degrees_of_freedom=500.0,
     score_covariance_scale=1.125,
