@@ -286,6 +286,12 @@ def _add_market_commands(sub) -> None:
 
 
 def _add_publish_commands(sub) -> None:
+    refresh = sub.add_parser(
+        "refresh-picks",
+        help="re-decide a published week's picks from fresh sportsbook prices",
+    )
+    refresh.add_argument("--season", type=int, required=True)
+    refresh.add_argument("--week", type=int, required=True)
     publish = sub.add_parser(
         "publish", help="publish serving tables to the cfb Supabase schema"
     )

@@ -35,6 +35,7 @@ from backend.commands.publishing import (
     handle_fetch_anchors,
     handle_publish,
     handle_publish_anchors,
+    handle_refresh_picks,
 )
 from backend.commands.serving import (
     handle_serve_game,
@@ -65,6 +66,7 @@ HANDLERS: dict[str, Handler] = {
     "live-replay": handle_live_replay,
     "publish": handle_publish,
     "publish-anchors": handle_publish_anchors,
+    "refresh-picks": handle_refresh_picks,
     "fetch-anchors": handle_fetch_anchors,
     "grade": handle_grade,
     "publish-grading": handle_publish_grading,

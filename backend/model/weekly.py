@@ -268,7 +268,7 @@ def _decorate_outputs(
     return ratings, projections
 
 
-def _odds_frames(odds_client, target: pd.DataFrame):
+def odds_frames(odds_client, target: pd.DataFrame):
     if odds_client is None:
         events = pd.DataFrame()
         offers, matches = flatten_odds_api_offers(events, target)
@@ -336,7 +336,7 @@ def run_weekly_forecast(
     unit_ratings["source_season"] = season
     unit_ratings["unit_history_missing"] = False
 
-    odds_events, offers, matches, snapshot = _odds_frames(odds_client, target)
+    odds_events, offers, matches, snapshot = odds_frames(odds_client, target)
     priced_spreads = offers[offers["market"].eq("spreads") & offers["point"].notna()]
     if require_market and priced_spreads.empty:
         raise ValueError(

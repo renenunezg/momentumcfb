@@ -5,13 +5,27 @@ from math import ceil, floor
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import brentq
 
 from backend.model.distributions import marginal_cdf
 from backend.model.market_blend import DEFAULT_MARKET_WEIGHT
 from backend.odds.markets import _american_profit, priced_candidates
 
-POLICY_VERSION = "cfb-picks-v4"
-MIN_PROBABILITY_EDGE = 0.045
+POLICY_VERSION = "cfb-picks-v5"
+# Minimum points the priced line must sit beyond the offered price's
+# break-even line. Measured in margin or total points, the same yardstick for
+# favourites and underdogs, so a mispriced tail cannot clear the gate on one
+# side only. A versioned starting policy, not a fit to live-season outcomes.
+MIN_EDGE_POINTS = 2.0
+# Dispersion of actual results around the priced (market-informed) line, from
+# the chronological calibration replay of 2021 through 2025 (3,208 games with
+# a closing spread and total). The pure model's predictive spread includes
+# rating uncertainty the market blend has already removed, and its 17 to 18
+# point width overstated every underdog's win probability. The market
+# residual is the honest width for a line that is half market.
+PRICING_MARGIN_SD = 15.35
+PRICING_TOTAL_SD = 15.93
+EDGE_SEARCH_POINTS = 200.0
 MAX_OFFER_AGE = pd.Timedelta(hours=1)
 MAX_FORECAST_AGE = pd.Timedelta(days=7)
 MARKETS = ("h2h", "spreads", "totals")
@@ -45,6 +59,7 @@ RECOMMENDATION_COLUMNS = [
     "win_probability",
     "push_probability",
     "probability_edge",
+    "edge_points",
     "expected_value_per_unit",
     "stake_units",
     "model_home_margin",
@@ -70,41 +85,70 @@ def _timestamp(value):
     return pd.to_datetime(value, utc=True, errors="coerce")
 
 
+def _win_loss(mean, sd, df, offer):
+    """Win and loss probabilities for the bettor's side of an offer.
+
+    ``mean`` is the priced home margin for sides or the priced total for
+    totals. Half-point lines keep the original CDF. Integer lines reserve the
+    mass between the adjacent half points for a returned stake.
+    """
+    home_side = offer["side"] in ("home", "over")
+    if offer["market"] == "h2h":
+        win = float(marginal_cdf(mean if home_side else -mean, sd, df))
+        return win, 1.0 - win
+    point = offer["point"]
+    if offer["market"] == "spreads":
+        mean = mean if home_side else -mean
+        threshold = -point
+    else:
+        threshold = point
+    win = float(marginal_cdf(mean - floor(threshold) - 0.5, sd, df))
+    loss = float(marginal_cdf(ceil(threshold) - 0.5 - mean, sd, df))
+    return (loss, win) if offer["side"] == "under" else (win, loss)
+
+
+def _priced_mean_sd(projection, offer):
+    if offer["market"] == "totals":
+        return projection.model_total, projection.total_sd
+    return projection.market_informed_home_margin, projection.margin_sd
+
+
 def _probabilities(projection, offer):
     """Round the frozen continuous marginal to integer scores, retaining pushes.
 
     Sides use the market-informed margin (pure model shrunk toward the
     pre-decision consensus spread). Totals use the model total shrunk toward
     the median posted total across the decision-time offers, supplied on the
-    projection.
-    Half-point lines keep the original CDF. Integer lines reserve the mass
-    between the adjacent half points for a returned stake.
+    projection. Both are priced with the dispersion stored on the projection.
     """
+    mean, sd = _priced_mean_sd(projection, offer)
+    win, loss = _win_loss(mean, sd, projection.degrees_of_freedom, offer)
     if offer["market"] == "h2h":
-        mean = projection.market_informed_home_margin * (
-            1 if offer["side"] == "home" else -1
-        )
-        win = float(
-            marginal_cdf(mean, projection.margin_sd, projection.degrees_of_freedom)
-        )
-        return win, 0.0, 1.0 - win
-    point = offer["point"]
-    if offer["market"] == "spreads":
-        mean = projection.market_informed_home_margin * (
-            1 if offer["side"] == "home" else -1
-        )
-        threshold = -point
-        sd = projection.margin_sd
-    else:
-        mean = projection.model_total
-        threshold = point
-        sd = projection.total_sd
-    df = projection.degrees_of_freedom
-    win = float(marginal_cdf(mean - floor(threshold) - 0.5, sd, df))
-    loss = float(marginal_cdf(ceil(threshold) - 0.5 - mean, sd, df))
-    if offer["side"] == "under":
-        win, loss = loss, win
+        return win, 0.0, loss
     return win, max(0.0, 1.0 - win - loss), loss
+
+
+def _edge_points(projection, offer, implied):
+    """Points the priced line must move against the pick before its no-push
+    win probability falls to the price's break-even probability.
+
+    Positive favours the pick. The same shift is required of a favourite and
+    an underdog, unlike a probability gap, which is largest where the density
+    is highest and is then multiplied by the payout in expected value.
+    """
+    mean, sd = _priced_mean_sd(projection, offer)
+    direction = 1.0 if offer["side"] in ("home", "over") else -1.0
+
+    def gap(delta):
+        win, loss = _win_loss(
+            mean - direction * delta, sd, projection.degrees_of_freedom, offer
+        )
+        return win / (win + loss) - implied
+
+    try:
+        return float(brentq(gap, -EDGE_SEARCH_POINTS, EDGE_SEARCH_POINTS))
+    except ValueError:
+        return float("nan")
 
 
 def _offer_reason(offer, paired, now, start):
@@ -168,11 +212,14 @@ def build_recommendations(projections, offers, *, decision_at=None):
     Sides use the market-informed margin and totals the model total blended
     toward the median posted total, so every edge is measured after shrinking
     toward the market being bet into. Each pick records that market total.
-    Historical calibration
-    is diagnostic and never gates forward recommendations or replaces their
-    probabilities. The 4.5 percentage-point gate is a versioned starting
-    policy, not a fit to live-season outcomes. Stakes are always one unit,
-    with no compounding.
+    Both are priced with the empirical dispersion around that blended line,
+    not the pure model's wider predictive spread. An offer qualifies when the
+    priced line sits at least MIN_EDGE_POINTS beyond the price's break-even
+    line and expected value is positive; the best offer per market is the one
+    with the most points of edge, never the largest payout. Historical
+    calibration is diagnostic and never gates forward recommendations or
+    replaces their probabilities. Stakes are always one unit, with no
+    compounding.
     """
     now = _timestamp(decision_at or datetime.now(timezone.utc))
     groups = {game_id: group for game_id, group in offers.groupby("game_id")}
@@ -201,9 +248,11 @@ def build_recommendations(projections, offers, *, decision_at=None):
         )
         candidates = priced_candidates(projection, game_offers)
         market_total = _consensus_total(game_offers)
-        priced_projection = projection
+        priced_projection = projection._replace(
+            margin_sd=PRICING_MARGIN_SD, total_sd=PRICING_TOTAL_SD
+        )
         if np.isfinite(market_total) and np.isfinite(projection.model_total):
-            priced_projection = projection._replace(
+            priced_projection = priced_projection._replace(
                 model_total=(1.0 - DEFAULT_MARKET_WEIGHT) * projection.model_total
                 + DEFAULT_MARKET_WEIGHT * market_total
             )
@@ -221,8 +270,6 @@ def build_recommendations(projections, offers, *, decision_at=None):
                     "home_missing_input_count",
                     "away_missing_input_count",
                     "model_total",
-                    "margin_sd",
-                    "total_sd",
                     "degrees_of_freedom",
                 )
             }
@@ -237,6 +284,8 @@ def build_recommendations(projections, offers, *, decision_at=None):
                 model_home_margin=projection.market_informed_home_margin,
                 model_total=priced_projection.model_total,
                 market_total=market_total if np.isfinite(market_total) else None,
+                margin_sd=priced_projection.margin_sd,
+                total_sd=priced_projection.total_sd,
             )
             priced = [c for c in candidates if c["market"] == market]
             evaluated = []
@@ -247,21 +296,23 @@ def build_recommendations(projections, offers, *, decision_at=None):
                     continue
                 win, push, loss = _probabilities(priced_projection, candidate)
                 profit = _american_profit(candidate["price"])
-                edge = win / (win + loss) - 1 / (profit + 1)
+                implied = 1 / (profit + 1)
+                edge = win / (win + loss) - implied
                 ev = win * profit - loss
+                points = _edge_points(priced_projection, candidate, implied)
                 block = reason or _offer_reason(candidate, priced, now, start)
                 if (
-                    not np.isfinite([win, push, loss, edge, ev]).all()
+                    not np.isfinite([win, push, loss, edge, ev, points]).all()
                     or not 0 < win < 1
                     or loss <= 0
                 ):
                     block = "invalid_probability"
-                if block is None and (edge < MIN_PROBABILITY_EDGE or ev <= 0):
+                if block is None and (points < MIN_EDGE_POINTS or ev <= 0):
                     block = "below_edge_threshold"
-                evaluated.append((block, ev, candidate, win, push, edge))
-            # A blocked high EV offer must never hide a qualifying lower EV offer.
+                evaluated.append((block, points, candidate, win, push, edge, ev))
+            # A blocked offer must never hide a qualifying offer with less edge.
             if evaluated:
-                block, ev, best, win, push, edge = max(
+                block, points, best, win, push, edge, ev = max(
                     evaluated,
                     key=lambda item: (
                         item[0] is None,
@@ -287,6 +338,7 @@ def build_recommendations(projections, offers, *, decision_at=None):
                     win_probability=win,
                     push_probability=push,
                     probability_edge=edge,
+                    edge_points=points,
                     expected_value_per_unit=ev,
                     status="recommended" if block is None else "no_play",
                     reason=block or "qualifying_edge",
