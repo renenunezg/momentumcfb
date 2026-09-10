@@ -333,7 +333,9 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
     assert spread.loc[1, "closing_point"] == -6 and spread.loc[1, "clv_points"] == 3
     assert spread.loc[3, "closing_point"] == -1 and spread.loc[3, "clv_points"] == -2
     assert spread.loc[1, "closing_source"] == "cfbd_lines_median"
-    assert spread.loc[2, "closing_source"] is None and pd.isna(spread.loc[2, "clv_points"])
+    assert spread.loc[2, "closing_source"] is None and pd.isna(
+        spread.loc[2, "clv_points"]
+    )
     assert spread.loc[1, "outcome"] == "win"
     assert spread.loc[1, "profit_units"] == pytest.approx(100 / 110)
     assert spread.loc[2, "outcome"] == "push" and spread.loc[2, "profit_units"] == 0

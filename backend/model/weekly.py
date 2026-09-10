@@ -10,8 +10,8 @@ from backend.features.scoring import (
     build_weekly_scoring_games,
     load_scoring_team_games,
 )
-from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.availability import apply_qb_availability, pregame_qb_outs
+from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.market_blend import add_market_informed_margins
 from backend.model.preseason import (
     MISSING_INPUT_COLUMNS,

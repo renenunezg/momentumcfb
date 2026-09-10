@@ -30,6 +30,7 @@ from backend.commands.players import (
     handle_ingest_players,
     handle_player_values,
     handle_publish_players,
+    handle_qb_starters,
 )
 from backend.commands.publishing import (
     handle_fetch_anchors,
@@ -47,6 +48,7 @@ Handler = Callable[[Namespace], None]
 
 HANDLERS: dict[str, Handler] = {
     "ingest": handle_ingest,
+    "qb-starters": handle_qb_starters,
     "features": handle_features,
     "fit": handle_fit,
     "weekly-update": handle_weekly_update,
