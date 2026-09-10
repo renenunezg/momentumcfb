@@ -7,7 +7,7 @@ import pandas as pd
 
 from backend.model.outputs import GameProjection, TeamRating
 
-MODEL_VERSION = "joint_scoring_v6"
+MODEL_VERSION = "joint_scoring_v7"
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
 MAX_POOL_ITERATIONS = 50
@@ -31,6 +31,18 @@ class JointScoringConfig:
     # ridge is identified only through each team's own games, so a loose
     # prior lets sample noise reach the projected total.
     pace_prior_sd: float = 1.0
+    # Prior SD in PPP of a conference pool's shift from the level its teams'
+    # priors imply (FCS is one pool). Crossover games identify the shift, so
+    # a pool can move as a block instead of every team being shrunk toward a
+    # stale level. Zero disables the pool parameters.
+    pool_prior_sd_ppp: float = 0.0
+    # Prior SD in PPP per side of the extra points the FBS side scores in an
+    # FBS versus FCS game beyond what the ratings predict. Ratings are fitted
+    # to a blend of points and competitive-possession EPA, which discounts
+    # garbage-time scoring, and crossover games carry far more of it than the
+    # blend allows. The term is estimated from points residuals on those games
+    # and shrunk toward zero with this prior. Zero disables it.
+    crossover_prior_sd_ppp: float = 0.0
 
     def __post_init__(self) -> None:
         if isnan(self.rating_half_life_weeks) or self.rating_half_life_weeks <= 0:
@@ -53,6 +65,10 @@ class JointScoringConfig:
             raise ValueError("strength_prior_correlation must be inside (-1, 1)")
         if not isfinite(self.pace_prior_sd) or self.pace_prior_sd <= 0:
             raise ValueError("pace_prior_sd must be positive")
+        if not isfinite(self.pool_prior_sd_ppp) or self.pool_prior_sd_ppp < 0:
+            raise ValueError("pool_prior_sd_ppp must be finite and not negative")
+        if not isfinite(self.crossover_prior_sd_ppp) or self.crossover_prior_sd_ppp < 0:
+            raise ValueError("crossover_prior_sd_ppp must be finite and not negative")
 
 
 # joint_scoring_v6: on the 2020 through 2025 historical-carryover walk-forward
@@ -69,6 +85,13 @@ DEFAULT_CONFIG = JointScoringConfig(
     score_covariance_scale=1.125,
     strength_prior_correlation=0.5,
     pace_prior_sd=1.0,
+    # joint_scoring_v7: on the same walk-forward extended to every regular
+    # season Division I game with a closing line (6,403 games), conference
+    # pool shifts and the crossover term cut the FBS over FCS bias from +6.1
+    # to +2.1 points (+1.2 from week 4) and the Power Five over Group of Five
+    # bias from +3.1 to +1.7, leaving same-tier FBS games unchanged.
+    pool_prior_sd_ppp=0.2,
+    crossover_prior_sd_ppp=0.3,
 )
 
 
@@ -228,8 +251,17 @@ def _team_catalog(games: pd.DataFrame) -> pd.DataFrame:
             "away_classification": "classification",
         }
     )
+    for side, frame in (("home", home), ("away", away)):
+        column = f"{side}_conference"
+        frame["conference"] = games[column].to_numpy() if column in games else None
     catalog = pd.concat([home, away], ignore_index=True).drop_duplicates(
         ["team_id", "team"]
+    )
+    classification = catalog["classification"].fillna("").str.lower()
+    catalog["pool"] = np.where(
+        classification.eq("fbs"),
+        catalog["conference"].fillna("FBS Independents"),
+        classification.where(classification.ne(""), "unknown"),
     )
     duplicate_ids = catalog.groupby("team_id")["team"].nunique()
     duplicate_names = catalog.groupby("team")["team_id"].nunique()
@@ -250,6 +282,7 @@ class JointScoringFit:
     base_ppp: float
     base_possessions: float
     hfa_ppp: float
+    crossover_ppp: float
     parameter_covariance: np.ndarray
     score_residual_covariance: np.ndarray
     config: JointScoringConfig
@@ -295,6 +328,7 @@ class JointScoringFit:
         projections = []
         index = self.team_index
         n_teams = len(self.teams)
+        fbs = self.teams["classification"].fillna("").str.lower().eq("fbs").to_numpy()
         for game in schedule.itertuples():
             home = index[int(game.home_team_id)]
             away = index[int(game.away_team_id)]
@@ -313,8 +347,13 @@ class JointScoringFit:
             away_strength = self.base_possessions * (
                 self.offense_ppp[away] - self.defense_ppp[home]
             )
-            expected_home = base_points + home_strength + 0.5 * home_field
-            expected_away = base_points + away_strength - 0.5 * home_field
+            crossover = (
+                self.base_possessions
+                * self.crossover_ppp
+                * (float(fbs[home]) - float(fbs[away]))
+            )
+            expected_home = base_points + home_strength + 0.5 * home_field + crossover
+            expected_away = base_points + away_strength - 0.5 * home_field - crossover
 
             score_design = np.zeros((2, 2 * n_teams + 1))
             score_design[0, home] = self.base_possessions
@@ -411,7 +450,18 @@ def fit_joint_scoring(
     }
     n_teams = len(catalog)
     n_games = len(training)
-    design = np.zeros((2 * n_games, 2 * n_teams + 1))
+    pools = catalog["pool"].astype("category") if config.pool_prior_sd_ppp else None
+    pool_of = (
+        np.zeros(n_teams, dtype=int)
+        if pools is None
+        else pools.cat.codes.to_numpy().astype(int)
+    )
+    n_pools = 0 if pools is None else len(pools.cat.categories)
+    n_strength = 2 * n_teams + 2 * n_pools
+    classifications = catalog["classification"].fillna("").str.lower()
+    fbs_mask = classifications.eq("fbs").to_numpy()
+    fcs_mask = classifications.eq("fcs").to_numpy()
+    design = np.zeros((2 * n_games, n_strength + 1))
     points_per_possession = np.empty(2 * n_games)
     epa_per_possession = np.empty(2 * n_games)
     latest_week = int(training["model_week"].max())
@@ -426,6 +476,11 @@ def fit_joint_scoring(
         design[home_row, n_teams + away] = -1.0
         design[away_row, away] = 1.0
         design[away_row, n_teams + home] = -1.0
+        if n_pools:
+            design[home_row, 2 * n_teams + pool_of[home]] = 1.0
+            design[home_row, 2 * n_teams + n_pools + pool_of[away]] = -1.0
+            design[away_row, 2 * n_teams + pool_of[away]] = 1.0
+            design[away_row, 2 * n_teams + n_pools + pool_of[home]] = -1.0
         if not bool(game.neutral_site):
             design[home_row, -1] = 0.5
             design[away_row, -1] = -0.5
@@ -463,7 +518,7 @@ def fit_joint_scoring(
         if priors is not None
         else float(np.average(training["game_possessions"]))
     )
-    prior_mean = np.zeros(2 * n_teams + 1)
+    prior_mean = np.zeros(n_strength + 1)
     teams_with_priors: np.ndarray = np.zeros(n_teams, dtype=bool)
     if strength_prior_means:
         for team_id, (offense_prior, defense_prior) in strength_prior_means.items():
@@ -473,7 +528,8 @@ def fit_joint_scoring(
                 prior_mean[n_teams + index] = defense_prior
                 teams_with_priors[index] = True
     prior_mean[-1] = HFA_PRIOR_POINTS / base_possessions
-    prior_sd = np.full(2 * n_teams + 1, config.strength_prior_sd_ppp)
+    prior_sd = np.full(n_strength + 1, config.strength_prior_sd_ppp)
+    prior_sd[2 * n_teams : n_strength] = config.pool_prior_sd_ppp or 1.0
     if priors is not None:
         for team_id, (offense_sd, defense_sd) in priors.strength_sds.items():
             index = team_index.get(team_id)
@@ -487,9 +543,6 @@ def fit_joint_scoring(
     parameters, covariance = _solve_ridge(
         design, target, recency, prior_mean, prior_sd, prior_precision
     )
-    classifications = catalog["classification"].fillna("").str.lower()
-    fbs_mask = classifications.eq("fbs").to_numpy()
-    fcs_mask = classifications.eq("fcs").to_numpy()
     missing_fcs_indices = (
         np.flatnonzero(fcs_mask & ~teams_with_priors)
         if fbs_mask.any()
@@ -542,6 +595,14 @@ def fit_joint_scoring(
             design, target, recency * information, prior_mean, prior_sd, prior_precision
         )
 
+    fold = np.zeros((2 * n_teams + 1, n_strength + 1))
+    fold[np.arange(2 * n_teams), np.arange(2 * n_teams)] = 1.0
+    if n_pools:
+        fold[np.arange(n_teams), 2 * n_teams + pool_of] = 1.0
+        fold[n_teams + np.arange(n_teams), 2 * n_teams + n_pools + pool_of] = 1.0
+    fold[-1, -1] = 1.0
+    parameters = fold @ parameters
+    covariance = fold @ covariance @ fold.T
     offense = parameters[:n_teams]
     defense = parameters[n_teams : 2 * n_teams]
     center_mask = fbs_mask if fbs_mask.any() else np.ones(n_teams, dtype=bool)
@@ -598,11 +659,35 @@ def fit_joint_scoring(
         + base_possessions * (offense[away_index] - defense[home_index])
         - 0.5 * hfa_points * home_field
     )
+    actual_home = training["home_points"].to_numpy(float)
+    actual_away = training["away_points"].to_numpy(float)
+    crossover_ppp = 0.0
+    crossover_side = fbs_mask[home_index].astype(float) - fbs_mask[away_index].astype(
+        float
+    )
+    if config.crossover_prior_sd_ppp and crossover_side.any():
+        # Points the FBS side beat the rating margin by, per side and possession,
+        # shrunk toward zero by the ratio of game noise to the prior variance.
+        game_weights = recency[::2]
+        margin_residual = (actual_home - predicted_home) - (
+            actual_away - predicted_away
+        )
+        residual_ppp = crossover_side * margin_residual / (2.0 * base_possessions)
+        noise = float(np.average(np.square(margin_residual), weights=game_weights))
+        noise_ppp = noise / (2.0 * base_possessions) ** 2
+        crossover_rows = crossover_side != 0
+        crossover_ppp = float(
+            np.sum(game_weights[crossover_rows] * residual_ppp[crossover_rows])
+            / (
+                np.sum(game_weights[crossover_rows])
+                + noise_ppp / config.crossover_prior_sd_ppp**2
+            )
+        )
+        crossover_points = base_possessions * crossover_ppp * crossover_side
+        predicted_home = predicted_home + crossover_points
+        predicted_away = predicted_away - crossover_points
     score_residuals = np.column_stack(
-        [
-            training["home_points"].to_numpy(float) - predicted_home,
-            training["away_points"].to_numpy(float) - predicted_away,
-        ]
+        [actual_home - predicted_home, actual_away - predicted_away]
     )
     if n_games < 2:
         if priors is None or priors.score_noise_covariance is None:
@@ -636,6 +721,7 @@ def fit_joint_scoring(
         base_ppp=base_ppp,
         base_possessions=base_possessions,
         hfa_ppp=float(parameters[-1]),
+        crossover_ppp=crossover_ppp,
         parameter_covariance=covariance,
         score_residual_covariance=score_covariance,
         config=config,

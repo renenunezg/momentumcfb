@@ -129,7 +129,9 @@ def _config_id(config: JointScoringConfig) -> str:
         f"df={config.student_t_degrees_of_freedom:g};"
         f"covariance_scale={config.score_covariance_scale:g};"
         f"prior_correlation={config.strength_prior_correlation:g};"
-        f"pace_prior_sd={config.pace_prior_sd:g}"
+        f"pace_prior_sd={config.pace_prior_sd:g};"
+        f"pool_prior_sd={config.pool_prior_sd_ppp:g};"
+        f"crossover_prior_sd={config.crossover_prior_sd_ppp:g}"
     )
 
 
@@ -328,6 +330,8 @@ def walk_forward_season(
         projected["score_covariance_scale"] = config.score_covariance_scale
         projected["strength_prior_correlation"] = config.strength_prior_correlation
         projected["pace_prior_sd"] = config.pace_prior_sd
+        projected["pool_prior_sd_ppp"] = config.pool_prior_sd_ppp
+        projected["crossover_prior_sd_ppp"] = config.crossover_prior_sd_ppp
 
         projected["actual_margin"] = (
             projected["actual_home_points"] - projected["actual_away_points"]
@@ -570,6 +574,8 @@ def _candidate_row(
         "score_covariance_scale": config.score_covariance_scale,
         "strength_prior_correlation": config.strength_prior_correlation,
         "pace_prior_sd": config.pace_prior_sd,
+        "pool_prior_sd_ppp": config.pool_prior_sd_ppp,
+        "crossover_prior_sd_ppp": config.crossover_prior_sd_ppp,
         "n_games": len(predictions),
         "mean_nll": float(predictions["joint_margin_total_nll"].mean()),
         "mean_score_nll": float(
@@ -606,6 +612,8 @@ def _invalid_candidate_row(
         "score_covariance_scale": config.score_covariance_scale,
         "strength_prior_correlation": config.strength_prior_correlation,
         "pace_prior_sd": config.pace_prior_sd,
+        "pool_prior_sd_ppp": config.pool_prior_sd_ppp,
+        "crossover_prior_sd_ppp": config.crossover_prior_sd_ppp,
         "n_games": 0,
         "mean_nll": np.inf,
         "mean_score_nll": np.inf,
@@ -737,6 +745,8 @@ def run_calibration(
         score_covariance_scale=float(selected_row["score_covariance_scale"]),
         strength_prior_correlation=float(selected_row["strength_prior_correlation"]),
         pace_prior_sd=float(selected_row["pace_prior_sd"]),
+        pool_prior_sd_ppp=float(selected_row["pool_prior_sd_ppp"]),
+        crossover_prior_sd_ppp=float(selected_row["crossover_prior_sd_ppp"]),
     )
     if progress is not None:
         progress(f"selected {_config_id(selected_config)} on development loss")
