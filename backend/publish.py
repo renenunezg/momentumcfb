@@ -106,6 +106,9 @@ GAME_PROJECTIONS_COLUMNS = [
     "home_missing_input_count",
     "away_missing_input_count",
     "conference_game",
+    "home_qb_out",
+    "away_qb_out",
+    "qb_availability_points",
 ]
 
 GAME_PROJECTIONS_OPTIONAL_COLUMNS = [
@@ -814,6 +817,22 @@ def _publish_recommendations(conn, decisions):
         ),
         rows.to_dict("records"),
     )
+
+
+def fetch_qb_availability(season):
+    """Explicit quarterback availability reports for a season; see
+    backend.model.availability for how they enter a forecast."""
+    from backend.db import engine
+
+    with engine.connect() as conn:
+        return pd.read_sql_query(
+            text(
+                f"SELECT season, week, team, player, status, source, reported_at "
+                f"FROM {CFB_SCHEMA}.qb_availability WHERE season = :s"
+            ),
+            conn,
+            params={"s": season},
+        )
 
 
 def fetch_recommendations(season):
