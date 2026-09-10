@@ -11,7 +11,7 @@ from backend.model.distributions import marginal_cdf
 from backend.model.market_blend import DEFAULT_MARKET_WEIGHT
 from backend.odds.markets import _american_profit, priced_candidates
 
-POLICY_VERSION = "cfb-picks-v5"
+POLICY_VERSION = "cfb-picks-v6"
 # Minimum points the priced line must sit beyond the offered price's
 # break-even line. Measured in margin or total points, the same yardstick for
 # favourites and underdogs, so a mispriced tail cannot clear the gate on one
@@ -25,6 +25,23 @@ MIN_EDGE_POINTS = 2.0
 # residual is the honest width for a line that is half market.
 PRICING_MARGIN_SD = 15.35
 PRICING_TOTAL_SD = 15.93
+# Weight of the pure model in the margin that prices a moneyline. The
+# half-market blend that prices spreads is a product line that keeps model
+# opinion; for winning outright it is not calibrated. On the 2021 through
+# 2025 chronological replay (3,481 games with a closing spread) the probit fit
+# of the outcome on close + w * (model - close) gives w = 0.04 with se 0.05,
+# and the held-out 2024 to 2025 log loss is lowest near 0.2 (0.5317 against
+# 0.5338 at 0.5). No curve shape beat the fixed-sd normal out of sample, so
+# only the location changes. 0.2 is the most model opinion the held-out
+# seasons support; 0.5 priced moneyline picks 8 to 9 points above their
+# realised win rate.
+H2H_MODEL_WEIGHT = 0.2
+# Minimum recommended picks per decision batch (one model week). When the
+# edge gate leaves fewer, the highest-edge positive-EV offers are promoted
+# and recorded with FLOOR_REASON so the ledger separates gate picks from
+# floor picks. A product volume choice, not a calibration result.
+VOLUME_FLOOR = 15
+FLOOR_REASON = "volume_floor"
 EDGE_SEARCH_POINTS = 200.0
 MAX_OFFER_AGE = pd.Timedelta(hours=1)
 MAX_FORECAST_AGE = pd.Timedelta(days=7)
@@ -110,7 +127,30 @@ def _win_loss(mean, sd, df, offer):
 def _priced_mean_sd(projection, offer):
     if offer["market"] == "totals":
         return projection.model_total, projection.total_sd
+    if offer["market"] == "h2h":
+        return projection.h2h_home_margin, projection.margin_sd
     return projection.market_informed_home_margin, projection.margin_sd
+
+
+def _h2h_home_margins(projections):
+    """Consensus market margin moved H2H_MODEL_WEIGHT of the way to the pure
+    model, or NaN without a posted spread so a moneyline is never priced from
+    the pure model alone."""
+    if "market_home_spread" not in projections:
+        return np.full(len(projections), np.nan)
+    spread = pd.to_numeric(projections["market_home_spread"], errors="coerce")
+    pure = pd.to_numeric(
+        projections["pure_home_margin"]
+        if "pure_home_margin" in projections
+        else projections["home_margin"],
+        errors="coerce",
+    )
+    market = -spread
+    return np.where(
+        spread.notna() & pure.notna(),
+        market + H2H_MODEL_WEIGHT * (pure - market),
+        np.nan,
+    )
 
 
 def _probabilities(projection, offer):
@@ -212,16 +252,20 @@ def build_recommendations(projections, offers, *, decision_at=None):
     Sides use the market-informed margin and totals the model total blended
     toward the median posted total, so every edge is measured after shrinking
     toward the market being bet into. Each pick records that market total.
-    Both are priced with the empirical dispersion around that blended line,
-    not the pure model's wider predictive spread. An offer qualifies when the
-    priced line sits at least MIN_EDGE_POINTS beyond the price's break-even
-    line and expected value is positive; the best offer per market is the one
-    with the most points of edge, never the largest payout. Historical
-    calibration is diagnostic and never gates forward recommendations or
-    replaces their probabilities. Stakes are always one unit, with no
-    compounding.
+    Moneylines are priced from the consensus market margin moved
+    H2H_MODEL_WEIGHT toward the pure model. Everything is priced with the
+    empirical dispersion around the priced line, not the pure model's wider
+    predictive spread. An offer qualifies when the priced line sits at least
+    MIN_EDGE_POINTS beyond the price's break-even line and expected value is
+    positive; the best offer per market is the one with the most points of
+    edge, never the largest payout. If fewer than VOLUME_FLOOR picks qualify
+    in the batch, the highest-edge positive-EV offers are promoted with
+    FLOOR_REASON. Historical calibration is diagnostic and never gates
+    forward recommendations or replaces their probabilities. Stakes are
+    always one unit, with no compounding.
     """
     now = _timestamp(decision_at or datetime.now(timezone.utc))
+    projections = projections.assign(h2h_home_margin=_h2h_home_margins(projections))
     groups = {game_id: group for game_id, group in offers.groupby("game_id")}
     rows = []
     for projection in projections.itertuples():
@@ -281,13 +325,23 @@ def build_recommendations(projections, offers, *, decision_at=None):
                 status="no_play",
                 reason=reason,
                 stake_units=0.0,
-                model_home_margin=projection.market_informed_home_margin,
+                # The margin this market was actually priced from.
+                model_home_margin=(
+                    priced_projection.h2h_home_margin
+                    if market == "h2h"
+                    else projection.market_informed_home_margin
+                ),
                 model_total=priced_projection.model_total,
                 market_total=market_total if np.isfinite(market_total) else None,
                 margin_sd=priced_projection.margin_sd,
                 total_sd=priced_projection.total_sd,
             )
             priced = [c for c in candidates if c["market"] == market]
+            empty_reason = reason or "no_valid_price"
+            if market == "h2h" and not np.isfinite(priced_projection.h2h_home_margin):
+                priced = []
+                empty_reason = reason or "missing_market_spread"
+                row["model_home_margin"] = projection.market_informed_home_margin
             evaluated = []
             for candidate in priced:
                 if candidate["market"] != "h2h" and candidate["point"] * 2 != round(
@@ -345,9 +399,23 @@ def build_recommendations(projections, offers, *, decision_at=None):
                     stake_units=1.0 if block is None else 0.0,
                 )
             else:
-                row["reason"] = reason or "no_valid_price"
+                row["reason"] = empty_reason
             rows.append(row)
-    return pd.DataFrame(rows, columns=RECOMMENDATION_COLUMNS)
+    decisions = pd.DataFrame(rows, columns=RECOMMENDATION_COLUMNS)
+    shortfall = VOLUME_FLOOR - int(decisions["status"].eq("recommended").sum())
+    if shortfall > 0:
+        eligible = decisions[
+            decisions["reason"].eq("below_edge_threshold")
+            & decisions["edge_points"].gt(0)
+            & decisions["expected_value_per_unit"].gt(0)
+        ]
+        promote = eligible.sort_values("edge_points", ascending=False).index[:shortfall]
+        decisions.loc[promote, ["status", "reason", "stake_units"]] = [
+            "recommended",
+            FLOOR_REASON,
+            1.0,
+        ]
+    return decisions
 
 
 def grade_recommendations(recommendations, games, *, graded_at=None):
