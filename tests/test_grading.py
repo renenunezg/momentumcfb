@@ -315,8 +315,25 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         grade_recommendations(frozen, games.assign(start_date=None, home_team="Wrong"))
     # Re-scheduling invalidates the recommendation at its original kickoff.
     games.loc[games.id.eq(5), "start_date"] = "2026-08-30T16:00:00Z"
-    grades = grade_recommendations(frozen, games, graded_at=now + pd.Timedelta(days=2))
+    # CFBD medians: game 1 closed home -6 / 46.5 / -240 (moved toward the
+    # home -3 and over 43 picks); game 3 closed home -1 / 40 (moved against).
+    closing = pd.DataFrame(
+        dict(
+            game_id=[1, 3],
+            closing_spread=[-6.0, -1.0],
+            closing_total=[46.5, 40.0],
+            closing_home_moneyline=[-240.0, -105.0],
+            closing_away_moneyline=[200.0, -115.0],
+        )
+    ).set_index("game_id")
+    grades = grade_recommendations(
+        frozen, games, closing, graded_at=now + pd.Timedelta(days=2)
+    )
     spread = grades[grades.market.eq("spreads")].set_index("game_id")
+    assert spread.loc[1, "closing_point"] == -6 and spread.loc[1, "clv_points"] == 3
+    assert spread.loc[3, "closing_point"] == -1 and spread.loc[3, "clv_points"] == -2
+    assert spread.loc[1, "closing_source"] == "cfbd_lines_median"
+    assert spread.loc[2, "closing_source"] is None and pd.isna(spread.loc[2, "clv_points"])
     assert spread.loc[1, "outcome"] == "win"
     assert spread.loc[1, "profit_units"] == pytest.approx(100 / 110)
     assert spread.loc[2, "outcome"] == "push" and spread.loc[2, "profit_units"] == 0
@@ -341,6 +358,10 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         tied.loc[tied.market.eq("h2h") & tied.game_id.le(5), "outcome"].eq("void").all()
     )
     totals = grades[grades.market.eq("totals")].set_index("game_id")
+    assert totals.loc[1, "clv_points"] == 3.5 and totals.loc[3, "clv_points"] == -3
+    assert moneyline.loc[1, "closing_price"] == -240 and pd.isna(
+        moneyline.loc[1, "clv_points"]
+    )
     assert totals.loc[1, "outcome"] == "win"
     assert totals.loc[2, "outcome"] == "push"
     assert totals.loc[4, "outcome"] == "loss"

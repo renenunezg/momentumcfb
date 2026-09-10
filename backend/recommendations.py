@@ -95,7 +95,13 @@ SETTLEMENT_COLUMNS = [
     "away_points",
     "profit_units",
     "graded_at",
+    "closing_point",
+    "closing_price",
+    "closing_source",
+    "clv_points",
 ]
+CLOSING_LINE_COLUMNS = ["closing_point", "closing_price", "closing_source", "clv_points"]
+CLOSING_SOURCE = "cfbd_lines_median"
 
 
 def _timestamp(value):
@@ -418,8 +424,74 @@ def build_recommendations(projections, offers, *, decision_at=None):
     return decisions
 
 
-def grade_recommendations(recommendations, games, *, graded_at=None):
-    """Settle recorded picks only; never infer a past recommendation from EV."""
+def closing_line_value(pick, closing):
+    """The closing number for the pick's side and the points it beat the close.
+
+    ``closing`` is indexed by game_id with the CFBD median closing_spread,
+    closing_total and closing_home_moneyline/closing_away_moneyline. Positive
+    clv_points means the market moved toward the pick after the decision.
+    Spreads and totals compare lines; a moneyline records only the closing
+    price for its side because its value lives in the price.
+    """
+    empty = dict.fromkeys(CLOSING_LINE_COLUMNS)
+    if closing is None or pick.game_id not in closing.index:
+        return empty
+    row = closing.loc[pick.game_id]
+    if pick.market == "h2h":
+        price = row.get(f"closing_{pick.side}_moneyline")
+        if price is None or pd.isna(price):
+            return empty
+        return dict(empty, closing_price=float(price), closing_source=CLOSING_SOURCE)
+    if pick.market == "spreads":
+        spread = row.get("closing_spread")
+        if spread is None or pd.isna(spread):
+            return empty
+        point = float(spread) if pick.side == "home" else -float(spread)
+        return dict(
+            empty,
+            closing_point=point,
+            closing_source=CLOSING_SOURCE,
+            clv_points=float(pick.point) - point,
+        )
+    total = row.get("closing_total")
+    if total is None or pd.isna(total):
+        return empty
+    direction = 1.0 if pick.side == "over" else -1.0
+    return dict(
+        empty,
+        closing_point=float(total),
+        closing_source=CLOSING_SOURCE,
+        clv_points=direction * (float(total) - float(pick.point)),
+    )
+
+
+def closing_line_backfill(recommendations, closing):
+    """Closing numbers for settled picks that were graded before closing
+    lines were recorded. Rows carry only the closing fields."""
+    settled = recommendations[
+        recommendations["status"].eq("recommended")
+        & recommendations["outcome"].isin(["win", "loss", "push"])
+        & recommendations["closing_source"].isna()
+    ]
+    rows = [
+        dict(
+            game_id=pick.game_id,
+            market=pick.market,
+            decision_at=pick.decision_at,
+            **closing_line_value(pick, closing),
+        )
+        for pick in settled.itertuples()
+    ]
+    frame = pd.DataFrame(rows, columns=["game_id", "market", "decision_at", *CLOSING_LINE_COLUMNS])
+    return frame[frame["closing_source"].notna()].reset_index(drop=True)
+
+
+def grade_recommendations(recommendations, games, closing=None, *, graded_at=None):
+    """Settle recorded picks only; never infer a past recommendation from EV.
+
+    ``closing`` optionally supplies the CFBD median closing lines so every
+    settled pick records its closing line value alongside the outcome.
+    """
     now = _timestamp(graded_at or datetime.now(timezone.utc))
     schedule = games.set_index("id")
     rows = []
@@ -482,6 +554,11 @@ def grade_recommendations(recommendations, games, *, graded_at=None):
                 away_points=game["away_points"],
                 profit_units=profit,
                 graded_at=now,
+                **(
+                    closing_line_value(pick, closing)
+                    if result in ("win", "loss", "push")
+                    else dict.fromkeys(CLOSING_LINE_COLUMNS)
+                ),
             )
         )
     return pd.DataFrame(rows, columns=SETTLEMENT_COLUMNS)

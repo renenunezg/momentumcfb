@@ -76,6 +76,17 @@ def flatten_closing_totals(lines: pd.DataFrame) -> pd.DataFrame:
     return _median_offer_field(lines, "overUnder", "closing_total", "n_total_offers")
 
 
+def flatten_closing_moneylines(lines: pd.DataFrame) -> pd.DataFrame:
+    """Resolve one closing moneyline per side and game, the provider median."""
+    home = _median_offer_field(
+        lines, "homeMoneyline", "closing_home_moneyline", "n_home_moneyline_offers"
+    )
+    away = _median_offer_field(
+        lines, "awayMoneyline", "closing_away_moneyline", "n_away_moneyline_offers"
+    )
+    return home.merge(away, on="game_id", how="outer")
+
+
 def flatten_live_closing_lines(offers: pd.DataFrame) -> pd.DataFrame:
     """Resolve one pregame Odds API spread per game without live leakage.
 
