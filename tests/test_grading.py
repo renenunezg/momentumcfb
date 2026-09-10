@@ -35,7 +35,7 @@ def _projection(game_id, as_of, margin=7.0):
         "pure_home_margin": margin,
         "market_informed_home_margin": margin - 1.0,
         "market_weight": 0.5,
-        "market_home_spread": -5.0,
+        "market_home_spread": -(margin - 2.0),
         "model_total": 50.0,
         "margin_sd": 14.0,
         "total_sd": 12.0,
@@ -165,6 +165,7 @@ def test_grades_only_pregame_projections_and_keeps_stored_rows(monkeypatch, tmp_
 
 
 def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
+    from backend import recommendations as recommendations_module
     from backend.model import pick_calibration
     from backend.recommendations import build_recommendations, grade_recommendations
 
@@ -227,10 +228,32 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
     offers = offers[~(offers.game_id.eq(9) & offers.selection.isin(["home", "under"]))]
     decisions = build_recommendations(projections, offers, decision_at=now)
     assert decisions[decisions.game_id.le(5)].status.eq("recommended").all()
+    assert decisions[decisions.game_id.le(5)].reason.eq("qualifying_edge").all()
+    # Moneylines price from the market moved 0.2 toward the pure model.
+    h2h = decisions[decisions.market.eq("h2h") & decisions.game_id.eq(1)].iloc[0]
+    assert h2h.model_home_margin == pytest.approx(12.0 + 0.2 * (14.0 - 12.0))
+    assert (
+        build_recommendations(
+            projections.assign(market_home_spread=None), offers, decision_at=now
+        )
+        .query("market == 'h2h' and game_id <= 5")
+        .reason.eq("missing_market_spread")
+        .all()
+    )
+    # A gate no offer clears still yields the volume floor, labelled as such.
+    monkeypatch.setattr(recommendations_module, "MIN_EDGE_POINTS", 100.0)
+    floored = build_recommendations(projections, offers, decision_at=now)
+    monkeypatch.setattr(recommendations_module, "MIN_EDGE_POINTS", 2.0)
+    assert floored.status.eq("recommended").sum() == min(
+        recommendations_module.VOLUME_FLOOR, 15
+    )
+    assert floored[floored.status.eq("recommended")].reason.eq("volume_floor").all()
+    assert floored[floored.game_id.ge(6)].status.eq("no_play").all()
     assert decisions[decisions.game_id.ge(6)].status.eq("no_play").all()
-    # Sides are priced from the market-informed margin, not the pure margin.
+    # Spreads are priced from the market-informed margin, not the pure margin.
     blended = projections.set_index("game_id").market_informed_home_margin
-    assert decisions.model_home_margin.eq(decisions.game_id.map(blended)).all()
+    spreads = decisions[decisions.market.ne("h2h")]
+    assert spreads.model_home_margin.eq(spreads.game_id.map(blended)).all()
     # Totals price from the model total blended toward the posted total.
     totals = decisions[decisions.market.eq("totals")]
     assert totals.market_total.eq(43.0).all()
