@@ -11,6 +11,7 @@ Current ratings, methodology, and performance are available at [renenunez.dev/cf
 The 2026 season is live.
 The pre-kickoff refresh produced 266 Division I team ratings, 172 week-one game projections, unit ratings, market comparisons, and outcome-free serving anchors.
 Completed games are graded against the projection that was published before kickoff and the CFBD closing line, and the graded record is published to the site.
+Every settled pick also records the CFBD median closing line for its side and its closing line value, the points by which the pick beat the close.
 
 | Live 2026 measure (as of Sep 1) | Value |
 |---|---:|
@@ -27,6 +28,7 @@ Historical walk-forward results below are kept separate from the live record.
 
 The in-season model estimates offense, defense, pace, and home-field effect from chronological points-per-possession and EPA-per-possession data.
 It produces a joint home and away score distribution with calibrated margin and total uncertainty.
+Each team's offense and defense priors are correlated at 0.5, so the scoring-environment direction is shrunk harder than net strength, and the pace prior is one possession; on the 2020 through 2025 walk-forward this keeps projected totals calibrated (actual on projected total slope 0.88 against 0.61 with independent priors) with margins unchanged.
 
 The preseason model starts from prior-season power, scoring environment, and pace.
 It then incorporates current CFBD talent, returning production, transfers, quarterback continuity, recruiting, and coaching continuity.
@@ -147,7 +149,7 @@ Local model and evaluation commands do not require database write access.
 ## Known limits
 
 - The free historical CFBD feed is not the low-latency source required for live in-game production.
-- Injuries and player availability are not inferred from play-by-play or market movement.
+- Injuries and player availability are never inferred from play-by-play or market movement. A starting quarterback reported out or doubtful in `cfb.qb_availability` (a hand-entered row with its source and report time) lowers that team's expected points by a fixed documented amount when the report precedes the forecast or decision cutoff; `qb-starters` lists teams whose last box-score starter changed so reports can be checked.
 - FCS teams have less complete preseason data and carry wider uncertainty.
 - The 2026 live performance sample is small early in the season and is reported with its game count rather than as a conclusion.
 - The project does not automate wagers, size positions, or claim profitability.
