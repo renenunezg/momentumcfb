@@ -890,7 +890,8 @@ def publish_recommendation_grades(season):
                     "AND outcome IN ('win', 'loss', 'push')"
                 ),
                 _serving_frame(
-                    backfill, ["game_id", "market", "decision_at", *CLOSING_LINE_COLUMNS]
+                    backfill,
+                    ["game_id", "market", "decision_at", *CLOSING_LINE_COLUMNS],
                 )
                 .assign(season=season)
                 .to_dict("records"),

@@ -87,3 +87,20 @@ def handle_publish_players(args: Namespace) -> None:
     stored = publish_players(args.season)
     for table, count in stored.items():
         log.info(f"cfb.{table}: {count} rows stored")
+
+
+def handle_qb_starters(args: Namespace) -> None:
+    from backend.model.availability import observed_starters
+
+    starters = observed_starters(args.season)
+    changed = starters[starters["changed"]]
+    log.info(
+        f"{len(starters)} teams with a box-score starter; {len(changed)} whose last "
+        "starter differs from the season's usual starter (verify before reporting):"
+    )
+    if not changed.empty:
+        log.info(
+            changed[["team", "last_starter", "usual_starter", "starts"]].to_string(
+                index=False
+            )
+        )

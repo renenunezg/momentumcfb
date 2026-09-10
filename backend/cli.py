@@ -354,6 +354,12 @@ def _add_publish_commands(sub) -> None:
     )
     _cfbd_budget_arguments(ingest_players)
 
+    qb_starters = sub.add_parser(
+        "qb-starters",
+        help="list teams whose last box-score starting quarterback changed",
+    )
+    qb_starters.add_argument("--season", type=int, required=True)
+
     player_values = sub.add_parser(
         "player-values",
         help="build opponent-adjusted player value snapshots for each week",

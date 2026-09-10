@@ -11,25 +11,69 @@ from backend.model.availability import (
 def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
     reports = pd.DataFrame(
         [
-            dict(season=2026, week=3, team="Utah", status="out", reported_at="2026-09-09T12:00:00Z"),
-            dict(season=2026, week=3, team="Auburn", status="doubtful", reported_at="2026-09-12T12:00:00Z"),
-            dict(season=2026, week=3, team="Ohio", status="questionable", reported_at="2026-09-09T12:00:00Z"),
-            dict(season=2026, week=4, team="Georgia", status="out", reported_at="2026-09-09T12:00:00Z"),
+            dict(
+                season=2026,
+                week=3,
+                team="Utah",
+                status="out",
+                reported_at="2026-09-09T12:00:00Z",
+            ),
+            dict(
+                season=2026,
+                week=3,
+                team="Auburn",
+                status="doubtful",
+                reported_at="2026-09-12T12:00:00Z",
+            ),
+            dict(
+                season=2026,
+                week=3,
+                team="Ohio",
+                status="questionable",
+                reported_at="2026-09-09T12:00:00Z",
+            ),
+            dict(
+                season=2026,
+                week=4,
+                team="Georgia",
+                status="out",
+                reported_at="2026-09-09T12:00:00Z",
+            ),
         ]
     )
     forecast_cutoff = pd.Timestamp("2026-09-10T18:00:00Z")
     assert pregame_qb_outs(reports, 2026, 3, forecast_cutoff) == {"Utah"}
     projections = pd.DataFrame(
         [
-            dict(game_id=1, home_team="Utah", away_team="Arkansas", expected_home_points=30.0, expected_away_points=20.0, home_margin=10.0, home_spread=-10.0, model_total=50.0),
-            dict(game_id=2, home_team="Ohio", away_team="Auburn", expected_home_points=21.0, expected_away_points=28.0, home_margin=-7.0, home_spread=7.0, model_total=49.0),
+            dict(
+                game_id=1,
+                home_team="Utah",
+                away_team="Arkansas",
+                expected_home_points=30.0,
+                expected_away_points=20.0,
+                home_margin=10.0,
+                home_spread=-10.0,
+                model_total=50.0,
+            ),
+            dict(
+                game_id=2,
+                home_team="Ohio",
+                away_team="Auburn",
+                expected_home_points=21.0,
+                expected_away_points=28.0,
+                home_margin=-7.0,
+                home_spread=7.0,
+                model_total=49.0,
+            ),
         ]
     )
     forecast = apply_qb_availability(projections, {"Utah"}, postseason_game_ids={2})
     utah = forecast.iloc[0]
     assert utah.home_qb_out and not utah.away_qb_out
     assert utah.expected_home_points == 30 - QB_OUT_POINTS
-    assert utah.home_margin == 10 - QB_OUT_POINTS and utah.home_spread == -utah.home_margin
+    assert (
+        utah.home_margin == 10 - QB_OUT_POINTS and utah.home_spread == -utah.home_margin
+    )
     assert utah.model_total == 50 - QB_OUT_POINTS
     assert utah.qb_availability_points == -QB_OUT_POINTS
     assert not forecast.iloc[1][["home_qb_out", "away_qb_out"]].any()

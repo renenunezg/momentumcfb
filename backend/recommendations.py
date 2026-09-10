@@ -100,7 +100,12 @@ SETTLEMENT_COLUMNS = [
     "closing_source",
     "clv_points",
 ]
-CLOSING_LINE_COLUMNS = ["closing_point", "closing_price", "closing_source", "clv_points"]
+CLOSING_LINE_COLUMNS = [
+    "closing_point",
+    "closing_price",
+    "closing_source",
+    "clv_points",
+]
 CLOSING_SOURCE = "cfbd_lines_median"
 
 
@@ -482,7 +487,9 @@ def closing_line_backfill(recommendations, closing):
         )
         for pick in settled.itertuples()
     ]
-    frame = pd.DataFrame(rows, columns=["game_id", "market", "decision_at", *CLOSING_LINE_COLUMNS])
+    frame = pd.DataFrame(
+        rows, columns=["game_id", "market", "decision_at", *CLOSING_LINE_COLUMNS]
+    )
     return frame[frame["closing_source"].notna()].reset_index(drop=True)
 
 
