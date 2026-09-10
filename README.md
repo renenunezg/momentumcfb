@@ -34,7 +34,8 @@ The preseason model starts from prior-season power, scoring environment, and pac
 It then incorporates current CFBD talent, returning production, transfers, quarterback continuity, recruiting, and coaching continuity.
 The prior-season, talent, and returning-production weights are fitted to 2022 through 2025 opening-week closing margins and validated leave-one-season-out.
 Missing inputs receive neutral contributions and increase uncertainty instead of being guessed.
-FCS teams are anchored to FBS through crossover games, with the pool level iterated to the level those games identify.
+Each conference pool (FCS as one pool) carries a shift parameter identified by crossover games, so a whole conference can move from the level its teams' priors imply instead of every team being shrunk toward a stale level, and FCS teams without priors are anchored to the fitted FCS level.
+Ratings are fitted to a blend of points and competitive-possession EPA, which discounts garbage-time scoring; FBS versus FCS games carry far more of it, so a crossover term estimated from points residuals on those games restores the points the FBS side actually scores (bias +6.1 to +2.1 on the 2020 through 2025 walk-forward).
 
 The in-game baseline combines the current score and possession state with a frozen pregame anchor.
 Serving code reads only outcome-free anchors and play state.
