@@ -67,6 +67,8 @@ def handle_fit(args: Namespace) -> None:
 def handle_weekly_update(args: Namespace) -> None:
     from datetime import datetime, timezone
 
+    import pandas as pd
+
     from backend.model.joint_scoring import MODEL_VERSION
     from backend.model.weekly import (
         WeeklyForecastNotReady,
@@ -141,7 +143,8 @@ def handle_weekly_update(args: Namespace) -> None:
         f"published Week {result.week}: {len(result.ratings)} ratings, "
         f"{len(result.projections)} projections, "
         f"{len(result.market_comparisons)} market comparisons, "
-        f"{int(result.projections[['home_qb_out', 'away_qb_out']].to_numpy().sum())} "
+        f"{int(result.projections.get('home_qb_out', pd.Series(dtype=bool)).sum())} home and "
+        f"{int(result.projections.get('away_qb_out', pd.Series(dtype=bool)).sum())} away "
         "quarterback absences applied"
     )
     log.info(f"serving totals: {totals}")
