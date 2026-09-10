@@ -148,6 +148,7 @@ def test_weekly_update_publishes_pure_model_when_odds_quota_is_exhausted(
     monkeypatch.setattr(weekly, "resolve_ready_forecast_week", lambda *args: 1)
     monkeypatch.setattr(weekly, "run_weekly_forecast", fake_run_weekly_forecast)
     monkeypatch.setattr(publish, "weekly_forecast_is_published", lambda *args: False)
+    monkeypatch.setattr(publish, "fetch_qb_availability", lambda season: pd.DataFrame())
     monkeypatch.setattr(publish, "publish", lambda *args, **kwargs: {})
     monkeypatch.setattr(odds_client, "OddsAPIClient", lambda: object())
 
