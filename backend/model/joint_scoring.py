@@ -7,8 +7,7 @@ import pandas as pd
 
 from backend.model.outputs import GameProjection, TeamRating
 
-MODEL_VERSION = "joint_scoring_v5"
-PACE_PRIOR_SD = 2.0
+MODEL_VERSION = "joint_scoring_v6"
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
 MAX_POOL_ITERATIONS = 50
@@ -22,6 +21,16 @@ class JointScoringConfig:
     covariance_shrinkage: float = 0.1
     student_t_degrees_of_freedom: float = 7.0
     score_covariance_scale: float = 1.0
+    # Prior correlation between a team's offense and defense strength. Net
+    # strength (offense + defense) varies far more between teams than scoring
+    # environment (offense - defense), and a positive correlation shrinks the
+    # environment direction harder while leaving net strength as identified.
+    # Zero would restore the independent priors that only calibrate margins.
+    strength_prior_correlation: float = 0.5
+    # Prior SD of a team's pace offset in possessions per game. The pace
+    # ridge is identified only through each team's own games, so a loose
+    # prior lets sample noise reach the projected total.
+    pace_prior_sd: float = 1.0
 
     def __post_init__(self) -> None:
         if isnan(self.rating_half_life_weeks) or self.rating_half_life_weeks <= 0:
@@ -40,14 +49,26 @@ class JointScoringConfig:
             or self.score_covariance_scale <= 0
         ):
             raise ValueError("score_covariance_scale must be positive")
+        if not -1 < self.strength_prior_correlation < 1:
+            raise ValueError("strength_prior_correlation must be inside (-1, 1)")
+        if not isfinite(self.pace_prior_sd) or self.pace_prior_sd <= 0:
+            raise ValueError("pace_prior_sd must be positive")
 
 
+# joint_scoring_v6: on the 2020 through 2025 historical-carryover walk-forward
+# (4,227 FBS games) the independent priors left totals over-dispersed (actual
+# on model total slope 0.61, pace component 0.51) while margins were
+# calibrated (0.96). Correlating offense and defense at 0.5 and tightening the
+# pace prior to one possession moved the total slope to 0.88 and cut total MAE
+# from 13.37 to 13.11 with margin MAE unchanged (12.85 to 12.84).
 DEFAULT_CONFIG = JointScoringConfig(
     rating_half_life_weeks=float("inf"),
     strength_prior_sd_ppp=0.45,
     covariance_shrinkage=0.8,
     student_t_degrees_of_freedom=500.0,
     score_covariance_scale=1.125,
+    strength_prior_correlation=0.5,
+    pace_prior_sd=1.0,
 )
 
 
@@ -116,12 +137,40 @@ def _solve_ridge(
     weights: np.ndarray,
     prior_mean: np.ndarray,
     prior_sd: np.ndarray,
+    prior_precision: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    precision = 1.0 / np.square(prior_sd)
-    normal = design.T @ (weights[:, None] * design) + np.diag(precision)
-    rhs = design.T @ (weights * target) + precision * prior_mean
+    if prior_precision is None:
+        prior_precision = np.diag(1.0 / np.square(prior_sd))
+    normal = design.T @ (weights[:, None] * design) + prior_precision
+    rhs = design.T @ (weights * target) + prior_precision @ prior_mean
     covariance = np.linalg.inv(normal)
     return covariance @ rhs, covariance
+
+
+def _strength_prior_precision(
+    prior_sd: np.ndarray, n_teams: int, correlation: float
+) -> np.ndarray:
+    """Precision of the strength prior with each team's offense and defense
+    correlated; the home-field parameter stays independent.
+
+    The correlation reallocates prior variance between the two directions
+    instead of adding any: the marginal SDs are scaled so the net-strength
+    direction keeps the variance the independent prior gave it, and only the
+    scoring-environment direction tightens by (1 - rho) / (1 + rho).
+    """
+    precision = np.diag(1.0 / np.square(prior_sd))
+    if correlation:
+        scale = 1.0 / np.sqrt(1.0 + correlation)
+        offense_sd = prior_sd[:n_teams] * scale
+        defense_sd = prior_sd[n_teams : 2 * n_teams] * scale
+        covariance = correlation * offense_sd * defense_sd
+        determinant = np.square(offense_sd * defense_sd) - np.square(covariance)
+        team = np.arange(n_teams)
+        precision[team, team] = np.square(defense_sd) / determinant
+        precision[n_teams + team, n_teams + team] = np.square(offense_sd) / determinant
+        precision[team, n_teams + team] = -covariance / determinant
+        precision[n_teams + team, team] = -covariance / determinant
+    return precision
 
 
 def _regularized_covariance(
@@ -432,7 +481,12 @@ def fit_joint_scoring(
                 prior_sd[index] = offense_sd
                 prior_sd[n_teams + index] = defense_sd
     prior_sd[-1] = HFA_PRIOR_SD_POINTS / base_possessions
-    parameters, covariance = _solve_ridge(design, target, recency, prior_mean, prior_sd)
+    prior_precision = _strength_prior_precision(
+        prior_sd, n_teams, config.strength_prior_correlation
+    )
+    parameters, covariance = _solve_ridge(
+        design, target, recency, prior_mean, prior_sd, prior_precision
+    )
     classifications = catalog["classification"].fillna("").str.lower()
     fbs_mask = classifications.eq("fbs").to_numpy()
     fcs_mask = classifications.eq("fcs").to_numpy()
@@ -465,7 +519,7 @@ def fit_joint_scoring(
         / information
     )
     parameters, covariance = _solve_ridge(
-        design, target, recency * information, prior_mean, prior_sd
+        design, target, recency * information, prior_mean, prior_sd, prior_precision
     )
     # The FCS pool is linked to FBS only through crossover games, and the
     # per-team prior is far too tight for the pool to travel from the initial
@@ -485,7 +539,7 @@ def fit_joint_scoring(
         if shift < POOL_TOLERANCE_PPP:
             break
         parameters, covariance = _solve_ridge(
-            design, target, recency * information, prior_mean, prior_sd
+            design, target, recency * information, prior_mean, prior_sd, prior_precision
         )
 
     offense = parameters[:n_teams]
@@ -521,7 +575,7 @@ def fit_joint_scoring(
         pace_target - base_possessions,
         recency[::2],
         pace_prior,
-        np.full(n_teams, PACE_PRIOR_SD),
+        np.full(n_teams, config.pace_prior_sd),
     )
     if priors is None:
         base_possessions += float(pace.mean())
