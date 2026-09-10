@@ -18,7 +18,12 @@ def handle_grade(args: Namespace) -> None:
         fetch_published_projections,
         fetch_recommendations,
     )
-    from backend.recommendations import grade_recommendations
+    from backend.recommendations import closing_line_backfill, grade_recommendations
+    from backend.serving.market import (
+        flatten_closing_lines,
+        flatten_closing_moneylines,
+        flatten_closing_totals,
+    )
 
     projections = fetch_published_projections(args.season)
     # Player WPA needs the same immutable pregame inputs on an ephemeral runner.
@@ -29,9 +34,25 @@ def handle_grade(args: Namespace) -> None:
     graded = build_graded_games(args.season, projections, existing)
 
     picks = fetch_recommendations(args.season)
-    settlements = grade_recommendations(picks, store.read_games(args.season))
+    lines = store.read_lines(args.season)
+    closing = (
+        flatten_closing_lines(lines)
+        .merge(flatten_closing_totals(lines), on="game_id", how="outer")
+        .merge(flatten_closing_moneylines(lines), on="game_id", how="outer")
+        .set_index("game_id")
+    )
+    settlements = grade_recommendations(picks, store.read_games(args.season), closing)
     store.write_processed(
         settlements, "grading", f"recommendations_{args.season}.parquet"
+    )
+    backfill = closing_line_backfill(picks, closing)
+    store.write_processed(
+        backfill, "grading", f"recommendation_closing_{args.season}.parquet"
+    )
+    log.info(
+        f"settled {len(settlements)} picks, "
+        f"{int(settlements['closing_source'].notna().sum())} with a closing line; "
+        f"{len(backfill)} earlier settlements gain a closing line"
     )
     metrics = compute_performance_metrics(graded)
     write_grading_artifacts(args.season, graded, metrics)

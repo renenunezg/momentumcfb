@@ -832,25 +832,51 @@ def fetch_recommendations(season):
 def publish_recommendation_grades(season):
     from backend.db import engine
     from backend.etl import store
-    from backend.recommendations import SETTLEMENT_COLUMNS
+    from backend.recommendations import CLOSING_LINE_COLUMNS, SETTLEMENT_COLUMNS
 
     grades = store.read_processed("grading", f"recommendations_{season}.parquet")
-    if grades.empty:
-        return 0
-    rows = _serving_frame(grades, SETTLEMENT_COLUMNS)
-    with engine.begin() as conn:
-        result = conn.execute(
-            text(
-                f"UPDATE {CFB_SCHEMA}.recommendations SET outcome = :outcome, "
-                "home_points = :home_points, away_points = :away_points, "
-                "profit_units = :profit_units, graded_at = :graded_at "
-                "WHERE game_id = :game_id AND market = :market AND decision_at = :decision_at "
-                "AND season = :season "
-                "AND outcome = 'pending'"
-            ),
-            rows.assign(season=season).to_dict("records"),
+    try:
+        backfill = store.read_processed(
+            "grading", f"recommendation_closing_{season}.parquet"
         )
-        return result.rowcount
+    except FileNotFoundError:
+        backfill = pd.DataFrame(columns=["game_id", "market", "decision_at"])
+    if grades.empty and backfill.empty:
+        return 0
+    closing_updates = ", ".join(f"{c} = :{c}" for c in CLOSING_LINE_COLUMNS)
+    settled = 0
+    with engine.begin() as conn:
+        if not grades.empty:
+            settled = conn.execute(
+                text(
+                    f"UPDATE {CFB_SCHEMA}.recommendations SET outcome = :outcome, "
+                    "home_points = :home_points, away_points = :away_points, "
+                    f"profit_units = :profit_units, graded_at = :graded_at, {closing_updates} "
+                    "WHERE game_id = :game_id AND market = :market AND decision_at = :decision_at "
+                    "AND season = :season "
+                    "AND outcome = 'pending'"
+                ),
+                _serving_frame(grades, SETTLEMENT_COLUMNS)
+                .assign(season=season)
+                .to_dict("records"),
+            ).rowcount
+        if not backfill.empty:
+            # Picks settled before closing lines were recorded receive theirs
+            # once; the database trigger admits no other change to a settled pick.
+            conn.execute(
+                text(
+                    f"UPDATE {CFB_SCHEMA}.recommendations SET {closing_updates} "
+                    "WHERE game_id = :game_id AND market = :market AND decision_at = :decision_at "
+                    "AND season = :season AND closing_source IS NULL "
+                    "AND outcome IN ('win', 'loss', 'push')"
+                ),
+                _serving_frame(
+                    backfill, ["game_id", "market", "decision_at", *CLOSING_LINE_COLUMNS]
+                )
+                .assign(season=season)
+                .to_dict("records"),
+            )
+    return settled
 
 
 def ensure_recommendation_schema():
@@ -869,6 +895,13 @@ def ensure_recommendation_schema():
         ) or not required.issubset(_table_columns(conn, "recommendations")):
             raise ValueError(
                 "Apply sql/003_recommendations.sql before refreshing CFB recommendations"
+            )
+        if not {"closing_point", "clv_points"}.issubset(
+            _table_columns(conn, "recommendations")
+        ):
+            raise ValueError(
+                "Apply sql/009_recommendation_closing_line_value.sql before "
+                "refreshing CFB recommendations"
             )
         if not conn.execute(
             text(
