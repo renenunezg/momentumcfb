@@ -11,6 +11,7 @@ from backend.features.scoring import (
     load_scoring_team_games,
 )
 from backend.model.joint_scoring import fit_joint_scoring
+from backend.model.availability import apply_qb_availability, pregame_qb_outs
 from backend.model.market_blend import add_market_informed_margins
 from backend.model.preseason import (
     MISSING_INPUT_COLUMNS,
@@ -292,8 +293,13 @@ def run_weekly_forecast(
     odds_client=None,
     require_market: bool = False,
     as_of: datetime | None = None,
+    qb_availability: pd.DataFrame | None = None,
 ) -> WeeklyForecastResult:
-    """Fit and persist one leakage-safe in-season weekly forecast."""
+    """Fit and persist one leakage-safe in-season weekly forecast.
+
+    ``qb_availability`` carries explicit pregame quarterback reports; only
+    rows reported before ``as_of`` for the forecast week adjust projections.
+    """
     created_at = as_of or datetime.now(timezone.utc)
     if created_at.tzinfo is None or created_at.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
@@ -324,6 +330,12 @@ def run_weekly_forecast(
         )
     context = _team_context(games, preseason_ratings)
     ratings, projections = _decorate_outputs(ratings, projections, target, context)
+    qb_outs = pregame_qb_outs(qb_availability, season, forecast_week, created_at)
+    projections = apply_qb_availability(
+        projections,
+        qb_outs,
+        set(target.loc[target["season_type"].eq("postseason"), "game_id"]),
+    )
 
     unit_games = store.read_processed("unit_games", f"{season}.parquet")
     units = fit_unit_ratings(
@@ -388,6 +400,7 @@ def run_weekly_forecast(
                 ),
                 "excluded_fcs_training_games": len(excluded_training_games),
                 "projection_games": len(projections),
+                "qb_availability_teams": ",".join(sorted(qb_outs)),
                 "odds_events": len(odds_events),
                 "matched_odds_events": int(
                     matches["matched"].sum() if "matched" in matches else 0

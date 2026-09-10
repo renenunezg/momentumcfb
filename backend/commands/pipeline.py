@@ -76,6 +76,7 @@ def handle_weekly_update(args: Namespace) -> None:
     from backend.odds.client import OddsAPIClient, OddsAPIError
     from backend.publish import (
         ensure_recommendation_schema,
+        fetch_qb_availability,
         publish,
         weekly_forecast_is_published,
     )
@@ -101,6 +102,7 @@ def handle_weekly_update(args: Namespace) -> None:
             f"model Week {forecast_week}; no changes made"
         )
         return
+    qb_availability = fetch_qb_availability(args.season)
     try:
         try:
             result = run_weekly_forecast(
@@ -109,6 +111,7 @@ def handle_weekly_update(args: Namespace) -> None:
                 odds_client=OddsAPIClient(),
                 require_market=True,
                 as_of=as_of,
+                qb_availability=qb_availability,
             )
         except OddsAPIError as exc:
             if "OUT_OF_USAGE_CREDITS" not in str(exc):
@@ -123,6 +126,7 @@ def handle_weekly_update(args: Namespace) -> None:
                 odds_client=None,
                 require_market=False,
                 as_of=as_of,
+                qb_availability=qb_availability,
             )
     except WeeklyForecastNotReady as exc:
         log.info(f"weekly update not ready: {exc}")
@@ -136,7 +140,9 @@ def handle_weekly_update(args: Namespace) -> None:
     log.info(
         f"published Week {result.week}: {len(result.ratings)} ratings, "
         f"{len(result.projections)} projections, "
-        f"{len(result.market_comparisons)} market comparisons"
+        f"{len(result.market_comparisons)} market comparisons, "
+        f"{int(result.projections[['home_qb_out', 'away_qb_out']].to_numpy().sum())} "
+        "quarterback absences applied"
     )
     log.info(f"serving totals: {totals}")
     log.info(f"forecast log: {result.log_directory}")
