@@ -707,8 +707,13 @@ def validate_completed_window(
     *,
     max_offer_staleness_seconds: float = 300.0,
     min_providers: int = 2,
+    schedule: pd.DataFrame | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Prove each target froze a fresh pregame line after a live phase poll."""
+    """Prove each target froze a fresh pregame line after a live phase poll.
+
+    A frozen forecast schedule must be passed on fresh runners, which restore
+    only the weekly artifact and hold no stored Division I schedule.
+    """
     problems: list[str] = []
     details: list[str] = []
     events = frames["events"].copy()
@@ -720,7 +725,9 @@ def validate_completed_window(
         offers["fetched_at"], utc=True, errors="coerce"
     )
     kickoff_by_game = dict.fromkeys(target.game_ids)
-    schedule = load_division_one_schedule(int(anchors["season"].iloc[0])).copy()
+    if schedule is None:
+        schedule = load_division_one_schedule(int(anchors["season"].iloc[0]))
+    schedule = schedule.copy()
     schedule["start_date"] = pd.to_datetime(
         schedule["start_date"], utc=True, errors="coerce"
     )
@@ -988,6 +995,7 @@ def run_kickoff_window(
         built,
         max_offer_staleness_seconds=max_offer_staleness_seconds,
         min_providers=min_providers,
+        schedule=schedule,
     )
     if validation_problems:
         raise ValueError(
