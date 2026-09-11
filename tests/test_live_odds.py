@@ -988,6 +988,10 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     for name, frame in forecast.items():
         frame.to_parquet(directory / f"{name}.parquet", index=False)
     monkeypatch.setattr(store, "PROCESSED_DIR", tmp_path / "processed")
+    monkeypatch.setattr(live, "RAW_DIR", tmp_path / "raw")
+    monkeypatch.setattr(
+        kickoff, "load_division_one_schedule", live.load_division_one_schedule
+    )
     arguments = {"forecast_directory": str(directory), "max_forecast_age_hours": 240}
     problems, _, _ = kickoff.check_forecast_readiness(
         2026, 1, as_of=pregame, **arguments
@@ -1016,7 +1020,10 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     built = market.build_live_market_anchors(2026, schedule=frozen["schedule_coverage"])
     assert built["model_week"].tolist() == [2]
     assert built["closing_snapshot_id"].tolist() == ["close"]
-    assert kickoff.validate_completed_window(actual_target, frames, built)[0] == []
+    problems, _ = kickoff.validate_completed_window(
+        actual_target, frames, built, schedule=frozen["schedule_coverage"]
+    )
+    assert problems == []
     kickoff._write_market_anchors(2026, built)
     assert store.read_processed("serving", "anchors_2026_00.parquet")[
         "home_margin"
