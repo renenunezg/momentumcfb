@@ -271,6 +271,7 @@ def _add_market_commands(sub) -> None:
             kickoff.add_argument("--lookahead-hours", type=float, default=2.0)
             kickoff.add_argument("--max-failures", type=int, default=3)
             kickoff.add_argument("--max-wait-hours", type=float, default=2.0)
+            kickoff.add_argument("--max-extension-minutes", type=float, default=30.0)
 
     replay = sub.add_parser(
         "live-replay",

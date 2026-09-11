@@ -67,6 +67,7 @@ def handle_kickoff_run(args: Namespace) -> None:
             min_quota=args.min_quota,
             max_failures=args.max_failures,
             max_wait_hours=args.max_wait_hours,
+            max_extension_minutes=args.max_extension_minutes,
             forecast_directory=args.forecast_directory,
             max_forecast_age_hours=args.max_forecast_age_hours,
             max_source_age_hours=args.max_source_age_hours,
@@ -81,7 +82,7 @@ def handle_kickoff_run(args: Namespace) -> None:
         log.info(f"OK: {detail}")
     log.info(
         f"OK: wrote {result.anchor_count} market anchors after "
-        f"{result.plan.polls} verified polls"
+        f"{result.polls_completed} verified polls"
     )
 
 

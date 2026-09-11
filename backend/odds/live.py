@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -198,6 +199,9 @@ class LiveSnapshot:
     poll: pd.DataFrame
     events: pd.DataFrame
     offers: pd.DataFrame
+
+
+PollPlanner = Callable[[int, "LiveSnapshot | None"], tuple[tuple[str, ...], ...]]
 
 
 class LivePollSkipped(RuntimeError):
@@ -852,11 +856,14 @@ def run_live_polling(
     min_quota: int,
     max_failures: int,
     required_game_ids: tuple[int, ...] | None = None,
-    poll_markets: tuple[tuple[str, ...], ...] | None = None,
+    poll_markets: tuple[tuple[str, ...], ...] | PollPlanner | None = None,
     progress=log.info,
     sleep=time.sleep,
     monotonic=time.monotonic,
 ) -> int:
+    """Poll up to ``polls`` times. A static market plan runs every poll; a
+    planner is asked before each poll for this poll's markets followed by the
+    remaining reservation, and an empty answer ends the window early."""
     if polls < 1:
         raise ValueError("--polls must be at least 1")
     if max_failures < 1:
@@ -864,21 +871,33 @@ def run_live_polling(
     if min_quota < 0:
         raise ValueError("--min-quota must be nonnegative")
     if poll_markets is None:
-        market_plan = (LIVE_MARKETS,) * polls
+        poll_markets = (LIVE_MARKETS,) * polls
+    if callable(poll_markets):
+        planner = poll_markets
     else:
         if len(poll_markets) != polls:
             raise ValueError("poll market plan must contain one entry per poll")
         market_plan = tuple(normalize_live_markets(markets) for markets in poll_markets)
+
+        def planner(poll_index: int, latest: LiveSnapshot | None):
+            return market_plan[poll_index:]
+
     client = OddsAPIClient()
     client.ensure_single_quota_region()
     consecutive_failures = 0
     completed = 0
+    latest: LiveSnapshot | None = None
     started_at = monotonic()
     for poll_index in range(polls):
+        plan = tuple(
+            normalize_live_markets(markets) for markets in planner(poll_index, latest)
+        )
+        if not plan:
+            break
         if poll_index:
             due_at = started_at + poll_index * interval_seconds
             sleep(max(0.0, due_at - monotonic()))
-        markets = market_plan[poll_index]
+        markets = plan[0]
         try:
             snapshot = capture_live_snapshot(
                 client,
@@ -890,7 +909,7 @@ def run_live_polling(
                 min_quota,
                 required_game_ids=required_game_ids,
                 markets=markets,
-                future_poll_markets=market_plan[poll_index + 1 :],
+                future_poll_markets=plan[1:],
             )
         except QuotaFloorReached as exc:
             if exc.odds is None:
@@ -966,6 +985,7 @@ def run_live_polling(
         else:
             consecutive_failures = 0
             completed += 1
+            latest = snapshot
             progress(_poll_summary(snapshot))
     return completed
 
