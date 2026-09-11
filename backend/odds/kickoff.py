@@ -84,6 +84,7 @@ class KickoffRunResult:
     plan: KickoffWindowPlan
     anchor_count: int
     target_details: tuple[str, ...]
+    polls_completed: int = 0
 
 
 def _utc(value=None) -> pd.Timestamp:
@@ -398,6 +399,83 @@ def plan_kickoff_poll_markets(
     )
 
 
+class KickoffPollPlanner:
+    """Re-plan each poll from the provider's current kickoff times.
+
+    The frozen schedule only seeds the window. Providers move
+    ``commence_time`` by minutes near kickoff, so the closing-total pull and
+    the end of the window follow the latest stored provider state instead:
+    totals are requested whenever the next poll could fall at or after a
+    pending game's current kickoff, and polling stops once every target has
+    been observed live or final, or when the poll cap is reached.
+    """
+
+    def __init__(
+        self,
+        target: KickoffTarget,
+        *,
+        interval_seconds: float,
+        post_minutes: float,
+        max_polls: int,
+        progress=log.info,
+        now=lambda: datetime.now(timezone.utc),
+    ) -> None:
+        if len(target.kickoffs) != len(target.game_ids):
+            raise ValueError("target kickoff timestamps do not match target games")
+        self.interval = pd.Timedelta(seconds=interval_seconds)
+        self.post = pd.Timedelta(minutes=post_minutes)
+        self.max_polls = max_polls
+        self.progress = progress
+        self.now = now
+        self.labels = dict(zip(target.game_ids, target.labels))
+        self.kickoffs = {
+            game_id: _utc(kickoff)
+            for game_id, kickoff in zip(target.game_ids, target.kickoffs)
+        }
+        self.pending = set(target.game_ids)
+
+    def observe(self, snapshot) -> None:
+        events = snapshot.events
+        if events.empty or "game_id" not in events:
+            return
+        events = events[events["game_id"].isin(self.pending)]
+        for row in events.itertuples(index=False):
+            game_id = int(row.game_id)
+            commence = pd.to_datetime(row.commence_time, utc=True, errors="coerce")
+            if pd.notna(commence) and commence != self.kickoffs[game_id]:
+                self.progress(
+                    f"{self.labels[game_id]} kickoff moved from "
+                    f"{self.kickoffs[game_id].isoformat()} to {commence.isoformat()}"
+                )
+                self.kickoffs[game_id] = commence
+            if row.phase in ("live", "final"):
+                self.pending.discard(game_id)
+
+    def __call__(self, poll_index: int, latest) -> tuple[tuple[str, ...], ...]:
+        if latest is not None:
+            self.observe(latest)
+        if not self.pending or poll_index >= self.max_polls:
+            return ()
+        poll_time = _utc(self.now())
+        remaining = self.max_polls - poll_index
+        last_kickoff = max(self.kickoffs[game_id] for game_id in self.pending)
+        span = (last_kickoff + self.post - poll_time).total_seconds()
+        planned = min(remaining, max(1, ceil(span / self.interval.total_seconds()) + 1))
+        poll_times = [poll_time + index * self.interval for index in range(planned)]
+        totals_polls: set[int] = set()
+        for game_id in self.pending:
+            kickoff = self.kickoffs[game_id]
+            eligible = [
+                index for index, time in enumerate(poll_times) if time < kickoff
+            ]
+            if eligible:
+                totals_polls.add(eligible[-1])
+        return tuple(
+            CLOSING_MARKETS if index in totals_polls else LIVE_MARKETS
+            for index in range(planned)
+        )
+
+
 def _latest_successful_poll(
     frames: dict[str, pd.DataFrame],
 ) -> tuple[pd.Series | None, pd.DataFrame]:
@@ -427,6 +505,7 @@ def _quota_problems(
     frames: dict[str, pd.DataFrame],
     planned_markets: tuple[tuple[str, ...], ...],
     min_quota: int,
+    extension_polls: int = 0,
 ) -> tuple[list[str], list[str]]:
     latest, _ = _latest_successful_poll(frames)
     if latest is None:
@@ -444,11 +523,13 @@ def _quota_problems(
     remaining = min(remaining_values)
     planned_cost = sum(live_poll_quota_cost(markets) for markets in planned_markets)
     totals_polls = sum("totals" in markets for markets in planned_markets)
-    expected_after = remaining - planned_cost
+    extension_cost = extension_polls * live_poll_quota_cost(CLOSING_MARKETS)
+    expected_after = remaining - planned_cost - extension_cost
     details = [
         f"last stored Odds API quota: {remaining} remaining, about "
         f"{planned_cost} for {len(planned_markets)} planned polls including "
-        f"{totals_polls} closing-total pull(s), {expected_after} after"
+        f"{totals_polls} closing-total pull(s), up to {extension_cost} more for "
+        f"{extension_polls} kickoff-drift polls, at least {expected_after} after"
     ]
     if expected_after < min_quota:
         return [
@@ -736,12 +817,20 @@ def validate_completed_window(
         .set_index("game_id")["start_date"]
         .to_dict()
     )
+    provider_kickoffs = _provider_kickoffs(events, target.game_ids)
 
     for game_id, label in zip(target.game_ids, target.labels):
-        kickoff = kickoff_by_game.get(game_id)
+        scheduled = kickoff_by_game.get(game_id)
+        kickoff = provider_kickoffs.get(game_id, scheduled)
         if kickoff is None or pd.isna(kickoff):
             problems.append(f"{label} has no kickoff timestamp")
             continue
+        if scheduled is not None and pd.notna(scheduled) and kickoff != scheduled:
+            drift = (kickoff - scheduled).total_seconds()
+            details.append(
+                f"{label}: provider kickoff {kickoff.isoformat()} is "
+                f"{drift:+.0f}s from the frozen schedule"
+            )
         row = anchors[anchors["game_id"].eq(game_id)]
         if row.empty:
             problems.append(f"{label} has no market anchor")
@@ -769,54 +858,65 @@ def validate_completed_window(
         provider_updates = pd.to_datetime(
             selected["provider_last_update"], utc=True, errors="coerce"
         )
+        # A book that has not moved its number is still offering it, so the
+        # consensus keeps every pregame provider; freshness is proven by the
+        # count of providers that refreshed inside the staleness limit.
+        fresh_spreads = 0
         if provider_updates.isna().any() or provider_updates.empty:
             problems.append(f"{label} closing providers lack update timestamps")
-            staleness = None
         else:
-            staleness = (kickoff - provider_updates.min()).total_seconds()
             if provider_updates.ge(kickoff).any():
                 problems.append(
                     f"{label} selected a provider update at or after kickoff"
                 )
-        if staleness is not None and staleness > max_offer_staleness_seconds:
-            problems.append(
-                f"{label} closing provider update is {staleness:.0f}s before "
-                f"kickoff; maximum is {max_offer_staleness_seconds:.0f}s"
+            fresh_spreads = int(
+                (kickoff - provider_updates)
+                .dt.total_seconds()
+                .le(max_offer_staleness_seconds)
+                .sum()
             )
-        closing_totals = offers[
+            if fresh_spreads < min_providers:
+                problems.append(
+                    f"{label} closing snapshot has {fresh_spreads} providers "
+                    f"updated within {max_offer_staleness_seconds:.0f}s of "
+                    f"kickoff; minimum is {min_providers}"
+                )
+        # Totals close in the last pregame poll that requested them, which
+        # is the spread snapshot unless kickoff moved after that pull.
+        pregame_totals = offers[
             offers["game_id"].eq(game_id)
-            & offers["snapshot_id"].eq(anchor["closing_snapshot_id"])
             & offers["market"].eq("totals")
             & offers["phase"].eq("pregame")
+            & offers["fetched_at"].le(closing_fetched_at)
         ]
+        totals_snapshot = (
+            pregame_totals.sort_values("fetched_at", kind="stable")["snapshot_id"].iloc[
+                -1
+            ]
+            if not pregame_totals.empty
+            else anchor["closing_snapshot_id"]
+        )
         paired_total_updates = _paired_total_provider_updates(
-            closing_totals,
+            pregame_totals[pregame_totals["snapshot_id"].eq(totals_snapshot)],
             set(selected["provider_key"].dropna().astype(str)),
         )
-        total_providers = len(paired_total_updates)
-        if total_providers < min_providers:
+        fresh_totals = sum(
+            (kickoff - oldest).total_seconds() <= max_offer_staleness_seconds
+            for oldest, _ in paired_total_updates.values()
+        )
+        if fresh_totals < min_providers:
             problems.append(
-                f"{label} closing snapshot has {total_providers} paired "
-                f"spread/total providers; minimum is {min_providers}"
+                f"{label} closing totals have {fresh_totals} paired providers "
+                f"updated within {max_offer_staleness_seconds:.0f}s of kickoff; "
+                f"minimum is {min_providers}"
             )
-        if paired_total_updates:
-            oldest_total_update = min(
-                oldest for oldest, _ in paired_total_updates.values()
+        if (
+            paired_total_updates
+            and max(newest for _, newest in paired_total_updates.values()) >= kickoff
+        ):
+            problems.append(
+                f"{label} selected a total provider update at or after kickoff"
             )
-            newest_total_update = max(
-                newest for _, newest in paired_total_updates.values()
-            )
-            total_staleness = (kickoff - oldest_total_update).total_seconds()
-            if newest_total_update >= kickoff:
-                problems.append(
-                    f"{label} selected a total provider update at or after kickoff"
-                )
-            if total_staleness > max_offer_staleness_seconds:
-                problems.append(
-                    f"{label} closing total provider update is "
-                    f"{total_staleness:.0f}s before kickoff; maximum is "
-                    f"{max_offer_staleness_seconds:.0f}s"
-                )
         post_kickoff = events[
             events["game_id"].eq(game_id)
             & events["fetched_at"].ge(kickoff)
@@ -836,11 +936,40 @@ def validate_completed_window(
             )
             details.append(
                 f"{label}: froze {anchor['closing_snapshot_id']} at "
-                f"{closing_fetched_at.isoformat()} from {providers} spread and "
-                f"{total_providers} paired-total providers; "
-                f"ignored {live_offers} live offers"
+                f"{closing_fetched_at.isoformat()} from {providers} spread "
+                f"providers ({fresh_spreads} fresh) and {len(paired_total_updates)} "
+                f"paired-total providers ({fresh_totals} fresh) in "
+                f"{totals_snapshot}; ignored {live_offers} live offers"
             )
     return problems, details
+
+
+def _provider_kickoffs(
+    events: pd.DataFrame, game_ids: tuple[int, ...]
+) -> dict[int, pd.Timestamp]:
+    """Kickoff per game as the provider reported it when the game went live.
+
+    The frozen schedule is only a fallback: the closing line is the last
+    pregame quote before the kickoff the provider actually committed to.
+    """
+    if events.empty or "commence_time" not in events:
+        return {}
+    started = events[
+        events["game_id"].isin(game_ids) & events["phase"].isin(["live", "final"])
+    ].copy()
+    if started.empty:
+        return {}
+    started["commence_time"] = pd.to_datetime(
+        started["commence_time"], utc=True, errors="coerce"
+    )
+    started = started.dropna(subset=["commence_time", "fetched_at"])
+    started = started.sort_values("fetched_at", kind="stable").drop_duplicates(
+        "game_id"
+    )
+    return {
+        int(game_id): commence
+        for game_id, commence in zip(started["game_id"], started["commence_time"])
+    }
 
 
 def _write_market_anchors(season: int, built: pd.DataFrame) -> None:
@@ -869,6 +998,7 @@ def run_kickoff_window(
     min_quota: int = 50,
     max_failures: int = 3,
     max_wait_hours: float = 2.0,
+    max_extension_minutes: float = 30.0,
     forecast_directory: str | None = None,
     max_forecast_age_hours: float = 48.0,
     max_source_age_hours: float = 48.0,
@@ -924,7 +1054,12 @@ def run_kickoff_window(
         interval_seconds=interval_seconds,
     )
     market_plan = plan_kickoff_poll_markets(target, plan, interval_seconds)
-    quota_problems, quota_details = _quota_problems(frames, market_plan, min_quota)
+    if max_extension_minutes < 0:
+        raise ValueError("--max-extension-minutes must be nonnegative")
+    extension_polls = ceil(max_extension_minutes * 60 / interval_seconds)
+    quota_problems, quota_details = _quota_problems(
+        frames, market_plan, min_quota, extension_polls
+    )
     if quota_problems:
         raise ValueError("; ".join(quota_problems))
     for detail in quota_details:
@@ -957,13 +1092,18 @@ def run_kickoff_window(
         post_minutes=post_minutes,
         interval_seconds=interval_seconds,
     )
-    active_market_plan = plan_kickoff_poll_markets(
-        target, active_plan, interval_seconds
+    planner = KickoffPollPlanner(
+        target,
+        interval_seconds=interval_seconds,
+        post_minutes=post_minutes,
+        max_polls=active_plan.polls + extension_polls,
+        progress=progress,
+        now=now,
     )
     completed = run_live_polling(
         season,
         schedule,
-        polls=active_plan.polls,
+        polls=planner.max_polls,
         interval_seconds=interval_seconds,
         lookback_hours=lookback_hours,
         lookahead_hours=lookahead_hours,
@@ -971,14 +1111,17 @@ def run_kickoff_window(
         min_quota=min_quota,
         max_failures=max_failures,
         required_game_ids=target.game_ids,
-        poll_markets=active_market_plan,
+        poll_markets=planner,
         progress=progress,
         sleep=sleep,
     )
-    if completed != active_plan.polls:
+    if planner.pending:
+        unsettled = ", ".join(
+            planner.labels[game_id] for game_id in sorted(planner.pending)
+        )
         raise ValueError(
-            f"completed {completed} of {active_plan.polls} planned polls; "
-            "market anchors were not changed"
+            f"{unsettled} never reached a live or final provider state after "
+            f"{completed} polls; market anchors were not changed"
         )
 
     replay_problems, frames = verify_live_snapshots(season)
@@ -1006,4 +1149,5 @@ def run_kickoff_window(
         plan=active_plan,
         anchor_count=len(built),
         target_details=tuple(target_details),
+        polls_completed=completed,
     )

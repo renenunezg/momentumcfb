@@ -628,6 +628,92 @@ def test_polling_passes_full_window_reserve_and_required_targets(monkeypatch):
     ]
     assert sleeps == [1.5, 1.5]
 
+    # Replay of the 2026-09-10 capture: the provider moved kickoff from
+    # 00:00 to 00:05 at the second poll. The planner must move the totals
+    # pull to the last pregame poll before the new kickoff, keep polling past
+    # the scheduled window until the game is observed live, then stop.
+    kickoff_at = pd.Timestamp("2026-09-11T00:00:00Z")
+    moved_at = kickoff_at + pd.Timedelta(minutes=5)
+    drift_target = kickoff.KickoffTarget(
+        game_ids=(101,),
+        first_kickoff=kickoff_at,
+        last_kickoff=kickoff_at,
+        labels=("Florida A&M at Miami (101)",),
+        kickoffs=(kickoff_at,),
+    )
+    wall = [kickoff_at - pd.Timedelta(minutes=5)]
+    planner = kickoff.KickoffPollPlanner(
+        drift_target,
+        interval_seconds=120,
+        post_minutes=5,
+        max_polls=6 + 15,
+        progress=lambda message: None,
+        now=lambda: wall[0],
+    )
+    commence = [kickoff_at, moved_at, moved_at, moved_at, moved_at, moved_at]
+    phases = ["pregame"] * 5 + ["live"]
+    observed = []
+
+    def drifting_capture(
+        client,
+        season,
+        schedule,
+        lookback_hours,
+        lookahead_hours,
+        days_from,
+        min_quota,
+        required_game_ids,
+        markets,
+        future_poll_markets,
+    ):
+        index = len(observed)
+        observed.append((wall[0], markets, len(future_poll_markets)))
+        snapshot = live.LiveSnapshot(
+            snapshot_id=f"poll-{index}",
+            poll=_snapshot().poll,
+            events=pd.DataFrame(
+                {
+                    "game_id": [101],
+                    "commence_time": [commence[index]],
+                    "phase": [phases[index]],
+                }
+            ),
+            offers=pd.DataFrame(),
+        )
+        wall[0] = wall[0] + pd.Timedelta(seconds=120)
+        return snapshot
+
+    monkeypatch.setattr(live, "capture_live_snapshot", drifting_capture)
+    completed = live.run_live_polling(
+        2026,
+        _schedule(),
+        polls=planner.max_polls,
+        interval_seconds=120,
+        lookback_hours=1,
+        lookahead_hours=2,
+        days_from=None,
+        min_quota=20,
+        max_failures=3,
+        required_game_ids=(101,),
+        poll_markets=planner,
+        progress=lambda message: None,
+        sleep=lambda seconds: None,
+        monotonic=lambda: 0.0,
+    )
+    assert completed == 6
+    assert planner.pending == set()
+    assert [markets for _, markets, _ in observed] == [
+        live.LIVE_MARKETS,
+        live.LIVE_MARKETS,
+        live.LIVE_MARKETS,
+        live.LIVE_MARKETS,
+        live.CLOSING_MARKETS,
+        live.LIVE_MARKETS,
+    ]
+    assert observed[4][0] == moved_at - pd.Timedelta(minutes=2)
+    # The reservation follows the moved kickoff plus the post window.
+    assert observed[0][2] == 5 and observed[5][2] == 3
+
     kickoff_at = pd.Timestamp("2026-08-29T16:00:00Z")
     target = kickoff.KickoffTarget(
         game_ids=(101,),
@@ -917,7 +1003,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
         "offers": frames["offers"][frames["offers"]["market"].ne("totals")],
     }
     problems, _ = kickoff.validate_completed_window(target, without_totals, anchors)
-    assert any("0 paired spread/total providers" in problem for problem in problems)
+    assert any("0 paired providers updated" in problem for problem in problems)
 
     postkick_provider = {**frames, "offers": frames["offers"].copy()}
     postkick_provider["offers"].loc[
@@ -942,6 +1028,69 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     problems, _ = kickoff.validate_completed_window(target, frames, leaked)
     assert any("post-kickoff snapshot" in problem for problem in problems)
     assert any("closing snapshot has 0 providers" in problem for problem in problems)
+
+    # One book holding a static number does not stale the window while two
+    # providers refreshed inside the limit; fewer fresh providers does.
+    static_book = {**frames, "offers": frames["offers"].copy()}
+    static_book["offers"].loc[
+        static_book["offers"]["provider_key"].eq("a"), "provider_last_update"
+    ] = starts_at - pd.Timedelta(minutes=10)
+    problems, _ = kickoff.validate_completed_window(target, static_book, anchors)
+    assert any("1 providers updated within 300s" in problem for problem in problems)
+    assert any("1 paired providers updated" in problem for problem in problems)
+    problems, _ = kickoff.validate_completed_window(
+        target, static_book, anchors, min_providers=1
+    )
+    assert problems == []
+
+    # The provider's kickoff, not the frozen schedule, bounds the close: when
+    # commence_time moves later, a snapshot after the scheduled kickoff is
+    # still pregame, and totals close in the last poll that requested them.
+    moved = starts_at + pd.Timedelta(minutes=5)
+    late_close = starts_at + pd.Timedelta(minutes=3)
+    live_late = moved + pd.Timedelta(seconds=20)
+    drifted_events = pd.DataFrame(
+        {
+            "game_id": [101, 101, 101],
+            "fetched_at": [pregame, late_close, live_late],
+            "commence_time": [starts_at, moved, moved],
+            "phase": ["pregame", "pregame", "live"],
+        }
+    )
+    late_spreads = frames["offers"][frames["offers"]["snapshot_id"].eq("close")]
+    late_spreads = late_spreads[late_spreads["market"].eq("spreads")].assign(
+        snapshot_id="late",
+        fetched_at=late_close,
+        provider_last_update=late_close - pd.Timedelta(seconds=30),
+    )
+    early_totals = frames["offers"][frames["offers"]["market"].eq("totals")].assign(
+        provider_last_update=moved - pd.Timedelta(seconds=240)
+    )
+    drifted = {
+        "events": drifted_events,
+        "offers": pd.concat([late_spreads, early_totals], ignore_index=True),
+    }
+    late_anchor = anchors.assign(
+        closing_snapshot_id="late",
+        closing_fetched_at=late_close,
+        latest_provider_update=late_close - pd.Timedelta(seconds=30),
+    )
+    problems, details = kickoff.validate_completed_window(target, drifted, late_anchor)
+    assert problems == []
+    assert any("+300s from the frozen schedule" in detail for detail in details)
+    assert any(
+        "paired-total providers (2 fresh) in close" in detail for detail in details
+    )
+    stale_totals = {
+        **drifted,
+        "offers": drifted["offers"].assign(
+            provider_last_update=lambda offers: offers["provider_last_update"].where(
+                offers["market"].ne("totals"), moved - pd.Timedelta(seconds=400)
+            )
+        ),
+    }
+    problems, _ = kickoff.validate_completed_window(target, stale_totals, late_anchor)
+    assert any("0 paired providers updated" in problem for problem in problems)
 
     # Fresh-runner acceptance: use one frozen weekly artifact even with a
     # missing/stale opening forecast. Its schedule also drives market anchors.
