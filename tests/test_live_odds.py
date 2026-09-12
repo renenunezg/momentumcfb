@@ -680,8 +680,12 @@ def test_polling_passes_full_window_reserve_and_required_targets(monkeypatch):
             ),
             offers=pd.DataFrame(),
         )
-        wall[0] = wall[0] + pd.Timedelta(seconds=120)
         return snapshot
+
+    def advance_wall(seconds):
+        # The wall clock moves between polls; the planner must read it after
+        # the sleep, at poll time, or every plan is one interval early.
+        wall[0] = wall[0] + pd.Timedelta(seconds=120)
 
     monkeypatch.setattr(live, "capture_live_snapshot", drifting_capture)
     completed = live.run_live_polling(
@@ -697,7 +701,7 @@ def test_polling_passes_full_window_reserve_and_required_targets(monkeypatch):
         required_game_ids=(101,),
         poll_markets=planner,
         progress=lambda message: None,
-        sleep=lambda seconds: None,
+        sleep=advance_wall,
         monotonic=lambda: 0.0,
     )
     assert completed == 6
