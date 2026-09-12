@@ -889,14 +889,17 @@ def run_live_polling(
     latest: LiveSnapshot | None = None
     started_at = monotonic()
     for poll_index in range(polls):
+        if poll_index:
+            due_at = started_at + poll_index * interval_seconds
+            sleep(max(0.0, due_at - monotonic()))
+        # Plan at poll time, after the sleep: a planner that measures the
+        # remaining pregame polls from the wall clock must see this poll's
+        # own time, not the previous poll's.
         plan = tuple(
             normalize_live_markets(markets) for markets in planner(poll_index, latest)
         )
         if not plan:
             break
-        if poll_index:
-            due_at = started_at + poll_index * interval_seconds
-            sleep(max(0.0, due_at - monotonic()))
         markets = plan[0]
         try:
             snapshot = capture_live_snapshot(
