@@ -96,8 +96,149 @@ def _utc(value=None) -> pd.Timestamp:
     return stamp.tz_convert("UTC")
 
 
-def _artifact_frame(season: int, week: int, name: str) -> pd.DataFrame:
-    return store.read_preseason_forecast_artifact(season, week, name)
+def _load_preseason_artifacts(
+    season: int, week: int
+) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    frames: dict[str, pd.DataFrame] = {}
+    problems: list[str] = []
+    for name in (
+        "source_manifest",
+        "ratings",
+        "unit_ratings",
+        "projections",
+        "market_comparisons",
+    ):
+        try:
+            frames[name] = store.read_preseason_forecast_artifact(season, week, name)
+        except (FileNotFoundError, ValueError) as exc:
+            problems.append(f"missing or unreadable preseason {name}: {exc}")
+    return frames, problems
+
+
+def _manifest_source_problems(manifest: pd.DataFrame) -> tuple[list[str], list[str]]:
+    problems: list[str] = []
+    warnings: list[str] = []
+    duplicated = manifest["source"].duplicated()
+    if duplicated.any():
+        problems.append(
+            f"source manifest has {int(duplicated.sum())} duplicate sources"
+        )
+    sources = set(manifest["source"].dropna().astype(str))
+    missing_sources = sorted(REQUIRED_PRESEASON_SOURCES - sources)
+    if missing_sources:
+        problems.append("source manifest is missing: " + ", ".join(missing_sources))
+    for row in manifest.itertuples():
+        source = str(row.source)
+        row_count = int(row.row_count)
+        is_empty = bool(row.is_empty)
+        if is_empty != (row_count == 0):
+            problems.append(f"source {source} row_count and is_empty disagree")
+        if not is_empty:
+            continue
+        if source in ALLOWED_EMPTY_SOURCES:
+            warnings.append(
+                f"source {source} is empty; the documented neutral fallback "
+                "remains active"
+            )
+        elif source not in REQUIRED_PRESEASON_SOURCES:
+            warnings.append(
+                f"optional source {source} is empty; required CFBD sources "
+                "remain available"
+            )
+        else:
+            problems.append(f"required source {source} is empty")
+    return problems, warnings
+
+
+def _timestamp_age_problem(
+    age_hours: float, max_age_hours: float, subject: str, stale: str
+) -> str | None:
+    if age_hours < -5 / 60:
+        return f"{subject} in the future"
+    if age_hours > max_age_hours:
+        return f"{stale} is {age_hours:.1f}h old; maximum is {max_age_hours:.1f}h"
+    return None
+
+
+def _manifest_readiness(
+    manifest: pd.DataFrame, now: pd.Timestamp, max_source_age_hours: float
+) -> tuple[list[str], list[str], list[str]]:
+    required_columns = {"source", "source_fetched_at", "row_count", "is_empty"}
+    missing_columns = sorted(required_columns - set(manifest.columns))
+    if missing_columns:
+        return (
+            ["source manifest is missing columns: " + ", ".join(missing_columns)],
+            [],
+            [],
+        )
+    problems, warnings = _manifest_source_problems(manifest)
+    details: list[str] = []
+    source_times = pd.to_datetime(
+        manifest["source_fetched_at"], utc=True, errors="coerce"
+    )
+    if source_times.isna().any():
+        problems.append("source manifest has invalid fetched timestamps")
+    elif not source_times.empty:
+        age_hours = (now - source_times.min()).total_seconds() / 3600.0
+        problem = _timestamp_age_problem(
+            age_hours,
+            max_source_age_hours,
+            "source manifest timestamps are",
+            "oldest preseason source",
+        )
+        if problem:
+            problems.append(problem)
+        details.append(
+            f"preseason sources: {len(manifest)} rows, oldest {age_hours:.1f}h"
+        )
+    return problems, warnings, details
+
+
+def _projection_readiness(
+    projections: pd.DataFrame, now: pd.Timestamp, max_forecast_age_hours: float
+) -> tuple[list[str], list[str]]:
+    if projections.empty:
+        return ["preseason projections are empty"], []
+    if "forecast_created_at" not in projections:
+        return ["preseason projections lack forecast_created_at"], []
+    created = pd.to_datetime(
+        projections["forecast_created_at"], utc=True, errors="coerce"
+    )
+    if created.isna().any() or created.nunique() != 1:
+        return ["preseason projections do not share one valid forecast timestamp"], []
+    forecast_time = created.iloc[0]
+    age_hours = (now - forecast_time).total_seconds() / 3600.0
+    problem = _timestamp_age_problem(
+        age_hours, max_forecast_age_hours, "forecast timestamp is", "preseason forecast"
+    )
+    return [problem] if problem else [], [
+        f"preseason forecast: {len(projections)} games, "
+        f"created {forecast_time.isoformat()}"
+    ]
+
+
+def _rating_readiness(
+    ratings: pd.DataFrame, units: pd.DataFrame
+) -> tuple[list[str], list[str]]:
+    problems: list[str] = []
+    if ratings.empty:
+        problems.append("preseason ratings are empty")
+    if set(ratings.get("team_id", [])) != set(units.get("team_id", [])):
+        problems.append("team ratings and unit ratings cover different teams")
+        return problems, []
+    return problems, [f"team ratings: {len(ratings)} teams"]
+
+
+def _anchor_readiness(
+    projections: pd.DataFrame, season: int, week: int
+) -> tuple[list[str], list[str]]:
+    try:
+        anchors = load_serving_anchors("serving", season=season, week=week)
+    except (FileNotFoundError, ValueError) as exc:
+        return [f"preseason serving anchors are not loadable: {exc}"], []
+    if set(anchors["game_id"]) != set(projections["game_id"]):
+        return ["preseason serving anchors and projections cover different games"], []
+    return [], [f"preseason anchors: {len(anchors)} games round-trip cleanly"]
 
 
 def check_forecast_readiness(
@@ -115,124 +256,29 @@ def check_forecast_readiness(
         return check_weekly_capture_readiness(
             forecast_directory, season, as_of=now, max_age_hours=max_forecast_age_hours
         )
-    problems: list[str] = []
+    frames, problems = _load_preseason_artifacts(season, week)
     warnings: list[str] = []
     details: list[str] = []
-    frames: dict[str, pd.DataFrame] = {}
-    for name in (
-        "source_manifest",
-        "ratings",
-        "unit_ratings",
-        "projections",
-        "market_comparisons",
-    ):
-        try:
-            frames[name] = _artifact_frame(season, week, name)
-        except (FileNotFoundError, ValueError) as exc:
-            problems.append(f"missing or unreadable preseason {name}: {exc}")
 
     manifest = frames.get("source_manifest")
     if manifest is not None:
-        required_columns = {
-            "source",
-            "source_fetched_at",
-            "row_count",
-            "is_empty",
-        }
-        missing_columns = sorted(required_columns - set(manifest.columns))
-        if missing_columns:
-            problems.append(
-                "source manifest is missing columns: " + ", ".join(missing_columns)
-            )
-        else:
-            duplicated = manifest["source"].duplicated()
-            if duplicated.any():
-                problems.append(
-                    f"source manifest has {int(duplicated.sum())} duplicate sources"
-                )
-            sources = set(manifest["source"].dropna().astype(str))
-            missing_sources = sorted(REQUIRED_PRESEASON_SOURCES - sources)
-            if missing_sources:
-                problems.append(
-                    "source manifest is missing: " + ", ".join(missing_sources)
-                )
-            for row in manifest.itertuples():
-                source = str(row.source)
-                row_count = int(row.row_count)
-                is_empty = bool(row.is_empty)
-                if is_empty != (row_count == 0):
-                    problems.append(f"source {source} row_count and is_empty disagree")
-                if is_empty:
-                    if source in ALLOWED_EMPTY_SOURCES:
-                        warnings.append(
-                            f"source {source} is empty; the documented neutral "
-                            "fallback remains active"
-                        )
-                    elif source not in REQUIRED_PRESEASON_SOURCES:
-                        warnings.append(
-                            f"optional source {source} is empty; required CFBD "
-                            "sources remain available"
-                        )
-                    else:
-                        problems.append(f"required source {source} is empty")
-            source_times = pd.to_datetime(
-                manifest["source_fetched_at"], utc=True, errors="coerce"
-            )
-            if source_times.isna().any():
-                problems.append("source manifest has invalid fetched timestamps")
-            elif not source_times.empty:
-                oldest = source_times.min()
-                age_hours = (now - oldest).total_seconds() / 3600.0
-                if age_hours < -5 / 60:
-                    problems.append("source manifest timestamps are in the future")
-                elif age_hours > max_source_age_hours:
-                    problems.append(
-                        f"oldest preseason source is {age_hours:.1f}h old; "
-                        f"maximum is {max_source_age_hours:.1f}h"
-                    )
-                details.append(
-                    f"preseason sources: {len(manifest)} rows, oldest {age_hours:.1f}h"
-                )
+        found, warned, noted = _manifest_readiness(manifest, now, max_source_age_hours)
+        problems.extend(found)
+        warnings.extend(warned)
+        details.extend(noted)
 
     projections = frames.get("projections")
-    forecast_time = None
     if projections is not None:
-        if projections.empty:
-            problems.append("preseason projections are empty")
-        elif "forecast_created_at" not in projections:
-            problems.append("preseason projections lack forecast_created_at")
-        else:
-            created = pd.to_datetime(
-                projections["forecast_created_at"], utc=True, errors="coerce"
-            )
-            if created.isna().any() or created.nunique() != 1:
-                problems.append(
-                    "preseason projections do not share one valid forecast timestamp"
-                )
-            else:
-                forecast_time = created.iloc[0]
-                age_hours = (now - forecast_time).total_seconds() / 3600.0
-                if age_hours < -5 / 60:
-                    problems.append("forecast timestamp is in the future")
-                elif age_hours > max_forecast_age_hours:
-                    problems.append(
-                        f"preseason forecast is {age_hours:.1f}h old; maximum is "
-                        f"{max_forecast_age_hours:.1f}h"
-                    )
-                details.append(
-                    f"preseason forecast: {len(projections)} games, "
-                    f"created {forecast_time.isoformat()}"
-                )
+        found, noted = _projection_readiness(projections, now, max_forecast_age_hours)
+        problems.extend(found)
+        details.extend(noted)
 
     ratings = frames.get("ratings")
     units = frames.get("unit_ratings")
     if ratings is not None and units is not None:
-        if ratings.empty:
-            problems.append("preseason ratings are empty")
-        if set(ratings.get("team_id", [])) != set(units.get("team_id", [])):
-            problems.append("team ratings and unit ratings cover different teams")
-        else:
-            details.append(f"team ratings: {len(ratings)} teams")
+        found, noted = _rating_readiness(ratings, units)
+        problems.extend(found)
+        details.extend(noted)
 
     comparisons = frames.get("market_comparisons")
     if projections is not None and comparisons is not None:
@@ -240,19 +286,9 @@ def check_forecast_readiness(
             problems.append("projections and market comparisons cover different games")
 
     if projections is not None and not projections.empty:
-        try:
-            anchors = load_serving_anchors("serving", season=season, week=week)
-        except (FileNotFoundError, ValueError) as exc:
-            problems.append(f"preseason serving anchors are not loadable: {exc}")
-        else:
-            if set(anchors["game_id"]) != set(projections["game_id"]):
-                problems.append(
-                    "preseason serving anchors and projections cover different games"
-                )
-            else:
-                details.append(
-                    f"preseason anchors: {len(anchors)} games round-trip cleanly"
-                )
+        found, noted = _anchor_readiness(projections, season, week)
+        problems.extend(found)
+        details.extend(noted)
     return problems, warnings, details
 
 
@@ -632,6 +668,44 @@ def check_live_preflight(
     return problems, warnings, details
 
 
+def _window_schedule(season: int, forecast_directory: str | None) -> pd.DataFrame:
+    if forecast_directory:
+        return load_weekly_capture_forecast(forecast_directory, season)[
+            "schedule_coverage"
+        ]
+    return load_division_one_schedule(season)
+
+
+def _plan_target(
+    season: int,
+    frames: dict[str, pd.DataFrame],
+    schedule: pd.DataFrame,
+    now: pd.Timestamp,
+    *,
+    game_ids: list[int] | tuple[int, ...] | None,
+    cluster_minutes: float,
+    lead_minutes: float,
+    post_minutes: float,
+    interval_seconds: float,
+) -> tuple[KickoffTarget, KickoffWindowPlan, tuple[tuple[str, ...], ...]]:
+    target = resolve_kickoff_target(
+        season,
+        frames,
+        as_of=now,
+        game_ids=game_ids,
+        cluster_minutes=cluster_minutes,
+        schedule=schedule,
+    )
+    plan = plan_kickoff_window(
+        target,
+        as_of=now,
+        lead_minutes=lead_minutes,
+        post_minutes=post_minutes,
+        interval_seconds=interval_seconds,
+    )
+    return target, plan, plan_kickoff_poll_markets(target, plan, interval_seconds)
+
+
 def check_kickoff_readiness(
     season: int,
     week: int = 1,
@@ -670,28 +744,17 @@ def check_kickoff_readiness(
     problems.extend(live_problems)
     target = None
     try:
-        target = resolve_kickoff_target(
+        target, plan, market_plan = _plan_target(
             season,
             frames,
-            as_of=now,
+            _window_schedule(season, forecast_directory),
+            now,
             game_ids=game_ids,
             cluster_minutes=cluster_minutes,
-            schedule=(
-                load_weekly_capture_forecast(forecast_directory, season)[
-                    "schedule_coverage"
-                ]
-                if forecast_directory
-                else None
-            ),
-        )
-        plan = plan_kickoff_window(
-            target,
-            as_of=now,
             lead_minutes=lead_minutes,
             post_minutes=post_minutes,
             interval_seconds=interval_seconds,
         )
-        market_plan = plan_kickoff_poll_markets(target, plan, interval_seconds)
     except ValueError as exc:
         problems.append(str(exc))
     else:
@@ -781,6 +844,157 @@ def _paired_total_provider_updates(
     return valid
 
 
+def _closing_spread_check(
+    label: str,
+    selected: pd.DataFrame,
+    kickoff: pd.Timestamp,
+    max_offer_staleness_seconds: float,
+    min_providers: int,
+) -> tuple[list[str], int, int]:
+    """Problems plus the provider count and fresh-provider count of the spread."""
+    problems: list[str] = []
+    providers = int(selected["provider_key"].nunique())
+    if providers < min_providers:
+        problems.append(
+            f"{label} closing snapshot has {providers} providers; "
+            f"minimum is {min_providers}"
+        )
+    provider_updates = pd.to_datetime(
+        selected["provider_last_update"], utc=True, errors="coerce"
+    )
+    # A book that has not moved its number is still offering it, so the
+    # consensus keeps every pregame provider; freshness is proven by the
+    # count of providers that refreshed inside the staleness limit.
+    if provider_updates.isna().any() or provider_updates.empty:
+        problems.append(f"{label} closing providers lack update timestamps")
+        return problems, providers, 0
+    if provider_updates.ge(kickoff).any():
+        problems.append(f"{label} selected a provider update at or after kickoff")
+    fresh = int(
+        (kickoff - provider_updates)
+        .dt.total_seconds()
+        .le(max_offer_staleness_seconds)
+        .sum()
+    )
+    if fresh < min_providers:
+        problems.append(
+            f"{label} closing snapshot has {fresh} providers updated within "
+            f"{max_offer_staleness_seconds:.0f}s of kickoff; minimum is "
+            f"{min_providers}"
+        )
+    return problems, providers, fresh
+
+
+def _closing_totals_check(
+    label: str,
+    game_offers: pd.DataFrame,
+    closing_snapshot_id: str,
+    closing_fetched_at: pd.Timestamp,
+    spread_providers: set[str],
+    kickoff: pd.Timestamp,
+    max_offer_staleness_seconds: float,
+    min_providers: int,
+) -> tuple[list[str], str, int, int]:
+    """Problems plus the totals snapshot, paired-provider count and fresh count."""
+    # Totals close in the last pregame poll that requested them, which
+    # is the spread snapshot unless kickoff moved after that pull.
+    pregame_totals = game_offers[
+        game_offers["market"].eq("totals")
+        & game_offers["phase"].eq("pregame")
+        & game_offers["fetched_at"].le(closing_fetched_at)
+    ]
+    totals_snapshot = (
+        pregame_totals.sort_values("fetched_at", kind="stable")["snapshot_id"].iloc[-1]
+        if not pregame_totals.empty
+        else closing_snapshot_id
+    )
+    paired = _paired_total_provider_updates(
+        pregame_totals[pregame_totals["snapshot_id"].eq(totals_snapshot)],
+        spread_providers,
+    )
+    fresh = sum(
+        (kickoff - oldest).total_seconds() <= max_offer_staleness_seconds
+        for oldest, _ in paired.values()
+    )
+    problems: list[str] = []
+    if fresh < min_providers:
+        problems.append(
+            f"{label} closing totals have {fresh} paired providers updated within "
+            f"{max_offer_staleness_seconds:.0f}s of kickoff; minimum is "
+            f"{min_providers}"
+        )
+    if paired and max(newest for _, newest in paired.values()) >= kickoff:
+        problems.append(f"{label} selected a total provider update at or after kickoff")
+    return problems, totals_snapshot, len(paired), fresh
+
+
+def _validate_target_game(
+    game_id: int,
+    label: str,
+    kickoff: pd.Timestamp,
+    anchors: pd.DataFrame,
+    game_offers: pd.DataFrame,
+    game_events: pd.DataFrame,
+    *,
+    max_offer_staleness_seconds: float,
+    min_providers: int,
+) -> tuple[list[str], str | None]:
+    """Prove one target's anchor is a fresh pregame line followed by live state."""
+    row = anchors[anchors["game_id"].eq(game_id)]
+    if row.empty:
+        return [f"{label} has no market anchor"], None
+    if len(row) != 1:
+        return [f"{label} has more than one market anchor"], None
+    anchor = row.iloc[0]
+    closing_fetched_at = _utc(anchor["closing_fetched_at"])
+    problems: list[str] = []
+    if closing_fetched_at >= kickoff:
+        problems.append(f"{label} selected a post-kickoff snapshot")
+    selected = game_offers[
+        game_offers["snapshot_id"].eq(anchor["closing_snapshot_id"])
+        & game_offers["market"].eq("spreads")
+        & game_offers["selection"].eq("home")
+        & game_offers["phase"].eq("pregame")
+    ]
+    spread_problems, providers, fresh_spreads = _closing_spread_check(
+        label, selected, kickoff, max_offer_staleness_seconds, min_providers
+    )
+    problems.extend(spread_problems)
+    total_problems, totals_snapshot, paired_totals, fresh_totals = (
+        _closing_totals_check(
+            label,
+            game_offers,
+            anchor["closing_snapshot_id"],
+            closing_fetched_at,
+            set(selected["provider_key"].dropna().astype(str)),
+            kickoff,
+            max_offer_staleness_seconds,
+            min_providers,
+        )
+    )
+    problems.extend(total_problems)
+    post_kickoff = game_events[
+        game_events["fetched_at"].ge(kickoff)
+        & game_events["phase"].isin(["live", "final"])
+    ]
+    if post_kickoff.empty:
+        problems.append(
+            f"{label} has no stored post-kickoff live or final provider state"
+        )
+    if problems:
+        return problems, None
+    live_offers = int(
+        (game_offers["fetched_at"].ge(kickoff) & game_offers["phase"].eq("live")).sum()
+    )
+    return [], (
+        f"{label}: froze {anchor['closing_snapshot_id']} at "
+        f"{closing_fetched_at.isoformat()} from {providers} spread "
+        f"providers ({fresh_spreads} fresh) and {paired_totals} "
+        f"paired-total providers ({fresh_totals} fresh) in "
+        f"{totals_snapshot}; ignored {live_offers} live offers"
+    )
+
+
 def validate_completed_window(
     target: KickoffTarget,
     frames: dict[str, pd.DataFrame],
@@ -831,116 +1045,19 @@ def validate_completed_window(
                 f"{label}: provider kickoff {kickoff.isoformat()} is "
                 f"{drift:+.0f}s from the frozen schedule"
             )
-        row = anchors[anchors["game_id"].eq(game_id)]
-        if row.empty:
-            problems.append(f"{label} has no market anchor")
-            continue
-        if len(row) != 1:
-            problems.append(f"{label} has more than one market anchor")
-            continue
-        anchor = row.iloc[0]
-        closing_fetched_at = _utc(anchor["closing_fetched_at"])
-        if closing_fetched_at >= kickoff:
-            problems.append(f"{label} selected a post-kickoff snapshot")
-        selected = offers[
-            offers["game_id"].eq(game_id)
-            & offers["snapshot_id"].eq(anchor["closing_snapshot_id"])
-            & offers["market"].eq("spreads")
-            & offers["selection"].eq("home")
-            & offers["phase"].eq("pregame")
-        ]
-        providers = int(selected["provider_key"].nunique())
-        if providers < min_providers:
-            problems.append(
-                f"{label} closing snapshot has {providers} providers; "
-                f"minimum is {min_providers}"
-            )
-        provider_updates = pd.to_datetime(
-            selected["provider_last_update"], utc=True, errors="coerce"
+        game_problems, detail = _validate_target_game(
+            game_id,
+            label,
+            kickoff,
+            anchors,
+            offers[offers["game_id"].eq(game_id)],
+            events[events["game_id"].eq(game_id)],
+            max_offer_staleness_seconds=max_offer_staleness_seconds,
+            min_providers=min_providers,
         )
-        # A book that has not moved its number is still offering it, so the
-        # consensus keeps every pregame provider; freshness is proven by the
-        # count of providers that refreshed inside the staleness limit.
-        fresh_spreads = 0
-        if provider_updates.isna().any() or provider_updates.empty:
-            problems.append(f"{label} closing providers lack update timestamps")
-        else:
-            if provider_updates.ge(kickoff).any():
-                problems.append(
-                    f"{label} selected a provider update at or after kickoff"
-                )
-            fresh_spreads = int(
-                (kickoff - provider_updates)
-                .dt.total_seconds()
-                .le(max_offer_staleness_seconds)
-                .sum()
-            )
-            if fresh_spreads < min_providers:
-                problems.append(
-                    f"{label} closing snapshot has {fresh_spreads} providers "
-                    f"updated within {max_offer_staleness_seconds:.0f}s of "
-                    f"kickoff; minimum is {min_providers}"
-                )
-        # Totals close in the last pregame poll that requested them, which
-        # is the spread snapshot unless kickoff moved after that pull.
-        pregame_totals = offers[
-            offers["game_id"].eq(game_id)
-            & offers["market"].eq("totals")
-            & offers["phase"].eq("pregame")
-            & offers["fetched_at"].le(closing_fetched_at)
-        ]
-        totals_snapshot = (
-            pregame_totals.sort_values("fetched_at", kind="stable")["snapshot_id"].iloc[
-                -1
-            ]
-            if not pregame_totals.empty
-            else anchor["closing_snapshot_id"]
-        )
-        paired_total_updates = _paired_total_provider_updates(
-            pregame_totals[pregame_totals["snapshot_id"].eq(totals_snapshot)],
-            set(selected["provider_key"].dropna().astype(str)),
-        )
-        fresh_totals = sum(
-            (kickoff - oldest).total_seconds() <= max_offer_staleness_seconds
-            for oldest, _ in paired_total_updates.values()
-        )
-        if fresh_totals < min_providers:
-            problems.append(
-                f"{label} closing totals have {fresh_totals} paired providers "
-                f"updated within {max_offer_staleness_seconds:.0f}s of kickoff; "
-                f"minimum is {min_providers}"
-            )
-        if (
-            paired_total_updates
-            and max(newest for _, newest in paired_total_updates.values()) >= kickoff
-        ):
-            problems.append(
-                f"{label} selected a total provider update at or after kickoff"
-            )
-        post_kickoff = events[
-            events["game_id"].eq(game_id)
-            & events["fetched_at"].ge(kickoff)
-            & events["phase"].isin(["live", "final"])
-        ]
-        if post_kickoff.empty:
-            problems.append(
-                f"{label} has no stored post-kickoff live or final provider state"
-            )
-        if not any(label in problem for problem in problems):
-            live_offers = int(
-                offers[
-                    offers["game_id"].eq(game_id)
-                    & offers["fetched_at"].ge(kickoff)
-                    & offers["phase"].eq("live")
-                ].shape[0]
-            )
-            details.append(
-                f"{label}: froze {anchor['closing_snapshot_id']} at "
-                f"{closing_fetched_at.isoformat()} from {providers} spread "
-                f"providers ({fresh_spreads} fresh) and {len(paired_total_updates)} "
-                f"paired-total providers ({fresh_totals} fresh) in "
-                f"{totals_snapshot}; ignored {live_offers} live offers"
-            )
+        problems.extend(game_problems)
+        if detail:
+            details.append(detail)
     return problems, details
 
 
@@ -982,6 +1099,51 @@ def _write_market_anchors(season: int, built: pd.DataFrame) -> None:
             f"stored {'/'.join(artifact)} does not round-trip through the "
             "serving anchor loader"
         )
+
+
+def _wait_for_window(starts_at: pd.Timestamp, *, now, sleep, progress) -> None:
+    wait_seconds = (starts_at - _utc(now())).total_seconds()
+    if wait_seconds > 0:
+        progress(f"waiting {wait_seconds / 60:.1f}m for polling window")
+    while True:
+        remaining = (starts_at - _utc(now())).total_seconds()
+        if remaining <= 0:
+            return
+        sleep(min(remaining, 60.0))
+
+
+def _freeze_market_anchors(
+    season: int,
+    target: KickoffTarget,
+    schedule: pd.DataFrame,
+    *,
+    forecast_directory: str | None,
+    max_offer_staleness_seconds: float,
+    min_providers: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Replay the stored window, prove every target closed pregame, and write."""
+    replay_problems, frames = verify_live_snapshots(season)
+    if replay_problems:
+        raise ValueError("; ".join(replay_problems))
+    built = build_live_market_anchors(
+        season,
+        schedule=schedule if forecast_directory else None,
+    )
+    built = built[built["game_id"].isin(target.game_ids)].reset_index(drop=True)
+    validation_problems, target_details = validate_completed_window(
+        target,
+        frames,
+        built,
+        max_offer_staleness_seconds=max_offer_staleness_seconds,
+        min_providers=min_providers,
+        schedule=schedule,
+    )
+    if validation_problems:
+        raise ValueError(
+            "; ".join(validation_problems) + "; market anchors were not changed"
+        )
+    _write_market_anchors(season, built)
+    return built, target_details
 
 
 def run_kickoff_window(
@@ -1029,31 +1191,21 @@ def run_kickoff_window(
     for detail in details:
         progress(f"OK: {detail}")
 
-    schedule = (
-        load_weekly_capture_forecast(forecast_directory, season)["schedule_coverage"]
-        if forecast_directory
-        else load_division_one_schedule(season)
-    )
-
+    schedule = _window_schedule(season, forecast_directory)
     replay_problems, frames = verify_live_snapshots(season)
     if replay_problems:
         raise ValueError("; ".join(replay_problems))
-    target = resolve_kickoff_target(
+    target, plan, market_plan = _plan_target(
         season,
         frames,
-        as_of=current,
+        schedule,
+        current,
         game_ids=game_ids,
         cluster_minutes=cluster_minutes,
-        schedule=schedule,
-    )
-    plan = plan_kickoff_window(
-        target,
-        as_of=current,
         lead_minutes=lead_minutes,
         post_minutes=post_minutes,
         interval_seconds=interval_seconds,
     )
-    market_plan = plan_kickoff_poll_markets(target, plan, interval_seconds)
     if max_extension_minutes < 0:
         raise ValueError("--max-extension-minutes must be nonnegative")
     extension_polls = ceil(max_extension_minutes * 60 / interval_seconds)
@@ -1076,18 +1228,11 @@ def run_kickoff_window(
         f"{target.first_kickoff.isoformat()} through "
         f"{target.last_kickoff.isoformat()}"
     )
-    if wait_seconds > 0:
-        progress(f"waiting {wait_seconds / 60:.1f}m for polling window")
-    while True:
-        remaining = (plan.starts_at - _utc(now())).total_seconds()
-        if remaining <= 0:
-            break
-        sleep(min(remaining, 60.0))
+    _wait_for_window(plan.starts_at, now=now, sleep=sleep, progress=progress)
 
-    current = _utc(now())
     active_plan = plan_kickoff_window(
         target,
-        as_of=current,
+        as_of=_utc(now()),
         lead_minutes=lead_minutes,
         post_minutes=post_minutes,
         interval_seconds=interval_seconds,
@@ -1124,27 +1269,14 @@ def run_kickoff_window(
             f"{completed} polls; market anchors were not changed"
         )
 
-    replay_problems, frames = verify_live_snapshots(season)
-    if replay_problems:
-        raise ValueError("; ".join(replay_problems))
-    built = build_live_market_anchors(
+    built, target_details = _freeze_market_anchors(
         season,
-        schedule=schedule if forecast_directory else None,
-    )
-    built = built[built["game_id"].isin(target.game_ids)].reset_index(drop=True)
-    validation_problems, target_details = validate_completed_window(
         target,
-        frames,
-        built,
+        schedule,
+        forecast_directory=forecast_directory,
         max_offer_staleness_seconds=max_offer_staleness_seconds,
         min_providers=min_providers,
-        schedule=schedule,
     )
-    if validation_problems:
-        raise ValueError(
-            "; ".join(validation_problems) + "; market anchors were not changed"
-        )
-    _write_market_anchors(season, built)
     return KickoffRunResult(
         plan=active_plan,
         anchor_count=len(built),
