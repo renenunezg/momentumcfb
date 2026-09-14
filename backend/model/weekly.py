@@ -357,6 +357,28 @@ def run_weekly_forecast(
     projections = add_market_informed_margins(projections, offers)
     comparisons = compare_priced_offers(projections, offers)
 
+    from backend.diagnostics import disagreement_audit
+
+    prior_audit = ratings[["team_id", "team", "power_rating"]].merge(
+        preseason_ratings[
+            ["team_id", "power_rating", "power_rating_sd", "missing_input_count"]
+        ],
+        on="team_id",
+        how="left",
+        validate="one_to_one",
+        suffixes=("", "_preseason"),
+    )
+    prior_audit["power_change_from_preseason"] = (
+        prior_audit.power_rating - prior_audit.power_rating_preseason
+    )
+    prior_audit["supplied_prior_sd"] = prior_audit.team_id.isin(priors.strength_sds)
+    for index, label in enumerate(("offense", "defense")):
+        prior_audit[f"{label}_prior_sd_ppp"] = prior_audit.team_id.map(
+            lambda team_id: priors.strength_sds.get(
+                team_id, (fitted.config.strength_prior_sd_ppp,) * 2
+            )[index]
+        )
+
     coverage = target[
         [
             "game_id",
@@ -435,6 +457,18 @@ def run_weekly_forecast(
             "odds_match_coverage": matches,
             "odds_api_events": odds_events,
             "source_manifest": manifest,
+            # Keep the actual prior SDs and chronological fit inputs so a
+            # future audit can reproduce supplied-prior effects and pace.
+            "preseason_ratings": preseason_ratings,
+            "training_games": games[
+                games["model_week"].lt(forecast_week) & games["completed"].fillna(False)
+            ],
+            "forecast_schedule": target,
+            "team_prior_audit": prior_audit,
+            "market_disagreements": disagreement_audit(
+                projections,
+                availability=qb_availability,
+            ),
         },
     )
     return WeeklyForecastResult(

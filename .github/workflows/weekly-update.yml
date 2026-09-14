@@ -287,3 +287,12 @@ jobs:
           path: backend/data/processed/weekly/forecast_log/
           if-no-files-found: ignore
           retention-days: 90
+
+      - name: Preserve weekly performance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cfb-diagnostics-${{ github.run_id }}
+          path: backend/data/processed/diagnostics/
+          if-no-files-found: ignore
+          retention-days: 90

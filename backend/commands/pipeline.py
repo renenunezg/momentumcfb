@@ -160,6 +160,20 @@ def handle_weekly_update(args: Namespace) -> None:
 
 
 def handle_calibrate(args: Namespace) -> None:
+    if getattr(args, "weekly_improvements", False):
+        if args.recommendations or args.production_replay or args.seasons:
+            raise SystemExit("--weekly-improvements uses fixed historical splits")
+        from pathlib import Path
+
+        from backend.config import PROCESSED_DIR
+        from backend.model.improvement_evaluation import evaluate_weekly_improvements
+
+        evaluate_weekly_improvements(
+            Path(args.output_directory)
+            if args.output_directory
+            else PROCESSED_DIR / "calibration" / "weekly_improvements"
+        )
+        return
     if getattr(args, "recommendations", False):
         if getattr(args, "production_replay", False) or getattr(args, "seasons", None):
             raise SystemExit(

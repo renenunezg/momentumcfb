@@ -3,7 +3,11 @@
 from argparse import Namespace
 from collections.abc import Callable
 
-from backend.commands.grading import handle_grade, handle_publish_grading
+from backend.commands.grading import (
+    handle_diagnose,
+    handle_grade,
+    handle_publish_grading,
+)
 from backend.commands.ingame import (
     handle_ingame_baseline,
     handle_ingame_market_anchor,
@@ -71,6 +75,7 @@ HANDLERS: dict[str, Handler] = {
     "refresh-picks": handle_refresh_picks,
     "fetch-anchors": handle_fetch_anchors,
     "grade": handle_grade,
+    "diagnose": handle_diagnose,
     "publish-grading": handle_publish_grading,
     "ingest-players": handle_ingest_players,
     "player-values": handle_player_values,

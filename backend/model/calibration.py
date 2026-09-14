@@ -131,7 +131,8 @@ def _config_id(config: JointScoringConfig) -> str:
         f"prior_correlation={config.strength_prior_correlation:g};"
         f"pace_prior_sd={config.pace_prior_sd:g};"
         f"pool_prior_sd={config.pool_prior_sd_ppp:g};"
-        f"crossover_prior_sd={config.crossover_prior_sd:g}"
+        f"crossover_prior_sd={config.crossover_prior_sd:g};"
+        f"matchup_total_calibration={int(config.matchup_total_calibration)}"
     )
 
 
@@ -332,6 +333,7 @@ def walk_forward_season(
         projected["pace_prior_sd"] = config.pace_prior_sd
         projected["pool_prior_sd_ppp"] = config.pool_prior_sd_ppp
         projected["crossover_prior_sd"] = config.crossover_prior_sd
+        projected["matchup_total_calibration"] = config.matchup_total_calibration
 
         projected["actual_margin"] = (
             projected["actual_home_points"] - projected["actual_away_points"]
