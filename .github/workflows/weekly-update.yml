@@ -2,7 +2,7 @@ name: Weekly CFB update
 
 on:
   # Supabase pg_cron (cfb-weekly-update-dispatch) fires this via
-  # repository_dispatch Mondays at 18:17 UTC. A failed or input-blocked
+  # repository_dispatch Mondays at 18:00 UTC. A failed or input-blocked
   # run is investigated and rerun deliberately instead of scheduling a
   # speculative Tuesday retry.
   repository_dispatch:
