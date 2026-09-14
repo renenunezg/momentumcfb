@@ -63,6 +63,11 @@ def _add_pipeline_commands(sub) -> None:
     )
     calibrate.add_argument("--production-replay", action="store_true")
     calibrate.add_argument(
+        "--weekly-improvements",
+        action="store_true",
+        help="run fixed cached historical weekly-model experiments",
+    )
+    calibrate.add_argument(
         "--recommendations",
         action="store_true",
         help="calibrate integer-score probabilities on fixed chronological research splits",
@@ -330,6 +335,22 @@ def _add_publish_commands(sub) -> None:
         "and the CFBD closing line",
     )
     grade.add_argument("--season", type=int, required=True)
+    diagnose = sub.add_parser(
+        "diagnose", help="audit frozen weekly forecasts without publishing"
+    )
+    diagnose.add_argument("--season", type=int, required=True)
+    diagnose.add_argument("--week", type=int, required=True)
+    diagnose.add_argument(
+        "--forecast-directory",
+        default=None,
+        help="archived forecast directory for exact pace provenance",
+    )
+    diagnose.add_argument("--output-directory", default=None)
+    diagnose.add_argument(
+        "--shadow-calibration-directory",
+        default=None,
+        help="freeze prospective shadow totals from a historical calibration",
+    )
     grade.add_argument(
         "--regrade",
         action="store_true",

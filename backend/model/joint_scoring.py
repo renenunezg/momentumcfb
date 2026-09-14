@@ -6,8 +6,9 @@ import numpy as np
 import pandas as pd
 
 from backend.model.outputs import GameProjection, TeamRating
+from backend.model.scoring_calibration import calibrated_scores
 
-MODEL_VERSION = "joint_scoring_v9"
+MODEL_VERSION = "joint_scoring_v10"
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
 MAX_POOL_ITERATIONS = 50
@@ -44,6 +45,7 @@ class JointScoringConfig:
     # Five) carry far more of it than the blend allows. The gain is estimated
     # from points residuals and shrunk toward zero. Zero disables it.
     crossover_prior_sd: float = 0.0
+    matchup_total_calibration: bool = False
 
     def __post_init__(self) -> None:
         if isnan(self.rating_half_life_weeks) or self.rating_half_life_weeks <= 0:
@@ -103,6 +105,7 @@ DEFAULT_CONFIG = JointScoringConfig(
     # and the FBS cohort joint log loss 8.4259 to 8.4212.
     pool_prior_sd_ppp=0.2,
     crossover_prior_sd=0.6,
+    matchup_total_calibration=True,
 )
 
 
@@ -301,6 +304,14 @@ class JointScoringFit:
     training_games: int
 
     @property
+    def model_version(self) -> str:
+        return (
+            MODEL_VERSION
+            if self.config.matchup_total_calibration
+            else "joint_scoring_v9"
+        )
+
+    @property
     def team_index(self) -> dict[int, int]:
         return {
             int(team_id): index for index, team_id in enumerate(self.teams["team_id"])
@@ -319,7 +330,7 @@ class JointScoringFit:
                     season=self.season,
                     week=self.week,
                     as_of=self.as_of,
-                    model_version=MODEL_VERSION,
+                    model_version=self.model_version,
                     team_id=int(row.team_id),
                     team=row.team,
                     offense_points=float(
@@ -340,6 +351,7 @@ class JointScoringFit:
         projections = []
         index = self.team_index
         n_teams = len(self.teams)
+        classifications = self.teams["classification"].fillna("").str.lower().to_numpy()
         for game in schedule.itertuples():
             home = index[int(game.home_team_id)]
             away = index[int(game.away_team_id)]
@@ -367,6 +379,16 @@ class JointScoringFit:
             )
             expected_home = base_points + home_strength + 0.5 * home_field + crossover
             expected_away = base_points + away_strength - 0.5 * home_field - crossover
+            uncalibrated_total = max(float(expected_home), 0.0) + max(
+                float(expected_away), 0.0
+            )
+            if self.config.matchup_total_calibration:
+                expected_home, expected_away = calibrated_scores(
+                    expected_home,
+                    expected_away,
+                    classifications[home],
+                    classifications[away],
+                )
 
             score_design = np.zeros((2, 2 * n_teams + 1))
             score_design[0, home] = self.base_possessions
@@ -390,7 +412,7 @@ class JointScoringFit:
                     season=int(game.season),
                     week=int(game.week),
                     as_of=self.as_of,
-                    model_version=MODEL_VERSION,
+                    model_version=self.model_version,
                     game_id=int(game.game_id),
                     home_team_id=int(game.home_team_id),
                     home_team=game.home_team,
@@ -407,6 +429,12 @@ class JointScoringFit:
                     total_sd=total_sd,
                     margin_total_correlation=correlation,
                     degrees_of_freedom=self.config.student_t_degrees_of_freedom,
+                    expected_game_possessions=float(possessions),
+                    total_calibration_adjustment=(
+                        max(float(expected_home), 0.0)
+                        + max(float(expected_away), 0.0)
+                        - uncalibrated_total
+                    ),
                 )
             )
         return projections

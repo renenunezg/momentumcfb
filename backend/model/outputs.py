@@ -110,14 +110,22 @@ class GameProjection:
     total_sd: float
     margin_total_correlation: float
     degrees_of_freedom: float
+    expected_game_possessions: float | None = None
+    total_calibration_adjustment: float = 0.0
 
     def __post_init__(self) -> None:
+        if self.expected_game_possessions is not None and (
+            not isfinite(self.expected_game_possessions)
+            or self.expected_game_possessions <= 0
+        ):
+            raise ValueError("expected game possessions must be positive and finite")
         _validate_identity(self.game_id, str(self.game_id), "game")
         _validate_identity(self.home_team_id, self.home_team, "home_team")
         _validate_identity(self.away_team_id, self.away_team, "away_team")
         _validate_as_of(self.as_of)
         _validate_finite(
             home_field_points=self.home_field_points,
+            total_calibration_adjustment=self.total_calibration_adjustment,
             expected_home_points=self.expected_home_points,
             expected_away_points=self.expected_away_points,
             margin_sd=self.margin_sd,
@@ -199,6 +207,8 @@ class GameProjection:
             "home_margin": self.home_margin,
             "home_spread": self.home_spread,
             "model_total": self.model_total,
+            "expected_game_possessions": self.expected_game_possessions,
+            "total_calibration_adjustment": self.total_calibration_adjustment,
             "home_score_sd": self.home_score_sd,
             "away_score_sd": self.away_score_sd,
             "home_away_correlation": self.home_away_correlation,

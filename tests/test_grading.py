@@ -108,6 +108,69 @@ def test_grades_only_pregame_projections_and_keeps_stored_rows(monkeypatch, tmp_
     assert first["actual_margin"] == 4
     assert first["closing_spread"] == -3.5
     assert first["closing_total"] == 45.0
+
+    from backend.diagnostics import scoring_diagnostics
+
+    details = projections.assign(expected_game_possessions=12.0)
+    scoring_games = games.rename(columns={"id": "game_id"}).assign(
+        game_possessions=10.0
+    )
+    errors, summary = scoring_diagnostics(graded, details, scoring_games)
+    assert np.allclose(
+        errors.pace_error_points + errors.efficiency_error_points,
+        errors.total_error,
+    )
+    assert summary.pace_decomposition_games.sum() == len(graded)
+    # An updated forecast for the same game must not replace the frozen pace.
+    mismatched = details.assign(as_of="2026-08-28T00:00:00+00:00")
+    errors, _ = scoring_diagnostics(graded, mismatched, scoring_games)
+    assert errors.expected_game_possessions.isna().all()
+
+    import json
+
+    from backend.diagnostics import grade_shadow_totals, shadow_totals
+
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "contract": "fall_d1_historical_carryover_v1",
+                "development_seasons": [2020, 2021, 2022],
+                "validation_seasons": [2023, 2024, 2025],
+            }
+        )
+    )
+    pd.DataFrame({"total_adjustment": [-0.8]}, index=["FBS vs FBS"]).to_parquet(
+        tmp_path / "totals_offsets.parquet"
+    )
+    shadow_at = pd.Timestamp("2026-08-28T00:00:00Z")
+    shadow = shadow_totals(projections, tmp_path, shadow_at)
+    assert set(shadow.game_id) == {1, 3, 4}
+    assert shadow.shadow_created_at.eq(shadow_at).all()
+    assert shadow.model_total.eq(50).all()
+    assert shadow.shadow_total.eq(49.2).all()
+    extreme = projections.iloc[[0]].assign(pure_home_margin=50.0)
+    clipped = shadow_totals(extreme, tmp_path, shadow_at)
+    assert clipped.shadow_away_points.iloc[0] == 0
+    assert clipped.shadow_total_adjustment.iloc[0] == 0
+    with pytest.raises(ValueError, match="already include"):
+        shadow_totals(
+            projections.assign(model_version="joint_scoring_v10"), tmp_path, shadow_at
+        )
+    results = grade_shadow_totals(pd.concat([shadow, shadow]), graded)
+    assert len(results) == len(shadow)
+    assert results.result_status.eq("pending").sum() == 1
+    evaluated = results[results.result_status.eq("graded")]
+    assert np.allclose(
+        evaluated.shadow_absolute_error,
+        (evaluated.shadow_total - evaluated.actual_total).abs(),
+    )
+    with pytest.raises(ValueError, match="pregame creation"):
+        grade_shadow_totals(
+            shadow.assign(shadow_created_at="2026-09-01T00:00:00Z"), graded
+        )
+    assert shadow_totals(
+        projections, tmp_path, pd.Timestamp("2026-09-01T00:00:00Z")
+    ).empty
     assert first["n_spread_offers"] == 2
     assert 0.5 < first["home_win_probability"] < 1.0
     kept = graded.set_index("game_id").loc[4]
@@ -389,3 +452,36 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
     assert grade_recommendations(
         settled, games.assign(home_points=99), graded_at=now + pd.Timedelta(days=3)
     ).empty
+
+    from backend.diagnostics import recommendation_calibration
+
+    audited = (
+        frozen.drop(columns="outcome")
+        .merge(
+            grades[["game_id", "market", "outcome", "clv_points"]],
+            on=["game_id", "market"],
+            validate="one_to_one",
+        )
+        .assign(published_at=now)
+    )
+    calibration = recommendation_calibration(audited)
+    overall = calibration[calibration.probability_bucket.eq("all")]
+    eligible = audited[
+        audited.status.eq("recommended") & audited.outcome.isin(["win", "loss", "push"])
+    ]
+    assert overall.selections.sum() == len(eligible)
+    assert overall.pushes.sum() == eligible.outcome.eq("push").sum()
+    for row in overall.itertuples():
+        cohort = eligible[
+            eligible.market.eq(row.market)
+            & eligible.reason.eq(row.reason)
+            & eligible.policy_version.eq(row.policy_version)
+            & eligible.outcome.ne("push")
+        ]
+        assert row.predicted_decisive_win_rate == pytest.approx(
+            (cohort.win_probability / (1 - cohort.push_probability)).mean()
+        )
+    with pytest.raises(ValueError, match="pregame"):
+        recommendation_calibration(
+            audited.assign(published_at=now + pd.Timedelta(days=30))
+        )

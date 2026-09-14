@@ -77,6 +77,19 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
     target = games[games["model_week"].eq(3)]
     ratings = fitted.ratings()
     projections = fitted.project(target)
+    uncalibrated = replace(
+        fitted, config=replace(fitted.config, matchup_total_calibration=False)
+    ).project(target)
+    for current, previous in zip(projections, uncalibrated):
+        assert current.model_version == "joint_scoring_v10"
+        assert previous.model_version == "joint_scoring_v9"
+        assert current.home_margin == pytest.approx(previous.home_margin)
+        assert current.model_total < previous.model_total
+        assert current.to_record()["total_calibration_adjustment"] == pytest.approx(
+            current.model_total - previous.model_total
+        )
+        assert current.margin_sd == previous.margin_sd
+        assert current.total_sd == previous.total_sd
 
     changed_future = games.copy()
     changed_future.loc[
@@ -113,6 +126,7 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
         )
         assert projection.margin_sd > 0
         assert projection.total_sd > 0
+        assert projection.to_record()["expected_game_possessions"] == pytest.approx(12)
         assert -1 < projection.margin_total_correlation < 1
 
     fcs_games = games.copy()
