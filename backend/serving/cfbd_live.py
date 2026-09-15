@@ -209,6 +209,7 @@ def run_pilot(
     polls=1,
     interval=60,
     max_games=1,
+    compare_espn=False,
     root=None,
     sleep=time.sleep,
     now=lambda: datetime.now(timezone.utc),
@@ -222,14 +223,29 @@ def run_pilot(
     destination.mkdir(parents=True, exist_ok=True)
     chosen = set(map(int, game_ids))
     summaries = []
+    comparisons = []
     for poll in range(polls):
         board_path = capture(client, "/scoreboard", {}, root=root)
-        board = read_snapshot(board_path)["payload"]
+        board_receipt = read_snapshot(board_path)
+        board = board_receipt["payload"]
         active = {
             int(g["id"]): g for g in board if str(g.get("status", "")).lower() in ACTIVE
         }
         if not chosen:
             chosen = set(sorted(set(active) & set(anchors.game_id))[:max_games])
+        if compare_espn:
+            from backend.serving.feed_comparison import observe_comparison
+
+            for game_id in sorted(chosen):
+                comparison = observe_comparison(
+                    board_receipt, anchors, game_id, root=root
+                )
+                comparison.update(poll=poll, cfbd_snapshot=str(board_path))
+                comparisons.append(comparison)
+                # Persist every pair so a later feed failure cannot erase it.
+                (
+                    destination / f"comparison_{game_id}_{board_path.stem}.json"
+                ).write_text(json.dumps(comparison, allow_nan=False) + "\n")
         for game_id in sorted(chosen & set(active)):
             path = capture(
                 client,
@@ -266,4 +282,8 @@ def run_pilot(
     result = pd.DataFrame(summaries)
     stamp = pd.Timestamp(now()).strftime("%Y%m%dT%H%M%S%fZ")
     result.to_parquet(destination / f"pilot_{stamp}.parquet", index=False)
+    if comparisons:
+        pd.DataFrame(comparisons).to_parquet(
+            destination / f"comparisons_{stamp}.parquet", index=False
+        )
     return result

@@ -117,6 +117,7 @@ def handle_live_pilot(args):
         polls=args.polls,
         interval=args.interval,
         max_games=args.max_games,
+        compare_espn=args.compare_espn,
     )
     log.info(
         "Pilot saved %s observations; %s calls used", len(result), client.calls_used

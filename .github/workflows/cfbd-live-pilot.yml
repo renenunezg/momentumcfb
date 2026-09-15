@@ -89,7 +89,8 @@ jobs:
               raise ValueError('No matching frozen pregame forecast')
           main(['cfbd-live-pilot', '--season', str(season), '--week', str(week),
                 '--game-ids', os.environ['GAME_ID'], '--forecast', str(files[-1]),
-                '--polls', str(polls), '--interval', '60', '--max-calls', '40'])
+                '--polls', str(polls), '--interval', '60', '--max-calls', '40',
+                '--compare-espn'])
           PY
       - name: Preserve pilot evidence
         if: always()

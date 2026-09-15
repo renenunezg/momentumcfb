@@ -24,11 +24,13 @@ PARAMS = IngameBaselineParams(
 
 def test_cfbd_live_pilot_archives_and_scores_only_fresh_matching_pregame_state(
     tmp_path,
+    monkeypatch,
 ):
     from copy import deepcopy
     from datetime import datetime, timezone
 
     from backend.cfbd.snapshots import read_snapshot, save_snapshot
+    from backend.serving import feed_comparison
     from backend.serving.cfbd_live import live_plays, run_pilot, score_snapshot
 
     now = pd.Timestamp(datetime.now(timezone.utc))
@@ -88,6 +90,54 @@ def test_cfbd_live_pilot_archives_and_scores_only_fresh_matching_pregame_state(
         tmp_path / "raw", "/live/plays", {"gameId": 9001}, payload, now, now
     )
     receipt = read_snapshot(p)
+    espn = {
+        "events": [
+            {
+                "id": "9001",
+                "competitions": [
+                    {
+                        "competitors": [
+                            {"id": "1", "homeAway": "home", "score": "7"},
+                            {"id": "2", "homeAway": "away", "score": "3"},
+                        ],
+                        "status": {
+                            "period": 2,
+                            "displayClock": "10:00",
+                            "type": {"state": "in"},
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    espn_path = save_snapshot(tmp_path / "raw", "/espn/scoreboard", {}, espn, now, now)
+    board = dict(
+        id=9001,
+        status="in_progress",
+        homeTeam=dict(id=1, points=7),
+        awayTeam=dict(id=2, points=3),
+        period=2,
+        clock="10:00",
+    )
+    comparison = feed_comparison.compare_scoreboards(
+        dict(payload=[board], fetched_at=now.isoformat()),
+        read_snapshot(espn_path),
+        9001,
+    )
+    assert comparison["scores_agree"] is True
+    mismatch = deepcopy(espn)
+    mismatch["events"][0]["competitions"][0]["competitors"][0]["id"] = "3"
+    assert (
+        feed_comparison.compare_scoreboards(
+            dict(payload=[board], fetched_at=now.isoformat()),
+            dict(payload=mismatch, fetched_at=now.isoformat()),
+            9001,
+        )["reason"]
+        == "team_mismatch"
+    )
+    monkeypatch.setattr(
+        feed_comparison, "capture_espn", lambda *args, **kwargs: espn_path
+    )
     result = score_snapshot(receipt, anchor, PARAMS)
     assert result["reason"] == "scored" and 0 < result["win_probability"] < 1
     changed = deepcopy(receipt)
@@ -122,7 +172,7 @@ def test_cfbd_live_pilot_archives_and_scores_only_fresh_matching_pregame_state(
         def get(self, path, params, **kwargs):
             self.calls_used += 1
             return [
-                dict(id=9001, status="in_progress" if self.calls_used == 1 else "final")
+                dict(board, status="in_progress" if self.calls_used == 1 else "final")
             ]
 
         def get_object(self, path, params, **kwargs):
@@ -137,11 +187,16 @@ def test_cfbd_live_pilot_archives_and_scores_only_fresh_matching_pregame_state(
         season=2026,
         week=3,
         polls=2,
+        compare_espn=True,
         root=tmp_path / "raw",
         sleep=lambda _: None,
     )
     assert len(output) == 1 and output.iloc[0].reason == "scored"
     assert list((tmp_path / "output").glob("*_process.parquet"))
+    comparisons = pd.read_parquet(
+        next((tmp_path / "output").glob("comparisons_*.parquet"))
+    )
+    assert len(comparisons) == 2 and comparisons.scores_agree.all()
 
 
 def _play(play_id, period, minutes, seconds, offense, play_type, **overrides):
