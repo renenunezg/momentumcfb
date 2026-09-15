@@ -17,7 +17,11 @@ from backend.config import PROCESSED_DIR
 from backend.features.scoring import SCORING_COLUMNS
 from backend.model.calibration import _add_proper_scores, _evaluation_rows
 from backend.model.joint_scoring import DEFAULT_CONFIG, fit_joint_scoring
-from backend.model.preseason import load_score_noise_prior, scoring_priors_from_ratings
+from backend.model.preseason import (
+    load_score_noise_prior,
+    load_srs_prior,
+    scoring_priors_from_ratings,
+)
 from backend.model.weekly import _validate_weekly_inputs, load_weekly_games
 
 log = logging.getLogger(__name__)
@@ -31,6 +35,7 @@ class PregameSnapshot:
     path: Path
     digest: str
     score_noise_prior: pd.DataFrame | None = None
+    srs_prior: pd.DataFrame | None = None
 
 
 def load_pregame_snapshots(season: int, directory: Path) -> list[PregameSnapshot]:
@@ -61,6 +66,18 @@ def load_pregame_snapshots(season: int, directory: Path) -> list[PregameSnapshot
             if noise_path.exists()
             else load_score_noise_prior(season)
         )
+        srs_path = path.with_name("srs_prior.parquet")
+        if srs_path.exists():
+            srs_prior = pd.read_parquet(srs_path)
+        else:
+            try:
+                srs_prior = load_srs_prior(season)
+            except FileNotFoundError:
+                log.warning(
+                    "%s: no srs_prior; replay blends with joint prior means",
+                    path.parent,
+                )
+                srs_prior = None
         noise_as_of = pd.to_datetime(noise_prior["as_of"], utc=True, errors="coerce")
         if noise_as_of.isna().any() or noise_as_of.max() > max(timestamps):
             raise ValueError(
@@ -76,8 +93,14 @@ def load_pregame_snapshots(season: int, directory: Path) -> list[PregameSnapshot
                     path.read_bytes()
                     + projections_path.read_bytes()
                     + noise_prior.to_json(orient="records").encode()
+                    + (
+                        srs_prior.to_json(orient="records").encode()
+                        if srs_prior is not None
+                        else b""
+                    )
                 ).hexdigest(),
                 noise_prior,
+                srs_prior,
             )
         )
     if not snapshots:
@@ -112,7 +135,7 @@ def replay_production_season(
             )
         snapshot = max(available, key=lambda item: item.as_of)
         priors = scoring_priors_from_ratings(
-            snapshot.ratings, snapshot.score_noise_prior
+            snapshot.ratings, snapshot.score_noise_prior, snapshot.srs_prior
         )
         prior_games = games[games["model_week"].lt(week)]
         if prior_games.empty:

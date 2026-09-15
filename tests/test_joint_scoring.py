@@ -12,7 +12,7 @@ from backend.features.scoring import (
     build_weekly_scoring_games,
 )
 from backend.model.calibration import fbs_calibration_cohort
-from backend.model.joint_scoring import fit_joint_scoring
+from backend.model.joint_scoring import DEFAULT_CONFIG, fit_joint_scoring
 from backend.model.preseason import (
     score_noise_prior_from_fit,
     scoring_priors_from_ratings,
@@ -81,8 +81,8 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
         fitted, config=replace(fitted.config, matchup_total_calibration=False)
     ).project(target)
     for current, previous in zip(projections, uncalibrated):
-        assert current.model_version == "joint_scoring_v10"
-        assert previous.model_version == "joint_scoring_v9"
+        assert current.model_version == "joint_scoring_v12"
+        assert previous.model_version == "joint_scoring_v12"
         assert current.home_margin == pytest.approx(previous.home_margin)
         assert current.model_total < previous.model_total
         assert current.to_record()["total_calibration_adjustment"] == pytest.approx(
@@ -114,13 +114,29 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
     rating_by_id = {rating.team_id: rating for rating in ratings}
     for rating in ratings:
         assert rating.power_rating == rating.offense_points + rating.defense_points
-    for projection in projections:
+    # joint_scoring_v12: the published margin is half the joint fit's rating
+    # margin and half the points-only rating margin, with the total and the
+    # joint fit's margin SD (before the fixed scalar) untouched by the blend.
+    unblended = replace(
+        fitted,
+        config=replace(fitted.config, srs_blend_weight=0.0, margin_sd_scale=1.0),
+    ).project(target)
+    for projection, joint in zip(projections, unblended):
         home = rating_by_id[projection.home_team_id]
         away = rating_by_id[projection.away_team_id]
         expected_margin = (
             home.power_rating - away.power_rating + projection.home_field_points
         )
-        assert abs(projection.home_margin - expected_margin) < 1e-10
+        assert abs(joint.home_margin - expected_margin) < 1e-10
+        assert joint.srs_home_margin is None
+        assert projection.srs_home_margin is not None
+        assert projection.home_margin == pytest.approx(
+            0.5 * joint.home_margin + 0.5 * projection.srs_home_margin
+        )
+        assert projection.home_margin != pytest.approx(joint.home_margin)
+        assert projection.model_total == pytest.approx(joint.model_total)
+        assert projection.margin_sd == pytest.approx(0.915 * joint.margin_sd)
+        assert projection.total_sd == joint.total_sd
         assert projection.model_total == (
             projection.expected_home_points + projection.expected_away_points
         )
@@ -156,10 +172,13 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
     prior_rating_by_id = {rating.team_id: rating for rating in prior_fit.ratings()}
     assert prior_rating_by_id[1].power_rating > rating_by_id[1].power_rating
 
+    # The clamp guards the unblended joint margin; the points-only blend
+    # cannot reach it because a loose prior lets four games outvote it.
     extreme_fit = fit_joint_scoring(
         games,
         forecast_week=3,
         as_of=as_of,
+        config=replace(DEFAULT_CONFIG, srs_blend_weight=0.0),
         strength_prior_means={1: (3.0, 3.0)},
     )
     extreme_projections = extreme_fit.project(target)
@@ -240,7 +259,7 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
             stabilized, config=replace(stabilized.config, scoring_prior_games=0)
         ).project(opener)[0]
         projection = stabilized.project(opener)[0]
-        assert projection.model_version == "joint_scoring_v11"
+        assert projection.model_version == "joint_scoring_v12"
         assert projection.home_margin == pytest.approx(reference.home_margin)
         assert projection.margin_sd == reference.margin_sd
         assert projection.total_sd == reference.total_sd

@@ -92,6 +92,19 @@ def _add_pipeline_commands(sub) -> None:
         help="also buy a three-market Odds API snapshot instead of CFBD lines",
     )
 
+    srs_prior = sub.add_parser(
+        "srs-prior",
+        help="build the frozen points-only carryover prior from cached features",
+    )
+    srs_prior.add_argument("--season", type=int, required=True)
+
+    preseason_bundle = sub.add_parser(
+        "preseason-bundle",
+        help="export the frozen preseason runtime ZIP for the weekly workflow",
+    )
+    preseason_bundle.add_argument("--season", type=int, required=True)
+    preseason_bundle.add_argument("--output", required=True)
+
 
 def _add_research_commands(sub) -> None:
     """Frozen in-game experiments; their verdicts are recorded in the README."""

@@ -26,6 +26,8 @@ from backend.commands.pipeline import (
     handle_fit,
     handle_ingest,
     handle_preseason,
+    handle_preseason_bundle,
+    handle_srs_prior,
     handle_weekly_update,
 )
 from backend.commands.players import (
@@ -68,6 +70,8 @@ HANDLERS: dict[str, Handler] = {
     "weekly-update": handle_weekly_update,
     "calibrate": handle_calibrate,
     "preseason": handle_preseason,
+    "srs-prior": handle_srs_prior,
+    "preseason-bundle": handle_preseason_bundle,
     "ingame-baseline": handle_ingame_baseline,
     "ingame-momentum": handle_ingame_momentum,
     "ingame-momentum-recency": handle_ingame_momentum,
