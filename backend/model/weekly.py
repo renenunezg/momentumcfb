@@ -10,6 +10,7 @@ from backend.features.scoring import (
     build_weekly_scoring_games,
     load_scoring_team_games,
 )
+from backend.features.weather import weather_context
 from backend.model.availability import apply_qb_availability, pregame_qb_outs
 from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.market_blend import add_market_informed_margins
@@ -440,12 +441,21 @@ def run_weekly_forecast(
             }
         ]
     )
+    try:
+        weather = weather_context(target, created_at)
+    except (ValueError, KeyError, OSError) as exc:
+        # Optional research context cannot suppress a valid pure forecast.
+        # Preserve the error with the run instead of claiming weather coverage.
+        weather = target[["game_id", "start_date"]].copy()
+        weather["weather_missing"] = True
+        weather["weather_error"] = str(exc)
     log_directory = store.write_forecast_outputs(
         "weekly",
         season,
         forecast_week,
         created_at,
         {
+            "weather_context": weather,
             "ratings": ratings,
             "score_noise_prior": score_noise_prior,
             "unit_ratings": unit_ratings,

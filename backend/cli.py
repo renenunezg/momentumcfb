@@ -420,6 +420,48 @@ def parse_args(argv=None):
     _add_serving_commands(sub)
     _add_market_commands(sub)
     _add_publish_commands(sub)
+    paid = sub.add_parser(
+        "tier2-snapshot", help="archive paid weather and adjusted metrics"
+    )
+    paid.add_argument("--season", type=int, required=True)
+    paid.add_argument("--week", type=int)
+    paid.add_argument("--weather", action="store_true")
+    paid.add_argument("--adjusted", action="store_true")
+    paid.add_argument(
+        "--adjusted-season",
+        type=int,
+        help="defaults to previous season; current adjusted data may not exist",
+    )
+    paid.add_argument(
+        "--historical-weather",
+        action="store_true",
+        help="capture season-wide observed weather for diagnostics only",
+    )
+    _cfbd_budget_arguments(paid)
+    weather = sub.add_parser(
+        "weather-evaluate", help="cached observed-weather diagnostic"
+    )
+    weather.add_argument("--predictions", required=True)
+    weather.add_argument("--output-directory", required=True)
+    benchmark = sub.add_parser(
+        "tier2-benchmark", help="compare cached external adjusted metrics"
+    )
+    benchmark.add_argument("--season", type=int, required=True)
+    benchmark.add_argument("--output-directory", required=True)
+    pilot = sub.add_parser(
+        "cfbd-live-pilot", help="bounded live scoreboard and play capture"
+    )
+    pilot.add_argument("--season", type=int, required=True)
+    pilot.add_argument("--week", type=int, required=True)
+    pilot.add_argument(
+        "--forecast", required=True, help="frozen pregame projection parquet"
+    )
+    pilot.add_argument("--game-ids", nargs="+", type=int)
+    pilot.add_argument("--polls", type=int, default=1)
+    pilot.add_argument("--interval", type=int, default=60)
+    pilot.add_argument("--max-games", type=int, default=1)
+    pilot.add_argument("--output-directory")
+    _cfbd_budget_arguments(pilot)
     return parser.parse_args(argv)
 
 
