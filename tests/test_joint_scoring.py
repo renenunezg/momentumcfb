@@ -230,8 +230,30 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
     before = full_prior_fit.project(opener)[0]
     after = carried_fit.project(opener)[0]
     assert after.home_margin == before.home_margin
-    assert after.model_total == before.model_total
+    assert after.model_total == pytest.approx(before.model_total)
     assert after.margin_sd > before.margin_sd
+    # Scoring support moves totals without changing strength, spread risk,
+    # or the existing matchup correction, including a clipped extreme total.
+    for baseline_ppp in (0.01, carried.base_ppp + 0.5):
+        stabilized = replace(carried_fit, preseason_base_ppp=baseline_ppp)
+        reference = replace(
+            stabilized, config=replace(stabilized.config, scoring_prior_games=0)
+        ).project(opener)[0]
+        projection = stabilized.project(opener)[0]
+        assert projection.model_version == "joint_scoring_v11"
+        assert projection.home_margin == pytest.approx(reference.home_margin)
+        assert projection.margin_sd == reference.margin_sd
+        assert projection.total_sd == reference.total_sd
+        assert projection.total_calibration_adjustment == pytest.approx(
+            reference.total_calibration_adjustment
+        )
+        assert projection.model_total != pytest.approx(reference.model_total)
+        assert (
+            min(projection.expected_home_points, projection.expected_away_points) >= 0
+        )
+        assert projection.scoring_baseline_adjustment == pytest.approx(
+            projection.model_total - reference.model_total
+        )
     np.testing.assert_allclose(
         carried_fit.score_residual_covariance,
         (

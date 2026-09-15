@@ -8,7 +8,6 @@ import pandas as pd
 from scipy.optimize import brentq
 
 from backend.model.distributions import marginal_cdf
-from backend.model.market_blend import DEFAULT_MARKET_WEIGHT
 from backend.odds.markets import _american_profit, priced_candidates
 
 POLICY_VERSION = "cfb-picks-v6"
@@ -25,6 +24,9 @@ MIN_EDGE_POINTS = 2.0
 # residual is the honest width for a line that is half market.
 PRICING_MARGIN_SD = 15.35
 PRICING_TOTAL_SD = 15.93
+# Independent totals policy. Closing-only research does not establish a
+# better executable blend; retain the existing model share and dispersion.
+TOTAL_MARKET_WEIGHT = 0.50
 # Weight of the pure model in the margin that prices a moneyline. The
 # half-market blend that prices spreads is a product line that keeps model
 # opinion; for winning outright it is not calibrated. On the 2021 through
@@ -308,8 +310,8 @@ def build_recommendations(projections, offers, *, decision_at=None):
         )
         if np.isfinite(market_total) and np.isfinite(projection.model_total):
             priced_projection = priced_projection._replace(
-                model_total=(1.0 - DEFAULT_MARKET_WEIGHT) * projection.model_total
-                + DEFAULT_MARKET_WEIGHT * market_total
+                model_total=(1.0 - TOTAL_MARKET_WEIGHT) * projection.model_total
+                + TOTAL_MARKET_WEIGHT * market_total
             )
         for market in MARKETS:
             row = {
