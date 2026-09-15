@@ -111,10 +111,14 @@ class GameProjection:
     margin_total_correlation: float
     degrees_of_freedom: float
     expected_game_possessions: float | None = None
+    # Points-only rating margin blended into home_margin; None when unblended.
+    srs_home_margin: float | None = None
     total_calibration_adjustment: float = 0.0
     scoring_baseline_adjustment: float = 0.0
 
     def __post_init__(self) -> None:
+        if self.srs_home_margin is not None and not isfinite(self.srs_home_margin):
+            raise ValueError("srs_home_margin must be finite")
         if self.expected_game_possessions is not None and (
             not isfinite(self.expected_game_possessions)
             or self.expected_game_possessions <= 0
@@ -210,6 +214,7 @@ class GameProjection:
             "home_spread": self.home_spread,
             "model_total": self.model_total,
             "expected_game_possessions": self.expected_game_possessions,
+            "srs_home_margin": self.srs_home_margin,
             "total_calibration_adjustment": self.total_calibration_adjustment,
             "scoring_baseline_adjustment": self.scoring_baseline_adjustment,
             "home_score_sd": self.home_score_sd,

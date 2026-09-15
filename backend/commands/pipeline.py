@@ -317,6 +317,40 @@ def _handle_production_replay(args: Namespace) -> None:
     )
 
 
+def handle_srs_prior(args: Namespace) -> None:
+    from backend.etl import store
+    from backend.model.preseason import build_srs_prior, load_srs_prior
+
+    frame = build_srs_prior(args.season)
+    store.write_processed(frame, "preseason", "srs_prior", f"{args.season}_01.parquet")
+    loaded = load_srs_prior(args.season)
+    log.info(
+        "%s srs_prior: %d teams from the %d final points-only rating (chain from %d)",
+        args.season,
+        len(loaded),
+        int(loaded["season"].iloc[0]),
+        int(loaded["chain_start_season"].iloc[0]),
+    )
+    log.info(
+        loaded.sort_values("srs_rating", ascending=False)[
+            ["team", "classification", "srs_rating"]
+        ]
+        .head(25)
+        .to_string(index=False)
+    )
+
+
+def handle_preseason_bundle(args: Namespace) -> None:
+    import hashlib
+    from pathlib import Path
+
+    from backend.model.preseason import export_preseason_runtime_bundle
+
+    path = export_preseason_runtime_bundle(args.season, Path(args.output))
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    log.info("wrote %s (%d bytes) sha256 %s", path, path.stat().st_size, digest)
+
+
 def handle_preseason(args: Namespace) -> None:
     from backend.cfbd.client import CFBDClient
     from backend.etl.ingest import ingest_preseason_sources

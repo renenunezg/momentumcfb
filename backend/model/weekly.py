@@ -18,6 +18,7 @@ from backend.model.preseason import (
     MISSING_INPUT_COLUMNS,
     load_preseason_ratings,
     load_score_noise_prior,
+    load_srs_prior,
     scoring_priors_from_ratings,
 )
 from backend.model.unit_ratings import fit_unit_ratings
@@ -314,7 +315,10 @@ def run_weekly_forecast(
 
     preseason_ratings, prior_source = load_preseason_ratings(season)
     score_noise_prior = load_score_noise_prior(season)
-    priors = scoring_priors_from_ratings(preseason_ratings, score_noise_prior)
+    srs_prior = load_srs_prior(season)
+    priors = scoring_priors_from_ratings(
+        preseason_ratings, score_noise_prior, srs_prior
+    )
     fitted = fit_joint_scoring(
         games,
         forecast_week,
@@ -422,6 +426,8 @@ def run_weekly_forecast(
                     ).sum()
                 ),
                 "excluded_fcs_training_games": len(excluded_training_games),
+                "srs_prior_season": int(srs_prior["season"].iloc[0]),
+                "srs_prior_teams_bridged": len(priors.srs_prior_means or {}),
                 "projection_games": len(projections),
                 "qb_availability_teams": ",".join(sorted(qb_outs)),
                 "odds_events": len(odds_events),
@@ -458,6 +464,7 @@ def run_weekly_forecast(
             "weather_context": weather,
             "ratings": ratings,
             "score_noise_prior": score_noise_prior,
+            "srs_prior": srs_prior,
             "unit_ratings": unit_ratings,
             "projections": projections,
             "schedule_coverage": coverage,

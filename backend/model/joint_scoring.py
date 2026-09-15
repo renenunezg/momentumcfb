@@ -8,11 +8,15 @@ import pandas as pd
 from backend.model.outputs import GameProjection, TeamRating
 from backend.model.scoring_calibration import bounded_model_total, calibrated_scores
 
-MODEL_VERSION = "joint_scoring_v11"
+MODEL_VERSION = "joint_scoring_v12"
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
 MAX_POOL_ITERATIONS = 50
 POOL_TOLERANCE_PPP = 0.001
+# Variance floor for the points-only rating's game noise, matching the score
+# residual floor, so a one-game slate cannot collapse the observation weight.
+SRS_NOISE_FLOOR = 4.0
+SRS_FALLBACK_TOLERANCE_POINTS = 1e-5
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,8 +51,29 @@ class JointScoringConfig:
     crossover_prior_sd: float = 0.0
     matchup_total_calibration: bool = False
     scoring_prior_games: float = 0.0
+    # joint_scoring_v12: the projected margin is a fixed blend of the joint
+    # fit's margin and a points-only ridge rating (SRS) fitted on the same
+    # cutoff with a loose prior SD in points around the previous season's
+    # final points-only rating (JointScoringPriors.srs_prior_means). The
+    # SRS carries information the blended points-and-EPA fit shrinks away
+    # (the crossover gain restarts from zero each season, the FCS pool, and
+    # the tighter strength prior), so the blend reduced holdout margin MAE
+    # by 0.19 on all Division I games with a close and 0.07 on FBS versus
+    # FBS, negative in every season 2020 through 2025, with totals untouched.
+    # Zero disables the blend. The margin SD is multiplied by
+    # margin_sd_scale because the joint fit's margin SD ran about eight
+    # percent wide (80 percent interval coverage 0.85 against 0.80).
+    srs_blend_weight: float = 0.0
+    srs_prior_sd_points: float = 9.0
+    margin_sd_scale: float = 1.0
 
     def __post_init__(self) -> None:
+        if not 0.0 <= self.srs_blend_weight <= 1.0:
+            raise ValueError("srs_blend_weight must be between zero and one")
+        if not isfinite(self.srs_prior_sd_points) or self.srs_prior_sd_points <= 0:
+            raise ValueError("srs_prior_sd_points must be positive")
+        if not isfinite(self.margin_sd_scale) or self.margin_sd_scale <= 0:
+            raise ValueError("margin_sd_scale must be positive")
         if isnan(self.rating_half_life_weeks) or self.rating_half_life_weeks <= 0:
             raise ValueError("rating_half_life_weeks must be positive")
         if not isfinite(self.strength_prior_sd_ppp) or self.strength_prior_sd_ppp <= 0:
@@ -112,6 +137,15 @@ DEFAULT_CONFIG = JointScoringConfig(
     # Selected on 2020-2022 D1 totals, validated on 2023-2025.
     # Independent of pace, team strength, and market prices.
     scoring_prior_games=100.0,
+    # joint_scoring_v12: selected on the 2020 through 2022 walk-forward
+    # (margin MAE -0.10, paired t -2.6) and confirmed on 2023 through 2025
+    # (-0.19, t -5.6, all Division I with a close; FBS versus FBS -0.07).
+    # The weight surface is flat between 0.4 and 0.6, so the fixed half
+    # carries no fitted parameter. The SD scalar is the dev-fitted ratio of
+    # realized to projected margin dispersion under the blend.
+    srs_blend_weight=0.5,
+    srs_prior_sd_points=9.0,
+    margin_sd_scale=0.915,
 )
 
 
@@ -133,8 +167,19 @@ class JointScoringPriors:
     score_noise_season: int | None = None
     score_noise_as_of: datetime | None = None
     base_ppp: float | None = None
+    # Prior means in points for the points-only rating, normally the previous
+    # season's final points-only rating bridged by team name. Teams absent
+    # here shrink toward their classification's fitted level. When None, the
+    # strength prior means converted to points stand in, which reproduces
+    # only part of the blend's gain because the joint fit's ridge compresses
+    # them.
+    srs_prior_means: dict[int, float] | None = None
 
     def __post_init__(self) -> None:
+        if self.srs_prior_means is not None and not all(
+            isfinite(value) for value in self.srs_prior_means.values()
+        ):
+            raise ValueError("srs prior means must be finite")
         if self.base_ppp is not None and (
             not isfinite(self.base_ppp)
             or self.base_ppp <= 0
@@ -223,6 +268,123 @@ def _strength_prior_precision(
         precision[team, n_teams + team] = -covariance / determinant
         precision[n_teams + team, team] = -covariance / determinant
     return precision
+
+
+def _fit_points_rating(
+    training: pd.DataFrame,
+    team_index: dict[int, int],
+    classifications: np.ndarray,
+    recency: np.ndarray,
+    prior_mean_points: np.ndarray,
+    teams_with_priors: np.ndarray,
+    prior_sd_points: float,
+) -> tuple[np.ndarray, float]:
+    """Points-only ridge margin rating on the same cutoff as the joint fit.
+
+    Home margin is r_home - r_away + hfa on non-neutral fields. Ratings
+    shrink toward the supplied prior means in points; teams without one
+    shrink toward their classification's fitted mean, iterated to a fixed
+    point. Rows are weighted by recency over the residual margin variance of
+    a first pass, so the prior SD is a points-scale statement. Returns the
+    ratings centered on the FBS mean and the home-field points.
+    """
+    n_teams = len(team_index)
+    n_games = len(training)
+    home_index = training["home_team_id"].map(team_index).to_numpy(int)
+    away_index = training["away_team_id"].map(team_index).to_numpy(int)
+    home_field = (~training["neutral_site"].astype(bool)).to_numpy(float)
+    margin = (training["home_points"] - training["away_points"]).to_numpy(float)
+    design = np.zeros((n_games, n_teams + 1))
+    design[np.arange(n_games), home_index] = 1.0
+    design[np.arange(n_games), away_index] -= 1.0
+    design[:, -1] = home_field
+    prior_sd = np.full(n_teams + 1, prior_sd_points)
+    prior_sd[-1] = HFA_PRIOR_SD_POINTS
+    prior_mean = np.append(prior_mean_points, HFA_PRIOR_POINTS)
+    missing = ~teams_with_priors
+    classes = pd.Series(classifications)
+
+    def solve(noise: float) -> np.ndarray:
+        weights = recency / noise
+        mean = prior_mean.copy()
+        parameters, _ = _solve_ridge(design, margin, weights, mean, prior_sd)
+        for _ in range(30 if missing.any() else 0):
+            updated = mean.copy()
+            for _, members in classes.groupby(classes).groups.items():
+                selection = np.asarray(members)
+                gap = missing[selection]
+                if gap.any():
+                    updated[selection[gap]] = parameters[selection].mean()
+            shift = float(np.abs(updated - mean).max())
+            mean = updated
+            parameters, _ = _solve_ridge(design, margin, weights, mean, prior_sd)
+            if shift < SRS_FALLBACK_TOLERANCE_POINTS:
+                break
+        return parameters
+
+    centered = margin - np.average(margin, weights=recency)
+    noise = max(
+        float(np.average(np.square(centered), weights=recency)), SRS_NOISE_FLOOR
+    )
+    residual = margin - design @ solve(noise)
+    noise = max(
+        float(np.average(np.square(residual), weights=recency)), SRS_NOISE_FLOOR
+    )
+    parameters = solve(noise)
+    rating = parameters[:-1]
+    center = classifications == "fbs"
+    rating = rating - (rating[center].mean() if center.any() else rating.mean())
+    return rating, float(parameters[-1])
+
+
+def fit_season_points_rating(
+    games: pd.DataFrame,
+    prior_means_by_team: dict[str, float] | None = None,
+    prior_sd_points: float = DEFAULT_CONFIG.srs_prior_sd_points,
+) -> pd.DataFrame:
+    """Final points-only rating of every completed game in a season frame.
+
+    ``prior_means_by_team`` maps team name to the rating carried from the
+    season before in points; names bridge season-to-season ID changes. It is
+    the state the weekly blend carries across seasons, so a season's final
+    rating shrinks about one fifth of the way toward the previous one.
+    Returns team_id, team, classification and srs_rating.
+    """
+    training = games
+    if "completed" in training:
+        training = training[training["completed"].fillna(False).astype(bool)]
+    training = training.dropna(subset=["home_points", "away_points"])
+    if training.empty:
+        raise ValueError("a season points rating needs completed games")
+    catalog = _team_catalog(games)
+    team_index = {
+        int(team_id): index for index, team_id in enumerate(catalog["team_id"])
+    }
+    n_teams = len(catalog)
+    prior = np.zeros(n_teams)
+    has_prior = np.zeros(n_teams, dtype=bool)
+    for index, team in enumerate(catalog["team"]):
+        carried = (prior_means_by_team or {}).get(team)
+        if carried is not None:
+            prior[index] = float(carried)
+            has_prior[index] = True
+    rating, _ = _fit_points_rating(
+        training,
+        team_index,
+        catalog["classification"].fillna("").str.lower().to_numpy(),
+        np.ones(len(training)),
+        prior,
+        has_prior,
+        prior_sd_points,
+    )
+    return pd.DataFrame(
+        {
+            "team_id": catalog["team_id"].astype(int).to_numpy(),
+            "team": catalog["team"].to_numpy(),
+            "classification": catalog["classification"].to_numpy(),
+            "srs_rating": rating,
+        }
+    )
 
 
 def _regularized_covariance(
@@ -318,11 +480,15 @@ class JointScoringFit:
     config: JointScoringConfig
     training_games: int
     preseason_base_ppp: float | None = None
+    srs_rating: np.ndarray | None = None
+    srs_hfa_points: float = 0.0
 
     @property
     def model_version(self) -> str:
-        if self.preseason_base_ppp is not None and self.config.scoring_prior_games:
+        if self.config.srs_blend_weight:
             return MODEL_VERSION
+        if self.preseason_base_ppp is not None and self.config.scoring_prior_games:
+            return "joint_scoring_v11"
         return (
             "joint_scoring_v10"
             if self.config.matchup_total_calibration
@@ -432,6 +598,29 @@ class JointScoringFit:
                     (total - margin) / 2,
                 )
 
+            # Blend the margin only: the total keeps the joint fit's scoring
+            # level and calibration, the points-only rating moves the split.
+            srs_home_margin = None
+            if self.config.srs_blend_weight:
+                if self.srs_rating is None:
+                    raise ValueError("srs_blend_weight requires a fitted SRS")
+                srs_home_margin = float(
+                    self.srs_rating[home]
+                    - self.srs_rating[away]
+                    + (0.0 if bool(game.neutral_site) else self.srs_hfa_points)
+                )
+                home_score = max(float(expected_home), 0.0)
+                away_score = max(float(expected_away), 0.0)
+                total = home_score + away_score
+                weight = self.config.srs_blend_weight
+                margin = (1.0 - weight) * (
+                    home_score - away_score
+                ) + weight * srs_home_margin
+                expected_home, expected_away = (
+                    (total + margin) / 2,
+                    (total - margin) / 2,
+                )
+
             score_design = np.zeros((2, 2 * n_teams + 1))
             score_design[0, home] = self.base_possessions
             score_design[0, n_teams + away] = -self.base_possessions
@@ -449,6 +638,7 @@ class JointScoringFit:
             margin_sd, total_sd, correlation = margin_total_distribution(
                 score_covariance
             )
+            margin_sd *= self.config.margin_sd_scale
             projections.append(
                 GameProjection(
                     season=int(game.season),
@@ -472,6 +662,7 @@ class JointScoringFit:
                     margin_total_correlation=correlation,
                     degrees_of_freedom=self.config.student_t_degrees_of_freedom,
                     expected_game_possessions=float(possessions),
+                    srs_home_margin=srs_home_margin,
                     scoring_baseline_adjustment=baseline_adjustment,
                     total_calibration_adjustment=(
                         max(float(expected_home), 0.0)
@@ -789,6 +980,29 @@ def fit_joint_scoring(
             floor=4.0,
             shrinkage=config.covariance_shrinkage,
         )
+    srs_rating, srs_hfa_points = None, 0.0
+    if config.srs_blend_weight:
+        srs_prior_points = base_possessions * (
+            prior_mean[:n_teams] + prior_mean[n_teams : 2 * n_teams]
+        )
+        srs_teams_with_priors = teams_with_priors.copy()
+        if priors is not None and priors.srs_prior_means is not None:
+            srs_prior_points = np.zeros(n_teams)
+            srs_teams_with_priors = np.zeros(n_teams, dtype=bool)
+            for team_id, rating in priors.srs_prior_means.items():
+                index = team_index.get(team_id)
+                if index is not None:
+                    srs_prior_points[index] = rating
+                    srs_teams_with_priors[index] = True
+        srs_rating, srs_hfa_points = _fit_points_rating(
+            training,
+            team_index,
+            classifications.to_numpy(),
+            recency[::2],
+            srs_prior_points,
+            srs_teams_with_priors,
+            config.srs_prior_sd_points,
+        )
     if priors is not None and priors.score_noise_covariance is not None:
         if priors.score_noise_season != int(training["season"].iloc[-1]) - 1:
             raise ValueError("score noise prior must come from the previous season")
@@ -816,4 +1030,6 @@ def fit_joint_scoring(
         config=config,
         training_games=n_games,
         preseason_base_ppp=priors.base_ppp if priors is not None else None,
+        srs_rating=srs_rating,
+        srs_hfa_points=srs_hfa_points,
     )

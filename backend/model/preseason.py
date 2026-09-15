@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,7 @@ from backend.model.joint_scoring import (
     JointScoringFit,
     JointScoringPriors,
     fit_joint_scoring,
+    fit_season_points_rating,
     margin_total_distribution,
 )
 from backend.model.market_blend import add_market_informed_margins
@@ -79,6 +80,7 @@ class PreseasonForecastResult:
 def scoring_priors_from_ratings(
     ratings: pd.DataFrame,
     score_noise_prior: pd.DataFrame | None = None,
+    srs_prior: pd.DataFrame | None = None,
 ) -> JointScoringPriors:
     """Convert published preseason point ratings into weekly-engine priors.
 
@@ -162,8 +164,112 @@ def scoring_priors_from_ratings(
             int(noise_season),
             noise_as_of.to_pydatetime(),
             float(row.base_ppp) if "base_ppp" in row else None,
+            srs_prior_means=srs_prior_means(ratings, srs_prior),
         )
-    return JointScoringPriors(means, sds, possessions, base_possessions)
+    return JointScoringPriors(
+        means,
+        sds,
+        possessions,
+        base_possessions,
+        srs_prior_means=srs_prior_means(ratings, srs_prior),
+    )
+
+
+SRS_PRIOR_MODEL_VERSION = "srs_carryover_v1"
+SRS_PRIOR_COLUMNS = [
+    "season",
+    "as_of",
+    "model_version",
+    "prior_sd_points",
+    "chain_start_season",
+    "team_id",
+    "team",
+    "classification",
+    "srs_rating",
+]
+
+
+def srs_prior_means(
+    ratings: pd.DataFrame, srs_prior: pd.DataFrame | None
+) -> dict[int, float] | None:
+    """Bridge the previous season's points-only ratings to current team IDs.
+
+    Team names carry across seasons the way the carryover prior bridges
+    them; teams absent from the prior get no entry and shrink toward their
+    classification's fitted level inside the weekly fit.
+    """
+    if srs_prior is None:
+        return None
+    by_name = dict(zip(srs_prior["team"], srs_prior["srs_rating"].astype(float)))
+    means = {}
+    for row in ratings[["team_id", "team"]].drop_duplicates("team_id").itertuples():
+        rating = by_name.get(row.team)
+        if rating is not None:
+            means[int(row.team_id)] = float(rating)
+    return means
+
+
+def build_srs_prior(season: int) -> pd.DataFrame:
+    """Chain the points-only rating through every cached season before ``season``.
+
+    Each season's final rating shrinks toward the one before it, so the
+    carried state is a two-to-three season memory rather than one season's
+    noise. The chain starts at the earliest season with cached features and
+    is deterministic given the cached data.
+    """
+    seasons = sorted(
+        int(name) for name in store.processed_names("team_games") if name.isdigit()
+    )
+    seasons = [year for year in seasons if year < season]
+    if not seasons or seasons[-1] != season - 1:
+        raise FileNotFoundError(
+            f"{season}: the previous season's team-game features are required "
+            "to build the points-only carryover prior"
+        )
+    carried: dict[str, float] | None = None
+    frame = None
+    as_of = None
+    for year in seasons:
+        games = build_scoring_games(
+            store.read_games(year), load_scoring_team_games(year)
+        )
+        frame = fit_season_points_rating(games, carried)
+        carried = dict(zip(frame["team"], frame["srs_rating"].astype(float)))
+        as_of = pd.to_datetime(games["start_date"], utc=True).max() + timedelta(
+            seconds=1
+        )
+    assert frame is not None and as_of is not None
+    frame = frame.assign(
+        season=seasons[-1],
+        as_of=as_of.isoformat(),
+        model_version=SRS_PRIOR_MODEL_VERSION,
+        prior_sd_points=DEFAULT_CONFIG.srs_prior_sd_points,
+        chain_start_season=seasons[0],
+    )
+    return frame[SRS_PRIOR_COLUMNS]
+
+
+def load_srs_prior(season: int) -> pd.DataFrame:
+    try:
+        frame = store.read_preseason_forecast_artifact(season, 1, "srs_prior")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"{season}: frozen preseason srs_prior is required for the "
+            "joint_scoring_v12 margin blend; build it with "
+            f"`python -m backend srs-prior --season {season}` from cached "
+            "features and install it with the preseason runtime bundle"
+        ) from exc
+    missing = sorted(set(SRS_PRIOR_COLUMNS) - set(frame.columns))
+    if missing:
+        raise ValueError("srs prior is missing columns: " + ", ".join(missing))
+    if frame.empty or not frame["season"].eq(season - 1).all():
+        raise ValueError("srs prior must describe the previous season")
+    if (
+        frame["team"].duplicated().any()
+        or not np.isfinite(frame["srs_rating"].to_numpy(float)).all()
+    ):
+        raise ValueError("srs prior must hold one finite rating per team")
+    return frame
 
 
 def score_noise_prior_from_fit(fitted: JointScoringFit) -> pd.DataFrame:
@@ -248,27 +354,58 @@ def load_score_noise_prior(season: int) -> pd.DataFrame:
     return frame
 
 
+def _runtime_bundle_name(season: int, kind: str) -> str:
+    return f"preseason/{kind}/{season}_01.parquet"
+
+
+def export_preseason_runtime_bundle(season: int, destination: Path) -> Path:
+    """Package the frozen preseason state the weekly fit needs on a fresh runner."""
+    frames = {
+        "ratings": store.read_preseason_forecast_artifact(season, 1, "ratings"),
+        "score_noise_prior": load_score_noise_prior(season),
+        "srs_prior": load_srs_prior(season),
+    }
+    scoring_priors_from_ratings(
+        frames["ratings"], frames["score_noise_prior"], frames["srs_prior"]
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(destination, "w", compression=ZIP_DEFLATED) as bundle:
+        for kind, frame in frames.items():
+            buffer = BytesIO()
+            frame.to_parquet(buffer, index=False)
+            bundle.writestr(_runtime_bundle_name(season, kind), buffer.getvalue())
+    return destination
+
+
 def install_preseason_runtime_bundle(bundle: bytes, season: int) -> None:
-    """Restore the reviewed preseason state without rebuilding a frozen forecast."""
-    names = [
-        f"preseason/{kind}/{season}_01.parquet"
-        for kind in ("ratings", "score_noise_prior")
+    """Restore the reviewed preseason state without rebuilding a frozen forecast.
+
+    Bundles exported before joint_scoring_v12 lack the srs_prior; they still
+    install, and the weekly fit then fails closed until one is provided.
+    """
+    required = [
+        _runtime_bundle_name(season, kind) for kind in ("ratings", "score_noise_prior")
     ]
+    optional = _runtime_bundle_name(season, "srs_prior")
     with ZipFile(BytesIO(bundle)) as archive:
-        if sorted(archive.namelist()) != sorted(names):
+        names = sorted(archive.namelist())
+        if names not in (sorted(required), sorted([*required, optional])):
             raise ValueError("preseason runtime bundle contains unexpected files")
         if any(item.file_size > 10_000_000 for item in archive.infolist()):
             raise ValueError("preseason runtime bundle exceeds the data size limit")
-        payloads = [archive.read(name) for name in names]
-    ratings, noise = [pd.read_parquet(BytesIO(data)) for data in payloads]
-    priors = scoring_priors_from_ratings(ratings, noise)
+        payloads = {name: archive.read(name) for name in names}
+    frames = {name: pd.read_parquet(BytesIO(data)) for name, data in payloads.items()}
+    ratings, noise = (frames[name] for name in required)
+    srs_prior = frames.get(optional)
+    priors = scoring_priors_from_ratings(ratings, noise, srs_prior)
     if (
         not ratings["season"].eq(season).all()
         or not ratings["model_version"].str.startswith("preseason_").all()
         or priors.score_noise_season != season - 1
+        or (srs_prior is not None and not srs_prior["season"].eq(season - 1).all())
     ):
         raise ValueError("preseason runtime bundle has incompatible season or model")
-    for name, data in zip(names, payloads, strict=True):
+    for name, data in payloads.items():
         path = store.PROCESSED_DIR / name
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")
@@ -1080,6 +1217,7 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
     outputs = {
         "ratings": ratings,
         "score_noise_prior": score_noise_prior_from_fit(previous_fit),
+        "srs_prior": build_srs_prior(season),
         "unit_ratings": unit_ratings,
         "projections": projections,
         "schedule_coverage": coverage,

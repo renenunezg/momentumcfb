@@ -133,7 +133,10 @@ def _config_id(config: JointScoringConfig) -> str:
         f"pool_prior_sd={config.pool_prior_sd_ppp:g};"
         f"crossover_prior_sd={config.crossover_prior_sd:g};"
         f"matchup_total_calibration={int(config.matchup_total_calibration)};"
-        f"scoring_prior_games={config.scoring_prior_games:g}"
+        f"scoring_prior_games={config.scoring_prior_games:g};"
+        f"srs_blend_weight={config.srs_blend_weight:g};"
+        f"srs_prior_sd_points={config.srs_prior_sd_points:g};"
+        f"margin_sd_scale={config.margin_sd_scale:g}"
     )
 
 
@@ -336,6 +339,9 @@ def walk_forward_season(
         projected["crossover_prior_sd"] = config.crossover_prior_sd
         projected["matchup_total_calibration"] = config.matchup_total_calibration
         projected["scoring_prior_games"] = config.scoring_prior_games
+        projected["srs_blend_weight"] = config.srs_blend_weight
+        projected["srs_prior_sd_points"] = config.srs_prior_sd_points
+        projected["margin_sd_scale"] = config.margin_sd_scale
 
         projected["actual_margin"] = (
             projected["actual_home_points"] - projected["actual_away_points"]
