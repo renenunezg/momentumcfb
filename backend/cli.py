@@ -460,6 +460,11 @@ def parse_args(argv=None):
     pilot.add_argument("--polls", type=int, default=1)
     pilot.add_argument("--interval", type=int, default=60)
     pilot.add_argument("--max-games", type=int, default=1)
+    pilot.add_argument(
+        "--compare-espn",
+        action="store_true",
+        help="archive a sequential ESPN scoreboard comparison each poll",
+    )
     pilot.add_argument("--output-directory")
     _cfbd_budget_arguments(pilot)
     return parser.parse_args(argv)
