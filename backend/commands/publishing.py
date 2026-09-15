@@ -35,6 +35,7 @@ def handle_refresh_picks(args: Namespace) -> None:
     from backend.publish import (
         CFB_SCHEMA,
         _publish_recommendations,
+        _withdraw_superseded,
         ensure_recommendation_schema,
         fetch_qb_availability,
     )
@@ -52,8 +53,11 @@ def handle_refresh_picks(args: Namespace) -> None:
         )
     if projections.empty:
         raise ValueError(f"no published projections for {args.season} week {args.week}")
-    # The published forecast stays frozen; an absence reported since it was
-    # made adjusts only the lines these fresh prices are decided against.
+    _, offers, matches, snapshot = odds_frames(OddsAPIClient(), projections)
+    # The decision is timed after the prices arrive: an offer fetched after
+    # the decision timestamp would otherwise read as stale and block every
+    # pick. The published forecast stays frozen; an absence reported since it
+    # was made adjusts only the lines these fresh prices are decided against.
     decided_at = datetime.now(timezone.utc)
     games = store.read_games(args.season)
     projections = apply_qb_availability(
@@ -63,7 +67,6 @@ def handle_refresh_picks(args: Namespace) -> None:
         ),
         set(games.loc[games["season_type"].eq("postseason"), "id"]),
     )
-    _, offers, matches, snapshot = odds_frames(OddsAPIClient(), projections)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     store.write_processed(
         offers,
@@ -72,10 +75,12 @@ def handle_refresh_picks(args: Namespace) -> None:
     )
     decisions = build_recommendations(projections, offers, decision_at=decided_at)
     with engine.begin() as conn:
+        withdrawn = _withdraw_superseded(conn, decisions, decided_at)
         _publish_recommendations(conn, decisions)
     picks = decisions[decisions["status"].eq("recommended")]
     log.info(
-        f"refreshed {args.season} week {args.week}: {len(offers)} offers on "
+        f"refreshed {args.season} week {args.week}: {withdrawn} superseded picks "
+        f"withdrawn, {len(offers)} offers on "
         f"{int(matches['matched'].sum()) if not matches.empty else 0} matched events, "
         f"{len(picks)} qualifying picks "
         f"({picks['market'].value_counts().to_dict()}), "

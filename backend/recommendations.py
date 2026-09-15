@@ -88,6 +88,11 @@ RECOMMENDATION_COLUMNS = [
     "total_sd",
     "degrees_of_freedom",
 ]
+# A published pick that the current model no longer makes is settled void
+# before kickoff with this reason. Only a new model version withdraws; a line
+# that merely moved against a pick keeps its original price contract, so the
+# ledger cannot shed picks the market turned on.
+WITHDRAWAL_REASON = "model_withdrawn"
 SETTLEMENT_COLUMNS = [
     "game_id",
     "market",
@@ -429,6 +434,69 @@ def build_recommendations(projections, offers, *, decision_at=None):
             1.0,
         ]
     return decisions
+
+
+def withdraw_superseded(existing, decisions, *, withdrawn_at=None):
+    """Void, before kickoff, every open pick a newer model no longer makes.
+
+    ``existing`` holds published recommendations; ``decisions`` is the fresh
+    ``build_recommendations`` frame for the same games. A pick is withdrawn
+    only when the fresh decision comes from a different model version and
+    either recommends the other side or finds no side above the edge gate.
+    A missing or unpriced fresh decision is not a change of opinion, and a
+    pick whose game has started is settled on its result like any other.
+    """
+    now = _timestamp(withdrawn_at or datetime.now(timezone.utc))
+    fresh = decisions.set_index(["game_id", "market"])
+    rows = []
+    for pick in existing.itertuples():
+        if pick.status != "recommended" or pick.outcome != "pending":
+            continue
+        if not now < _timestamp(pick.start_date):
+            continue
+        key = (pick.game_id, pick.market)
+        if key not in fresh.index:
+            continue
+        current = fresh.loc[key]
+        if current["model_version"] == pick.model_version:
+            continue
+        superseded = (
+            current["status"] == "recommended" and current["side"] != pick.side
+        ) or (
+            current["status"] == "no_play"
+            and current["reason"] == "below_edge_threshold"
+        )
+        if not superseded:
+            continue
+        rows.append(
+            dict(
+                game_id=pick.game_id,
+                market=pick.market,
+                decision_at=pick.decision_at,
+                outcome="void",
+                home_points=None,
+                away_points=None,
+                profit_units=0.0,
+                graded_at=now,
+                settlement_reason=WITHDRAWAL_REASON,
+                superseding_model_version=current["model_version"],
+            )
+        )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "game_id",
+            "market",
+            "decision_at",
+            "outcome",
+            "home_points",
+            "away_points",
+            "profit_units",
+            "graded_at",
+            "settlement_reason",
+            "superseding_model_version",
+        ],
+    )
 
 
 def closing_line_value(pick, closing):
