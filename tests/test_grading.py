@@ -485,3 +485,58 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         recommendation_calibration(
             audited.assign(published_at=now + pd.Timedelta(days=30))
         )
+
+
+def test_superseded_picks_withdraw_only_on_a_new_model_before_kickoff():
+    from backend.recommendations import WITHDRAWAL_REASON, withdraw_superseded
+
+    now = pd.Timestamp("2026-09-15T20:00:00Z")
+    decided = pd.Timestamp("2026-09-14T18:00:00Z")
+    existing = pd.DataFrame(
+        dict(
+            game_id=[1, 2, 3, 4, 5, 6, 7],
+            market=["spreads"] * 7,
+            decision_at=[decided] * 7,
+            start_date=[pd.Timestamp("2026-09-19T20:00:00Z")] * 6
+            + [pd.Timestamp("2026-09-15T19:00:00Z")],
+            status=["recommended"] * 6 + ["recommended"],
+            outcome=["pending"] * 5 + ["win", "pending"],
+            side=["home"] * 7,
+            model_version=["joint_scoring_v11"] * 7,
+        )
+    )
+    fresh = pd.DataFrame(
+        dict(
+            game_id=[1, 2, 3, 4, 5, 7],
+            market=["spreads"] * 6,
+            status=[
+                "recommended",
+                "no_play",
+                "recommended",
+                "no_play",
+                "no_play",
+                "no_play",
+            ],
+            side=["home", "home", "away", "home", "home", "home"],
+            reason=[
+                "qualifying_edge",
+                "below_edge_threshold",
+                "qualifying_edge",
+                "no_valid_price",
+                "below_edge_threshold",
+                "below_edge_threshold",
+            ],
+            model_version=["joint_scoring_v12"] * 4
+            + ["joint_scoring_v11", "joint_scoring_v12"],
+        )
+    )
+    withdrawn = withdraw_superseded(existing, fresh, withdrawn_at=now)
+    # Same side still made: kept. Below the gate or flipped under the new
+    # model: withdrawn. No price, same model version, settled, started, or
+    # absent from the fresh decisions: untouched.
+    assert sorted(withdrawn.game_id) == [2, 3]
+    assert withdrawn.outcome.eq("void").all()
+    assert withdrawn.profit_units.eq(0).all()
+    assert withdrawn.settlement_reason.eq(WITHDRAWAL_REASON).all()
+    assert (withdrawn.graded_at == now).all()
+    assert withdrawn.superseding_model_version.eq("joint_scoring_v12").all()

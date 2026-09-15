@@ -18,7 +18,9 @@ indexes survive; ``to_sql(if_exists="replace")`` would drop them.
 
 from __future__ import annotations
 
+import logging
 import re
+from datetime import datetime, timezone
 
 import pandas as pd
 from sqlalchemy import text
@@ -30,6 +32,8 @@ from backend.grading import (
     PERFORMANCE_METRIC_COLUMNS,
     read_grading_artifacts,
 )
+
+log = logging.getLogger(__name__)
 
 # Identity only. Conference and classification are deliberately absent: every
 # consumer already loads team_ratings, which carries both.
@@ -535,6 +539,9 @@ def publish(
         projections = projections[projections["game_id"].isin(game_ids)]
         market = market[market["game_id"].isin(game_ids)]
         decisions = decisions[decisions["game_id"].isin(game_ids)]
+        withdrawn = _withdraw_superseded(conn, decisions, datetime.now(timezone.utc))
+        if withdrawn:
+            log.info("withdrew %d picks superseded by the current model", withdrawn)
         _publish_recommendations(conn, decisions)
         if teams is not None:
             # A dimension with no natural version: replace it wholesale so a
@@ -775,6 +782,44 @@ def publish_players(season: int) -> dict[str, int]:
             )
             for table in (*by_season, *full_refresh)
         }
+
+
+def _withdraw_superseded(conn, decisions, withdrawn_at):
+    """Settle void every open pick that a newer model version no longer makes.
+
+    Runs before the fresh decisions are stored, so the withdrawn row keeps
+    its original price contract as the record for that game and market.
+    """
+    from backend.recommendations import withdraw_superseded
+
+    if decisions.empty:
+        return 0
+    existing = pd.read_sql_query(
+        text(
+            "SELECT game_id, market, decision_at, start_date, status, outcome, "
+            f"side, model_version FROM {CFB_SCHEMA}.recommendations "
+            "WHERE game_id = ANY(:ids) AND status = 'recommended' "
+            "AND outcome = 'pending'"
+        ),
+        conn,
+        params={"ids": [int(g) for g in decisions["game_id"].unique()]},
+    )
+    settlements = withdraw_superseded(existing, decisions, withdrawn_at=withdrawn_at)
+    if settlements.empty:
+        return 0
+    return conn.execute(
+        text(
+            f"UPDATE {CFB_SCHEMA}.recommendations SET outcome = 'void', "
+            "profit_units = 0, graded_at = :graded_at, "
+            "settlement_reason = :settlement_reason "
+            "WHERE game_id = :game_id AND market = :market "
+            "AND decision_at = :decision_at AND status = 'recommended' "
+            "AND outcome = 'pending' AND start_date > clock_timestamp()"
+        ),
+        settlements[
+            ["game_id", "market", "decision_at", "graded_at", "settlement_reason"]
+        ].to_dict("records"),
+    ).rowcount
 
 
 def _publish_recommendations(conn, decisions):
