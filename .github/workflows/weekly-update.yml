@@ -211,6 +211,19 @@ jobs:
       - name: Rebuild features
         run: poetry run python -m backend features --seasons "$SEASON"
 
+      - name: Restore paid-source receipts
+        uses: actions/cache@v4
+        with:
+          path: backend/data/raw/tier2/
+          key: cfb-tier2-v1-${{ env.SEASON }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: cfb-tier2-v1-${{ env.SEASON }}-
+
+      - name: Archive Tier 2 forecast context
+        # Research inputs are kept separate from the published scoring model.
+        # Their outage must not suppress an otherwise valid weekly forecast.
+        continue-on-error: true
+        run: poetry run python -m backend tier2-snapshot --season "$SEASON" --weather --adjusted --max-calls "$CFBD_MAX_CALLS"
+
       - name: Retrain and publish next week
         shell: bash
         env:
@@ -285,6 +298,15 @@ jobs:
         with:
           name: weekly-cfb-${{ github.run_id }}
           path: backend/data/processed/weekly/forecast_log/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Preserve paid-source receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cfb-tier2-${{ github.run_id }}
+          path: backend/data/raw/tier2/
           if-no-files-found: ignore
           retention-days: 90
 

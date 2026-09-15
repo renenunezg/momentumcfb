@@ -201,6 +201,13 @@ def test_cfbd_quota_gate_counts_retries_and_persists_across_commands(
     with pytest.raises(cfbd.CFBDError, match="session budget"):
         resumed.ensure_budget(2)
     assert resumed.remaining == 98
+    object_response = response(200, 97)
+    object_response.json = lambda: {"tierName": "Tier 2"}
+    monkeypatch.setattr(resumed.session, "get", lambda *a, **k: object_response)
+    assert resumed.get_object("/info")["tierName"] == "Tier 2"
+    assert resumed.calls_used == 3
+    with pytest.raises(cfbd.CFBDError, match="session budget"):
+        resumed.get_object("/info")
 
     for headers, error in [
         ({"X-CallLimit-Remaining": "41"}, "preserving a 40-call reserve"),
@@ -221,6 +228,54 @@ def test_cfbd_quota_gate_counts_retries_and_persists_across_commands(
         with pytest.raises(cfbd.CFBDError, match=error):
             constrained.get("/roster", {})
         assert constrained.calls_used == 1
+
+
+def test_paid_weather_snapshots_preserve_pregame_cutoff_and_missingness(tmp_path):
+    import json
+
+    from backend.cfbd.snapshots import read_snapshot, save_snapshot
+    from backend.features.weather import weather_context
+
+    target = pd.DataFrame(
+        [
+            dict(game_id=1, start_date="2026-09-19T18:00:00Z"),
+            dict(game_id=2, start_date="2026-09-19T18:00:00Z"),
+        ]
+    )
+    weather = [
+        dict(
+            id=1,
+            startTime="2026-09-19T18:00:00Z",
+            gameIndoors=False,
+            temperature=70,
+            windSpeed=8,
+            precipitation=0,
+        )
+    ]
+    before = pd.Timestamp("2026-09-18T18:00:00Z")
+    path = save_snapshot(
+        tmp_path, "/games/weather", {"year": 2026}, weather, before, before
+    )
+    later = [{**weather[0], "windSpeed": 25}]
+    after = pd.Timestamp("2026-09-19T19:00:00Z")
+    save_snapshot(tmp_path, "/games/weather", {"year": 2026}, later, after, after)
+    frame = weather_context(target, before, root=tmp_path).set_index("game_id")
+    assert frame.loc[1, "weather_windSpeed"] == 8
+    assert not frame.loc[1, "weather_missing"]
+    assert frame.loc[2, "weather_missing"]
+    assert weather_context(
+        target, before - pd.Timedelta(seconds=1), root=tmp_path
+    ).weather_missing.all()
+    # A later retrospective read still cannot select observed postgame weather.
+    assert weather_context(target, after, root=tmp_path).iloc[0].weather_windSpeed == 8
+    original = path.read_bytes()
+    save_snapshot(tmp_path, "/games/weather", {"year": 2026}, weather, before, before)
+    assert path.read_bytes() == original
+    corrupt = json.loads(original)
+    corrupt["payload"][0]["windSpeed"] = 99
+    path.write_text(json.dumps(corrupt))
+    with pytest.raises(ValueError, match="checksum"):
+        read_snapshot(path)
 
 
 def test_player_ingestion_resumes_completed_week_chunks_without_future_calls(

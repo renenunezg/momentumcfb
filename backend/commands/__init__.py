@@ -47,10 +47,20 @@ from backend.commands.serving import (
     handle_serve_verify,
     handle_serving_anchors,
 )
+from backend.commands.tier2 import (
+    handle_live_pilot,
+    handle_tier2_benchmark,
+    handle_tier2_snapshot,
+    handle_weather_evaluate,
+)
 
 Handler = Callable[[Namespace], None]
 
 HANDLERS: dict[str, Handler] = {
+    "tier2-snapshot": handle_tier2_snapshot,
+    "weather-evaluate": handle_weather_evaluate,
+    "tier2-benchmark": handle_tier2_benchmark,
+    "cfbd-live-pilot": handle_live_pilot,
     "ingest": handle_ingest,
     "qb-starters": handle_qb_starters,
     "features": handle_features,

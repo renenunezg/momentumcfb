@@ -22,6 +22,128 @@ PARAMS = IngameBaselineParams(
 )
 
 
+def test_cfbd_live_pilot_archives_and_scores_only_fresh_matching_pregame_state(
+    tmp_path,
+):
+    from copy import deepcopy
+    from datetime import datetime, timezone
+
+    from backend.cfbd.snapshots import read_snapshot, save_snapshot
+    from backend.serving.cfbd_live import live_plays, run_pilot, score_snapshot
+
+    now = pd.Timestamp(datetime.now(timezone.utc))
+    payload = dict(
+        id=9001,
+        status="In Progress",
+        period=2,
+        clock="10:00",
+        possession=HOME,
+        down=1,
+        distance=10,
+        yardsToGoal=60,
+        teams=[
+            dict(teamId=1, team=HOME, homeAway="home", points=7),
+            dict(teamId=2, team=AWAY, homeAway="away", points=3),
+        ],
+        drives=[
+            dict(
+                id="d1",
+                plays=[
+                    dict(
+                        id="p1",
+                        teamId=1,
+                        homeScore=7,
+                        awayScore=3,
+                        period=2,
+                        clock="10:00",
+                        wallClock=now.isoformat(),
+                        down=1,
+                        distance=10,
+                        yardsToGoal=60,
+                        yardsGained=4,
+                        playType="Rush",
+                        playText="Rush",
+                        epa=0.3,
+                    )
+                ],
+            )
+        ],
+    )
+    anchor = pd.DataFrame(
+        [
+            dict(
+                game_id=9001,
+                model_week=3,
+                home_margin=3,
+                margin_sd=14,
+                home_team_id=1,
+                away_team_id=2,
+                start_date=now - pd.Timedelta(hours=1),
+                as_of=now - pd.Timedelta(days=1),
+                model_version="joint_scoring_v11",
+            )
+        ]
+    )
+    p = save_snapshot(
+        tmp_path / "raw", "/live/plays", {"gameId": 9001}, payload, now, now
+    )
+    receipt = read_snapshot(p)
+    result = score_snapshot(receipt, anchor, PARAMS)
+    assert result["reason"] == "scored" and 0 < result["win_probability"] < 1
+    changed = deepcopy(receipt)
+    changed["payload"]["teams"][0]["totalEpa"] = 900
+    assert (
+        score_snapshot(changed, anchor, PARAMS)["win_probability"]
+        == result["win_probability"]
+    )
+    changed["fetched_at"] = (now + pd.Timedelta(minutes=10)).isoformat()
+    assert score_snapshot(changed, anchor, PARAMS)["win_probability"] is None
+    for bad in (anchor.assign(as_of=now), anchor.assign(home_team_id=3)):
+        assert score_snapshot(receipt, bad, PARAMS)["win_probability"] is None
+    changed = deepcopy(receipt)
+    changed["payload"]["period"] = 5
+    assert score_snapshot(changed, anchor, PARAMS)["reason"] == "unsupported_period"
+    duplicate = deepcopy(payload)
+    duplicate["drives"][0]["plays"] *= 2
+    assert len(live_plays(duplicate, 2026, 3)) == 1
+    duplicate["drives"][0]["plays"][1] = dict(
+        duplicate["drives"][0]["plays"][1], yardsGained=5
+    )
+    with pytest.raises(ValueError, match="conflicting duplicate"):
+        live_plays(duplicate, 2026, 3)
+
+    class Client:
+        calls_used = 0
+        remaining = 1000
+
+        def ensure_budget(self, n):
+            assert n == 4
+
+        def get(self, path, params, **kwargs):
+            self.calls_used += 1
+            return [
+                dict(id=9001, status="in_progress" if self.calls_used == 1 else "final")
+            ]
+
+        def get_object(self, path, params, **kwargs):
+            self.calls_used += 1
+            return payload
+
+    output = run_pilot(
+        Client(),
+        anchor,
+        PARAMS,
+        tmp_path / "output",
+        season=2026,
+        week=3,
+        polls=2,
+        root=tmp_path / "raw",
+        sleep=lambda _: None,
+    )
+    assert len(output) == 1 and output.iloc[0].reason == "scored"
+    assert list((tmp_path / "output").glob("*_process.parquet"))
+
+
 def _play(play_id, period, minutes, seconds, offense, play_type, **overrides):
     row = {
         "game_id": 9001,

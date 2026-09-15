@@ -107,6 +107,25 @@ class CFBDClient:
         retries: int = 3,
         timeout: float = 60,
     ) -> list:
+        data = self._get_json(path, params, retries, timeout)
+        if not isinstance(data, list):
+            raise CFBDError(f"GET {path} returned a non-list payload")
+        return data
+
+    def get_object(
+        self,
+        path: str,
+        params: dict | None = None,
+        retries: int = 3,
+        timeout: float = 60,
+    ) -> dict:
+        """Object endpoints share the same budget, reserve and retry accounting."""
+        data = self._get_json(path, params, retries, timeout)
+        if not isinstance(data, dict):
+            raise CFBDError(f"GET {path} returned a non-object payload")
+        return data
+
+    def _get_json(self, path, params, retries, timeout):
         if retries < 1:
             raise ValueError("retries must be positive")
         url = f"{CFBD_BASE_URL}{path}"
@@ -138,8 +157,6 @@ class CFBDClient:
                     f"GET {path} returned {resp.status_code}: {resp.text[:200]}"
                 )
             data = resp.json()
-            if not isinstance(data, list):
-                raise CFBDError(f"GET {path} returned a non-list payload")
             self._planned_calls = max(0, self._planned_calls - 1)
             return data
         raise CFBDError(f"GET {path} failed after {retries} attempts")
