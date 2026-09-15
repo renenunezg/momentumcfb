@@ -161,6 +161,7 @@ def scoring_priors_from_ratings(
             int(noise_games),
             int(noise_season),
             noise_as_of.to_pydatetime(),
+            float(row.base_ppp) if "base_ppp" in row else None,
         )
     return JointScoringPriors(means, sds, possessions, base_possessions)
 
@@ -177,6 +178,7 @@ def score_noise_prior_from_fit(fitted: JointScoringFit) -> pd.DataFrame:
                 "home_variance": covariance[0, 0],
                 "away_variance": covariance[1, 1],
                 "score_covariance": covariance[0, 1],
+                "base_ppp": fitted.base_ppp,
             }
         ]
     )
@@ -196,6 +198,53 @@ def load_score_noise_prior(season: int) -> pd.DataFrame:
         or not frame["season"].eq(season - 1).all()
     ):
         raise ValueError("score noise prior must describe the previous season")
+    if "base_ppp" not in frame:
+        # Older runtime bundles omit the intercept. Recover it algebraically
+        # from their frozen preseason scores, never from current-season results.
+        ratings = store.read_preseason_forecast_artifact(season, 1, "ratings")
+        try:
+            projections = store.read_preseason_forecast_artifact(
+                season, 1, "projections"
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                "preseason runtime lacks base_ppp; install the reviewed scoring "
+                "baseline bundle or restore matching frozen preseason projections"
+            ) from exc
+        by_id = ratings.set_index("team_id")
+        rates = []
+        for game in projections.itertuples():
+            if not str(game.model_version).startswith("preseason_"):
+                raise ValueError(
+                    "baseline recovery requires frozen preseason forecasts"
+                )
+            home, away = by_id.loc[game.home_team_id], by_id.loc[game.away_team_id]
+            if pd.Timestamp(home.as_of) != pd.Timestamp(game.as_of) or pd.Timestamp(
+                away.as_of
+            ) != pd.Timestamp(game.as_of):
+                raise ValueError(
+                    "baseline recovery requires matching preseason snapshots"
+                )
+            if min(game.expected_home_points, game.expected_away_points) <= 0:
+                continue
+            possessions = (home.expected_possessions + away.expected_possessions) / 2
+            environment = (
+                home.offense_points
+                - home.defense_points
+                + away.offense_points
+                - away.defense_points
+            )
+            rates.append((game.model_total - environment) / (2 * possessions))
+        if (
+            not rates
+            or not np.isfinite(rates).all()
+            or min(rates) <= 0
+            or np.ptp(rates) > 1e-8
+        ):
+            raise ValueError(
+                "cannot recover one consistent frozen preseason scoring baseline"
+            )
+        frame = frame.assign(base_ppp=float(np.mean(rates)))
     return frame
 
 

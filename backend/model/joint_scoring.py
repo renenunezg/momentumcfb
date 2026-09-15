@@ -6,9 +6,9 @@ import numpy as np
 import pandas as pd
 
 from backend.model.outputs import GameProjection, TeamRating
-from backend.model.scoring_calibration import calibrated_scores
+from backend.model.scoring_calibration import bounded_model_total, calibrated_scores
 
-MODEL_VERSION = "joint_scoring_v10"
+MODEL_VERSION = "joint_scoring_v11"
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
 MAX_POOL_ITERATIONS = 50
@@ -46,6 +46,7 @@ class JointScoringConfig:
     # from points residuals and shrunk toward zero. Zero disables it.
     crossover_prior_sd: float = 0.0
     matchup_total_calibration: bool = False
+    scoring_prior_games: float = 0.0
 
     def __post_init__(self) -> None:
         if isnan(self.rating_half_life_weeks) or self.rating_half_life_weeks <= 0:
@@ -72,6 +73,8 @@ class JointScoringConfig:
             raise ValueError("pool_prior_sd_ppp must be finite and not negative")
         if not isfinite(self.crossover_prior_sd) or self.crossover_prior_sd < 0:
             raise ValueError("crossover_prior_sd must be finite and not negative")
+        if not isfinite(self.scoring_prior_games) or self.scoring_prior_games < 0:
+            raise ValueError("scoring_prior_games must be finite and not negative")
 
 
 # joint_scoring_v6: on the 2020 through 2025 historical-carryover walk-forward
@@ -106,6 +109,9 @@ DEFAULT_CONFIG = JointScoringConfig(
     pool_prior_sd_ppp=0.2,
     crossover_prior_sd=0.6,
     matchup_total_calibration=True,
+    # Selected on 2020-2022 D1 totals, validated on 2023-2025.
+    # Independent of pace, team strength, and market prices.
+    scoring_prior_games=100.0,
 )
 
 
@@ -126,8 +132,17 @@ class JointScoringPriors:
     score_noise_games: int = 0
     score_noise_season: int | None = None
     score_noise_as_of: datetime | None = None
+    base_ppp: float | None = None
 
     def __post_init__(self) -> None:
+        if self.base_ppp is not None and (
+            not isfinite(self.base_ppp)
+            or self.base_ppp <= 0
+            or self.score_noise_covariance is None
+        ):
+            raise ValueError(
+                "scoring baseline requires positive PPP and dated prior state"
+            )
         if self.score_noise_covariance is not None:
             noise = np.asarray(self.score_noise_covariance, dtype=float)
             if (
@@ -302,11 +317,14 @@ class JointScoringFit:
     score_residual_covariance: np.ndarray
     config: JointScoringConfig
     training_games: int
+    preseason_base_ppp: float | None = None
 
     @property
     def model_version(self) -> str:
+        if self.preseason_base_ppp is not None and self.config.scoring_prior_games:
+            return MODEL_VERSION
         return (
-            MODEL_VERSION
+            "joint_scoring_v10"
             if self.config.matchup_total_calibration
             else "joint_scoring_v9"
         )
@@ -390,6 +408,30 @@ class JointScoringFit:
                     classifications[away],
                 )
 
+            # Stabilize only the common scoring level after fitting strength.
+            # Changing the fitting intercept would also move spreads and MLs.
+            baseline_adjustment = 0.0
+            if self.preseason_base_ppp is not None and self.config.scoring_prior_games:
+                support = self.config.scoring_prior_games
+                shift = (
+                    support
+                    / (support + self.training_games)
+                    * (self.preseason_base_ppp - self.base_ppp)
+                )
+                home_score = max(float(expected_home), 0.0)
+                away_score = max(float(expected_away), 0.0)
+                margin = home_score - away_score
+                total = float(
+                    bounded_model_total(
+                        home_score + away_score, margin, 2 * possessions * shift
+                    )
+                )
+                baseline_adjustment = total - home_score - away_score
+                expected_home, expected_away = (
+                    (total + margin) / 2,
+                    (total - margin) / 2,
+                )
+
             score_design = np.zeros((2, 2 * n_teams + 1))
             score_design[0, home] = self.base_possessions
             score_design[0, n_teams + away] = -self.base_possessions
@@ -430,10 +472,12 @@ class JointScoringFit:
                     margin_total_correlation=correlation,
                     degrees_of_freedom=self.config.student_t_degrees_of_freedom,
                     expected_game_possessions=float(possessions),
+                    scoring_baseline_adjustment=baseline_adjustment,
                     total_calibration_adjustment=(
                         max(float(expected_home), 0.0)
                         + max(float(expected_away), 0.0)
                         - uncalibrated_total
+                        - baseline_adjustment
                     ),
                 )
             )
@@ -771,4 +815,5 @@ def fit_joint_scoring(
         score_residual_covariance=score_covariance,
         config=config,
         training_games=n_games,
+        preseason_base_ppp=priors.base_ppp if priors is not None else None,
     )

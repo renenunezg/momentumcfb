@@ -112,6 +112,7 @@ class GameProjection:
     degrees_of_freedom: float
     expected_game_possessions: float | None = None
     total_calibration_adjustment: float = 0.0
+    scoring_baseline_adjustment: float = 0.0
 
     def __post_init__(self) -> None:
         if self.expected_game_possessions is not None and (
@@ -126,6 +127,7 @@ class GameProjection:
         _validate_finite(
             home_field_points=self.home_field_points,
             total_calibration_adjustment=self.total_calibration_adjustment,
+            scoring_baseline_adjustment=self.scoring_baseline_adjustment,
             expected_home_points=self.expected_home_points,
             expected_away_points=self.expected_away_points,
             margin_sd=self.margin_sd,
@@ -209,6 +211,7 @@ class GameProjection:
             "model_total": self.model_total,
             "expected_game_possessions": self.expected_game_possessions,
             "total_calibration_adjustment": self.total_calibration_adjustment,
+            "scoring_baseline_adjustment": self.scoring_baseline_adjustment,
             "home_score_sd": self.home_score_sd,
             "away_score_sd": self.away_score_sd,
             "home_away_correlation": self.home_away_correlation,

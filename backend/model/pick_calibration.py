@@ -417,6 +417,7 @@ def build_research_forecasts():
                 score_noise_games=previous.training_games,
                 score_noise_season=previous.season,
                 score_noise_as_of=previous.as_of,
+                base_ppp=previous.base_ppp,
             )
             forecasts = walk_forward_season(games, DEFAULT_CONFIG, priors=priors)
             lines = store.read_lines(season)
