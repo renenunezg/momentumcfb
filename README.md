@@ -33,12 +33,14 @@ Each team's offense and defense priors are correlated at 0.5, so the scoring-env
 The preseason model starts from prior-season power, scoring environment, and pace.
 It then incorporates current CFBD talent, returning production, transfers, quarterback continuity, recruiting, and coaching continuity.
 The prior-season, talent, and returning-production weights are fitted to 2022 through 2025 opening-week closing margins and validated leave-one-season-out.
+Service academies do not sign rated recruiting classes, so their talent composite is treated as missing instead of as a near-zero roster.
 Missing inputs receive neutral contributions and increase uncertainty instead of being guessed.
 Each conference pool (FCS as one pool) carries a shift parameter identified by crossover games, so a whole conference can move from the level its teams' priors imply instead of every team being shrunk toward a stale level, and FCS teams without priors are anchored to the fitted FCS level.
 Ratings are fitted to a blend of points and competitive-possession EPA, which discounts garbage-time scoring; games between distant pools carry far more of it, so a crossover gain estimated from points residuals adds a share of the pool-level gap to the stronger side (FBS over FCS bias +6.1 to +1.3 and Power Five over Group of Five +3.1 to +0.2 on the 2020 through 2025 walk-forward).
 Team strength scales with the game's expected possessions, so a slow or fast matchup changes the projected margin and total the way it changes the scoring.
 The published margin is half the joint fit's margin and half a points-only ridge rating fitted on the same games with a nine-point prior around the previous season's final points-only rating (joint_scoring_v12); the total is untouched.
 The points-only rating keeps information the blended fit shrinks away, mainly the crossover gain that restarts each season and the FCS pool, and on the 2020 through 2025 walk-forward the blend cut margin MAE by 0.19 points on Division I games with a closing line and 0.07 on FBS versus FBS, negative in every season.
+The points-only rating and its carried chain use every completed game with a final score, including the FCS games whose play-by-play features are missing (joint_scoring_v13), which cut 2023 through 2025 margin MAE by a further 0.06 on Division I games and 0.12 on FCS versus FCS.
 The projected margin standard deviation is scaled by 0.915, which returns 80 percent interval coverage from 0.85 to 0.81.
 
 The in-game baseline combines the current score and possession state with a frozen pregame anchor.

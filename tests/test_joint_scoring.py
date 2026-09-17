@@ -81,8 +81,8 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
         fitted, config=replace(fitted.config, matchup_total_calibration=False)
     ).project(target)
     for current, previous in zip(projections, uncalibrated):
-        assert current.model_version == "joint_scoring_v12"
-        assert previous.model_version == "joint_scoring_v12"
+        assert current.model_version == "joint_scoring_v13"
+        assert previous.model_version == "joint_scoring_v13"
         assert current.home_margin == pytest.approx(previous.home_margin)
         assert current.model_total < previous.model_total
         assert current.to_record()["total_calibration_adjustment"] == pytest.approx(
@@ -259,7 +259,7 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
             stabilized, config=replace(stabilized.config, scoring_prior_games=0)
         ).project(opener)[0]
         projection = stabilized.project(opener)[0]
-        assert projection.model_version == "joint_scoring_v12"
+        assert projection.model_version == "joint_scoring_v13"
         assert projection.home_margin == pytest.approx(reference.home_margin)
         assert projection.margin_sd == reference.margin_sd
         assert projection.total_sd == reference.total_sd

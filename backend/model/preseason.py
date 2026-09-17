@@ -8,7 +8,11 @@ import numpy as np
 import pandas as pd
 
 from backend.etl import store
-from backend.features.scoring import build_scoring_games, load_scoring_team_games
+from backend.features.scoring import (
+    build_scoring_games,
+    build_weekly_scoring_games,
+    load_scoring_team_games,
+)
 from backend.model.joint_scoring import (
     DEFAULT_CONFIG,
     JointScoringFit,
@@ -29,7 +33,7 @@ from backend.odds.markets import (
     flatten_odds_api_offers,
 )
 
-MODEL_VERSION = "preseason_v5"
+MODEL_VERSION = "preseason_v6"
 # Power weights were fitted by least squares on 364 FBS games from the 2022
 # through 2025 Week 1 and Week 2 slates: the closing margin regressed on the
 # home-minus-away difference of each feature. Leave-one-season-out over 2023
@@ -47,6 +51,12 @@ RETURNING_POINTS = 1.70
 TRANSFER_QUALITY_POINTS = 1.00
 TRANSFER_COUNT_POINTS = 0.35
 QB_CONTINUITY_POINTS = 0.00
+# Service academies do not sign rated recruiting classes, so the talent
+# composite scores them near zero (Army 23.66 against a median near 650 in
+# 2025). Their talent is treated as missing: on the 22 academy games of the
+# 2022 through 2025 Week 1 and 2 slates that cut the prior's distance to the
+# closing margin from 14.7 to 6.3 points and its margin MAE from 16.4 to 14.2.
+UNRATED_TALENT_TEAMS = frozenset({"Air Force", "Army", "Navy"})
 # Calibration walk-forwards carry only the previous fit, without talent or
 # returning production, and that regime evaluated best at full weight.
 HISTORICAL_CARRYOVER_WEIGHT = 1.00
@@ -175,7 +185,7 @@ def scoring_priors_from_ratings(
     )
 
 
-SRS_PRIOR_MODEL_VERSION = "srs_carryover_v1"
+SRS_PRIOR_MODEL_VERSION = "srs_carryover_v2"
 SRS_PRIOR_COLUMNS = [
     "season",
     "as_of",
@@ -230,8 +240,12 @@ def build_srs_prior(season: int) -> pd.DataFrame:
     frame = None
     as_of = None
     for year in seasons:
-        games = build_scoring_games(
+        # Every completed game with a score, not only those with features.
+        games = build_weekly_scoring_games(
             store.read_games(year), load_scoring_team_games(year)
+        )
+        games = games[games["completed"].fillna(False).astype(bool)].dropna(
+            subset=["home_points", "away_points"]
         )
         frame = fit_season_points_rating(games, carried)
         carried = dict(zip(frame["team"], frame["srs_rating"].astype(float)))
@@ -797,6 +811,11 @@ def _merge_talent(
     ratings = ratings.merge(prior, on="team", how="left")
     ratings["latest_talent_missing"] = ratings["latest_talent"].isna()
     ratings["latest_talent_z"] = _neutral_zscore(ratings["latest_talent"])
+    # The standardization is left as fitted; only the academies are neutralized.
+    unrated = ratings["team"].isin(UNRATED_TALENT_TEAMS)
+    for column in ("current_talent", "latest_talent"):
+        ratings.loc[unrated, f"{column}_missing"] = True
+        ratings.loc[unrated, f"{column}_z"] = 0.0
     return ratings
 
 

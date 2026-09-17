@@ -8,7 +8,7 @@ import pandas as pd
 from backend.model.outputs import GameProjection, TeamRating
 from backend.model.scoring_calibration import bounded_model_total, calibrated_scores
 
-MODEL_VERSION = "joint_scoring_v12"
+MODEL_VERSION = "joint_scoring_v13"
 HFA_PRIOR_POINTS = 2.5
 HFA_PRIOR_SD_POINTS = 1.5
 MAX_POOL_ITERATIONS = 50
@@ -702,22 +702,27 @@ def fit_joint_scoring(
         and priors.score_noise_as_of >= as_of
     ):
         raise ValueError("score noise prior must precede the forecast cutoff")
-    training = games[games["model_week"] < forecast_week].copy()
-    if "completed" in training:
-        training = training[training["completed"].fillna(False).astype(bool)]
-    training = training.dropna(
+    scored = games[games["model_week"] < forecast_week]
+    if "completed" in scored:
+        scored = scored[scored["completed"].fillna(False).astype(bool)]
+    # joint_scoring_v13: the points-only rating needs only a final score, so
+    # it keeps the games whose play-by-play features are missing (mostly FCS
+    # versus FCS: 22 to 126 a season since 2022, over 600 in 2019 and 2021),
+    # in the weekly fit and in the carried chain. Holdout 2023 through 2025
+    # margin MAE -0.056 on Division I (t -4.8), -0.122 on FCS versus FCS,
+    # FBS versus FBS unchanged, negative in every season.
+    scored = scored.dropna(subset=["home_points", "away_points"])
+    training = scored.dropna(
         subset=[
-            "home_points",
-            "away_points",
             "game_possessions",
             "home_epa_per_possession",
             "away_epa_per_possession",
         ]
-    )
+    ).copy()
     if training.empty:
         raise ValueError("at least one prior model week is required")
-    if "start_date" in training:
-        latest_training_start = pd.to_datetime(training["start_date"], utc=True).max()
+    if "start_date" in scored:
+        latest_training_start = pd.to_datetime(scored["start_date"], utc=True).max()
         if latest_training_start.to_pydatetime() >= as_of:
             raise ValueError("training games must start before as_of")
     catalog = _team_catalog(games)
@@ -995,10 +1000,14 @@ def fit_joint_scoring(
                     srs_prior_points[index] = rating
                     srs_teams_with_priors[index] = True
         srs_rating, srs_hfa_points = _fit_points_rating(
-            training,
+            scored,
             team_index,
             classifications.to_numpy(),
-            recency[::2],
+            0.5
+            ** (
+                (scored["model_week"].max() - scored["model_week"].to_numpy(float))
+                / config.rating_half_life_weeks
+            ),
             srs_prior_points,
             srs_teams_with_priors,
             config.srs_prior_sd_points,
