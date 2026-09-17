@@ -82,7 +82,9 @@ create table if not exists cfb.game_projections (
   market_home_spread double precision,
   market_weight double precision,
   market_informed_home_margin double precision,
-  market_informed_home_spread double precision
+  market_informed_home_spread double precision,
+  market_history_home_margin double precision,
+  market_history_weight double precision
 );
 
 create table if not exists cfb.market_comparisons (
