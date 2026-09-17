@@ -16,8 +16,10 @@ import pandas as pd
 
 from backend.model.joint_scoring import _solve_ridge, _team_catalog
 
-MODEL_VERSION = "cfb_unit_ratings_v1"
-CHANNEL_PRIOR_SD = 3.0
+MODEL_VERSION = "cfb_unit_ratings_v2"
+# Prior sd of a unit effect as a share of the channel's game-to-game sd. With
+# the fitted noise this shrinks each unit like roughly ten games of evidence.
+CHANNEL_PRIOR_SHARE = 0.3
 
 COLUMNS = (
     "rush_offense",
@@ -27,6 +29,15 @@ COLUMNS = (
     "pass_block",
     "run_block",
 )
+
+
+def _centered_units(
+    parameters: np.ndarray, n_teams: int, fbs: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    center_mask = fbs if fbs.any() else np.ones(n_teams, dtype=bool)
+    unit = parameters[:n_teams]
+    counter = parameters[n_teams:]
+    return unit - unit[center_mask].mean(), counter - counter[center_mask].mean()
 
 
 def _two_sided_ridge(
@@ -53,15 +64,30 @@ def _two_sided_ridge(
     # schedule strength; a weak opponent is not an average-unit observation.
     center = float(np.average(target - design @ prior_mean, weights=weights))
     centered_target = target - center
-    prior_sd = np.full(2 * n_teams, CHANNEL_PRIOR_SD)
-
-    initial, _ = _solve_ridge(
-        design,
-        centered_target,
-        weights,
-        prior_mean,
-        prior_sd,
+    # Game totals are far noisier than team effects. Both the prior width and
+    # the observation noise come from the channel itself, so every channel is
+    # shrunk on its own scale instead of being fitted as near-exact evidence.
+    variance = float(
+        np.average(np.square(centered_target - design @ prior_mean), weights=weights)
     )
+    if not np.isfinite(variance):
+        raise ValueError("unit channel has nonfinite observations")
+    if variance <= 0:
+        # Every observation already equals its prior expectation.
+        return _centered_units(prior_mean, n_teams, classifications == "fbs")
+    prior_sd = np.full(2 * n_teams, CHANNEL_PRIOR_SHARE * np.sqrt(variance))
+
+    def solve(noise: float) -> np.ndarray:
+        parameters, _ = _solve_ridge(
+            design,
+            centered_target,
+            weights / noise,
+            prior_mean,
+            prior_sd,
+        )
+        return parameters
+
+    initial = solve(variance)
     fbs = classifications == "fbs"
     fcs = classifications == "fcs"
     if prior_units is None and fbs.any() and fcs.any():
@@ -73,19 +99,10 @@ def _two_sided_ridge(
             initial[n_teams:][fcs].mean() - initial[n_teams:][fbs].mean()
         )
 
-    parameters, _ = _solve_ridge(
-        design,
-        centered_target,
-        weights,
-        prior_mean,
-        prior_sd,
-    )
-    center_mask = fbs if fbs.any() else np.ones(n_teams, dtype=bool)
-    unit = parameters[:n_teams]
-    counter = parameters[n_teams:]
-    unit = unit - unit[center_mask].mean()
-    counter = counter - counter[center_mask].mean()
-    return unit, counter
+    residual = centered_target - design @ initial
+    noise = float(np.average(np.square(residual), weights=weights))
+    parameters = solve(noise if noise > 0 else variance)
+    return _centered_units(parameters, n_teams, fbs)
 
 
 def _game_weights(

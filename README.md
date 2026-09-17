@@ -155,8 +155,8 @@ The commands fall into six groups.
 Publishing is a separate, explicit boundary.
 Local model and evaluation commands do not require database write access.
 
-Player-value v2 uses exposure-weighted rush/pass efficiency and a frozen previous-season opponent prior instead of resetting opening opponents to average.
-Before activating v2, run `python -m backend player-prior --season 2026 --runtime-bundle /path/to/player-runtime-2026.zip` where the previous season's raw plays and existing Heisman runtime artifacts are cached.
+Player-value v3 uses exposure-weighted rush/pass efficiency and a frozen previous-season opponent prior instead of resetting opening opponents to average; opponent effects are shrunk with noise estimated from each channel.
+Before activating a new player-value version, run `python -m backend player-prior --season 2026 --runtime-bundle /path/to/player-runtime-2026.zip` where the previous season's raw plays and existing Heisman runtime artifacts are cached.
 The weekly runner requires that reviewed bundle, validates the prior before paid ingestion, and never downloads historical inputs or silently substitutes zero opponent effects.
 
 ## Known limits
