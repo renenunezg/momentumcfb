@@ -22,6 +22,7 @@ from backend.model.joint_scoring import (
     margin_total_distribution,
 )
 from backend.model.market_blend import add_market_informed_margins
+from backend.model.market_history import build_market_prior, load_market_prior
 from backend.model.outputs import GameProjection
 from backend.model.unit_ratings import COLUMNS as UNIT_RATING_COLUMNS
 from backend.model.unit_ratings import MODEL_VERSION as UNIT_RATING_MODEL_VERSION
@@ -378,6 +379,7 @@ def export_preseason_runtime_bundle(season: int, destination: Path) -> Path:
         "ratings": store.read_preseason_forecast_artifact(season, 1, "ratings"),
         "score_noise_prior": load_score_noise_prior(season),
         "srs_prior": load_srs_prior(season),
+        "market_prior": load_market_prior(season),
     }
     scoring_priors_from_ratings(
         frames["ratings"], frames["score_noise_prior"], frames["srs_prior"]
@@ -394,16 +396,22 @@ def export_preseason_runtime_bundle(season: int, destination: Path) -> Path:
 def install_preseason_runtime_bundle(bundle: bytes, season: int) -> None:
     """Restore the reviewed preseason state without rebuilding a frozen forecast.
 
-    Bundles exported before joint_scoring_v12 lack the srs_prior; they still
+    Bundles exported before joint_scoring_v12 lack the srs_prior, and those
+    before the market-history rating lack the market_prior; they still
     install, and the weekly fit then fails closed until one is provided.
     """
     required = [
         _runtime_bundle_name(season, kind) for kind in ("ratings", "score_noise_prior")
     ]
     optional = _runtime_bundle_name(season, "srs_prior")
+    market = _runtime_bundle_name(season, "market_prior")
     with ZipFile(BytesIO(bundle)) as archive:
         names = sorted(archive.namelist())
-        if names not in (sorted(required), sorted([*required, optional])):
+        if names not in (
+            sorted(required),
+            sorted([*required, optional]),
+            sorted([*required, optional, market]),
+        ):
             raise ValueError("preseason runtime bundle contains unexpected files")
         if any(item.file_size > 10_000_000 for item in archive.infolist()):
             raise ValueError("preseason runtime bundle exceeds the data size limit")
@@ -417,6 +425,7 @@ def install_preseason_runtime_bundle(bundle: bytes, season: int) -> None:
         or not ratings["model_version"].str.startswith("preseason_").all()
         or priors.score_noise_season != season - 1
         or (srs_prior is not None and not srs_prior["season"].eq(season - 1).all())
+        or (market in frames and not frames[market]["season"].eq(season - 1).all())
     ):
         raise ValueError("preseason runtime bundle has incompatible season or model")
     for name, data in payloads.items():
@@ -1237,6 +1246,7 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
         "ratings": ratings,
         "score_noise_prior": score_noise_prior_from_fit(previous_fit),
         "srs_prior": build_srs_prior(season),
+        "market_prior": build_market_prior(season),
         "unit_ratings": unit_ratings,
         "projections": projections,
         "schedule_coverage": coverage,

@@ -99,6 +99,9 @@ def apply_qb_availability(
             out[spread] = -out[margin]
     if "market_informed_home_margin" in out:
         share = 1.0 - pd.to_numeric(out["market_weight"], errors="coerce").fillna(0.0)
+        if "market_history_weight" in out:
+            # Earlier weeks' lines cannot know this week's report either.
+            share = share * (1.0 - out["market_history_weight"].fillna(0.0))
         out["market_informed_home_margin"] = (
             out["market_informed_home_margin"] + share * net
         )

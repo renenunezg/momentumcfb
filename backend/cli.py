@@ -98,6 +98,12 @@ def _add_pipeline_commands(sub) -> None:
     )
     srs_prior.add_argument("--season", type=int, required=True)
 
+    market_prior = sub.add_parser(
+        "market-prior",
+        help="build the frozen closing-line carryover prior from cached lines",
+    )
+    market_prior.add_argument("--season", type=int, required=True)
+
     preseason_bundle = sub.add_parser(
         "preseason-bundle",
         help="export the frozen preseason runtime ZIP for the weekly workflow",

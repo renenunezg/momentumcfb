@@ -13,6 +13,7 @@ from backend.features.scoring import (
 )
 from backend.model.calibration import fbs_calibration_cohort
 from backend.model.joint_scoring import DEFAULT_CONFIG, fit_joint_scoring
+from backend.model.market_history import market_history_margins
 from backend.model.preseason import (
     score_noise_prior_from_fit,
     scoring_priors_from_ratings,
@@ -490,3 +491,29 @@ def test_fcs_pool_is_anchored_to_crossover_margins():
     # Without pool anchoring the per-team prior holds the FCS pool near the
     # FBS level and the fitted crossover margin lands close to half the truth.
     assert crossover_margin > 26.0
+
+
+def test_market_history_never_reads_the_forecast_week_lines():
+    games = _mini_season()
+    games["start_date"] = pd.Timestamp("2026-09-05", tz="UTC") + pd.to_timedelta(
+        7 * games["model_week"], unit="D"
+    )
+    prior = pd.DataFrame({"team": ["A"], "market_rating": [3.0]})
+    target = games[games["model_week"].eq(3)]
+    as_of = target["start_date"].min()
+
+    def lines(target_week_spread):
+        spreads = {100: -10.0, 101: 2.0, 102: -7.0, 103: -1.0}
+        spreads.update(dict.fromkeys(target["game_id"], target_week_spread))
+        return pd.DataFrame(
+            {
+                "game_id": list(spreads),
+                "lines": [[{"spread": value}] for value in spreads.values()],
+            }
+        )
+
+    first = market_history_margins(games, lines(-30.0), 3, as_of, target, prior)
+    second = market_history_margins(games, lines(30.0), 3, as_of, target, prior)
+    assert list(first.index) == list(target["game_id"])
+    assert np.isfinite(first).all()
+    pd.testing.assert_series_equal(first, second)
