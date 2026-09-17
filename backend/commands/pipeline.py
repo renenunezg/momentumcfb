@@ -69,7 +69,7 @@ def handle_weekly_update(args: Namespace) -> None:
 
     import pandas as pd
 
-    from backend.model.joint_scoring import MODEL_VERSION
+    from backend.model.forecast_calibration import MODEL_VERSION
     from backend.model.weekly import (
         WeeklyForecastNotReady,
         resolve_ready_forecast_week,

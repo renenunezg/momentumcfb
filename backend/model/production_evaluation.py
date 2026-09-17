@@ -14,14 +14,17 @@ import numpy as np
 import pandas as pd
 
 from backend.config import PROCESSED_DIR
+from backend.etl import store
 from backend.features.scoring import SCORING_COLUMNS
 from backend.model.calibration import _add_proper_scores, _evaluation_rows
+from backend.model.forecast_calibration import apply_forecast_calibration
 from backend.model.joint_scoring import DEFAULT_CONFIG, fit_joint_scoring
 from backend.model.preseason import (
     load_score_noise_prior,
     load_srs_prior,
     scoring_priors_from_ratings,
 )
+from backend.model.process import build_process_prior, validate_process_prior
 from backend.model.weekly import _validate_weekly_inputs, load_weekly_games
 
 log = logging.getLogger(__name__)
@@ -36,6 +39,7 @@ class PregameSnapshot:
     digest: str
     score_noise_prior: pd.DataFrame | None = None
     srs_prior: pd.DataFrame | None = None
+    process_prior: pd.DataFrame | None = None
 
 
 def load_pregame_snapshots(season: int, directory: Path) -> list[PregameSnapshot]:
@@ -83,6 +87,14 @@ def load_pregame_snapshots(season: int, directory: Path) -> list[PregameSnapshot
             raise ValueError(
                 "score noise prior was not available at the snapshot cutoff"
             )
+        process_path = path.with_name("process_prior.parquet")
+        process_prior = pd.read_parquet(process_path) if process_path.exists() else None
+        if process_prior is not None:
+            validate_process_prior(process_prior, season)
+            if pd.Timestamp(process_prior["source_last_game_at"].iloc[0]) >= max(
+                timestamps
+            ):
+                raise ValueError("process prior contains games after the snapshot")
         snapshots.append(
             PregameSnapshot(
                 ratings,
@@ -98,9 +110,15 @@ def load_pregame_snapshots(season: int, directory: Path) -> list[PregameSnapshot
                         if srs_prior is not None
                         else b""
                     )
+                    + (
+                        process_prior.to_json(orient="records").encode()
+                        if process_prior is not None
+                        else b""
+                    )
                 ).hexdigest(),
                 noise_prior,
                 srs_prior,
+                process_prior,
             )
         )
     if not snapshots:
@@ -116,7 +134,16 @@ def replay_production_season(
     *,
     games: pd.DataFrame | None = None,
     snapshots: list[PregameSnapshot] | None = None,
+    team_games: pd.DataFrame | None = None,
+    process_prior: pd.DataFrame | None = None,
+    engine_only: bool = False,
 ) -> pd.DataFrame:
+    """Replay current weekly forecasts, preserving frozen opening predictions.
+
+    Missing archived process priors are reconstructed from cached previous-season
+    data and explicitly labeled; no provider data is fetched or artifacts written.
+    ``engine_only`` explicitly opts out of the production forecast calibration.
+    """
     games = load_weekly_games(season) if games is None else games.copy()
     snapshots = (
         load_pregame_snapshots(season, PROCESSED_DIR / "preseason" / "forecast_log")
@@ -125,6 +152,7 @@ def replay_production_season(
     )
     complete = games["completed"].fillna(False).astype(bool)
     frames = []
+    reconstructed_process_prior = None
     for week in sorted(games.loc[complete, "model_week"].unique()):
         target = games[games["model_week"].eq(week)]
         cutoff = target["start_date"].min() - pd.Timedelta(microseconds=1)
@@ -138,6 +166,8 @@ def replay_production_season(
             snapshot.ratings, snapshot.score_noise_prior, snapshot.srs_prior
         )
         prior_games = games[games["model_week"].lt(week)]
+        process_source = "not_applied_frozen_preseason"
+        process_digest = None
         if prior_games.empty:
             # The opening forecast was already frozen with its preseason model.
             projected = snapshot.projections[
@@ -157,7 +187,37 @@ def replay_production_season(
             projected = pd.DataFrame(
                 p.to_record() for p in fitted.project(forecast_target)
             )
-            stage = "weekly_replay"
+            if engine_only:
+                stage = "weekly_engine_replay"
+                process_source = "explicit_engine_only"
+            else:
+                if team_games is None:
+                    team_games = store.read_processed("team_games", f"{season}.parquet")
+                if process_prior is not None:
+                    selected_process_prior = process_prior
+                    process_source = "supplied_process_prior"
+                elif snapshot.process_prior is not None:
+                    selected_process_prior = snapshot.process_prior
+                    process_source = "archived_process_prior"
+                else:
+                    if reconstructed_process_prior is None:
+                        reconstructed_process_prior = build_process_prior(season)
+                    selected_process_prior = reconstructed_process_prior
+                    process_source = (
+                        "reconstructed_cached_previous_season_process_prior"
+                    )
+                projected = apply_forecast_calibration(
+                    projected,
+                    known,
+                    team_games,
+                    selected_process_prior,
+                    int(week),
+                    cutoff,
+                )
+                process_digest = sha256(
+                    selected_process_prior.to_json(orient="records").encode()
+                ).hexdigest()
+                stage = "weekly_replay"
         if projected["game_id"].duplicated().any() or set(projected["game_id"]) != set(
             target["game_id"]
         ):
@@ -197,8 +257,12 @@ def replay_production_season(
             }.get(metric, f"actual_{metric}")
             out[f"{metric}_error"] = out[prediction] - out[actual_column]
         out["evaluation_stage"] = stage
-        out["evaluation_contract"] = "production_replay_v1"
+        out["evaluation_contract"] = (
+            "engine_only_replay_v1" if engine_only else "production_replay_v2"
+        )
         out["source_contract"] = "cached_final_game_data_with_pregame_priors"
+        out["process_prior_source"] = process_source
+        out["process_prior_sha256"] = process_digest
         out["forecast_cutoff"] = cutoff
         out["prior_snapshot_as_of"] = snapshot.as_of
         out["prior_snapshot_path"] = str(snapshot.path)
@@ -226,7 +290,7 @@ def summarize_production_replay(predictions: pd.DataFrame) -> pd.DataFrame:
             group_value=f"{season}:{week}",
             assess_status=False,
         ):
-            row["evaluation_contract"] = "production_replay_v1"
+            row["evaluation_contract"] = str(frame["evaluation_contract"].iloc[0])
             row["evaluation_stage"] = stage
             row["thin_sample"] = len(frame) < 30
             rows.append(row)

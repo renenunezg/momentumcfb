@@ -12,6 +12,7 @@ from backend.features.scoring import (
 )
 from backend.features.weather import weather_context
 from backend.model.availability import apply_qb_availability, pregame_qb_outs
+from backend.model.forecast_calibration import apply_forecast_calibration
 from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.market_blend import add_market_informed_margins
 from backend.model.market_history import (
@@ -26,6 +27,7 @@ from backend.model.preseason import (
     load_srs_prior,
     scoring_priors_from_ratings,
 )
+from backend.model.process import load_process_prior
 from backend.model.unit_ratings import fit_unit_ratings
 from backend.odds.markets import compare_priced_offers, flatten_odds_api_offers
 
@@ -340,6 +342,16 @@ def run_weekly_forecast(
         )
     context = _team_context(games, preseason_ratings)
     ratings, projections = _decorate_outputs(ratings, projections, target, context)
+    process_prior = load_process_prior(season)
+    process_team_games = store.read_processed("team_games", f"{season}.parquet")
+    projections = apply_forecast_calibration(
+        projections,
+        games,
+        process_team_games,
+        process_prior,
+        forecast_week,
+        created_at,
+    )
     qb_outs = pregame_qb_outs(qb_availability, season, forecast_week, created_at)
     projections = apply_qb_availability(
         projections,
@@ -484,6 +496,17 @@ def run_weekly_forecast(
             "score_noise_prior": score_noise_prior,
             "srs_prior": srs_prior,
             "market_prior": market_prior,
+            "process_prior": process_prior,
+            "process_training_features": process_team_games[
+                process_team_games["game_id"].isin(
+                    games.loc[
+                        games["model_week"].lt(forecast_week)
+                        & games["completed"].fillna(False)
+                        & games["start_date"].lt(created_at - timedelta(hours=8)),
+                        "game_id",
+                    ]
+                )
+            ],
             "unit_ratings": unit_ratings,
             "projections": projections,
             "schedule_coverage": coverage,

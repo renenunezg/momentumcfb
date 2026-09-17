@@ -129,6 +129,7 @@ jobs:
             backend/data/processed/preseason/ratings/
             backend/data/processed/preseason/score_noise_prior/
             backend/data/processed/preseason/srs_prior/
+            backend/data/processed/preseason/process_prior/
             backend/data/processed/preseason/forecast_log/
           key: cfb-preseason-v1-${{ env.SEASON }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: cfb-preseason-v1-${{ env.SEASON }}-
@@ -184,7 +185,7 @@ jobs:
 
       - name: Validate frozen preseason state before CFBD calls
         run: |
-          poetry run python -c 'import os; from backend.etl import store; from backend.model.preseason import load_score_noise_prior, load_srs_prior, scoring_priors_from_ratings; season = int(os.environ["SEASON"]); scoring_priors_from_ratings(store.read_preseason_forecast_artifact(season, 1, "ratings"), load_score_noise_prior(season), load_srs_prior(season))'
+          poetry run python -c 'import os; from backend.etl import store; from backend.model.preseason import load_score_noise_prior, load_srs_prior, scoring_priors_from_ratings; from backend.model.process import load_process_prior; season = int(os.environ["SEASON"]); scoring_priors_from_ratings(store.read_preseason_forecast_artifact(season, 1, "ratings"), load_score_noise_prior(season), load_srs_prior(season)); load_process_prior(season)'
 
       - name: Validate frozen player opponent prior before CFBD calls
         run: poetry run python -c 'import os; from backend.players.value import load_opponent_prior; load_opponent_prior(int(os.environ["SEASON"]))'
@@ -297,6 +298,7 @@ jobs:
             backend/data/processed/preseason/ratings/
             backend/data/processed/preseason/score_noise_prior/
             backend/data/processed/preseason/srs_prior/
+            backend/data/processed/preseason/process_prior/
             backend/data/processed/preseason/forecast_log/
           key: ${{ steps.preseason-cache.outputs.cache-primary-key }}
 

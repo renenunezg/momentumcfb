@@ -7,16 +7,25 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
+from backend.etl import store
 from backend.features.scoring import (
     build_scoring_games,
     build_weekly_scoring_games,
 )
 from backend.model.calibration import fbs_calibration_cohort
+from backend.model.forecast_calibration import apply_forecast_calibration
 from backend.model.joint_scoring import DEFAULT_CONFIG, fit_joint_scoring
 from backend.model.market_history import market_history_margins
 from backend.model.preseason import (
     score_noise_prior_from_fit,
     scoring_priors_from_ratings,
+)
+from backend.model.process import (
+    FEATURE_COLUMNS,
+    FEATURE_SCALE,
+    build_process_prior,
+    load_process_prior,
+    process_margin_adjustments,
 )
 from backend.model.production_evaluation import (
     PregameSnapshot,
@@ -71,7 +80,7 @@ def _mini_season() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
+def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path, monkeypatch):
     games = _mini_season()
     as_of = datetime(2026, 9, 15, tzinfo=timezone.utc)
     fitted = fit_joint_scoring(games, forecast_week=3, as_of=as_of)
@@ -321,7 +330,9 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
         digest="synthetic-test-digest",
         score_noise_prior=noise,
     )
-    replay = replay_production_season(2026, games=replay_games, snapshots=[snapshot])
+    replay = replay_production_season(
+        2026, games=replay_games, snapshots=[snapshot], engine_only=True
+    )
     prediction_columns = [
         "game_id",
         "expected_home_points",
@@ -349,11 +360,189 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path):
     changed_results = replay_games.copy()
     changed_results.loc[changed_results["week"].eq(3), "home_points"] = 100
     changed_replay = replay_production_season(
-        2026, games=changed_results, snapshots=[snapshot]
+        2026, games=changed_results, snapshots=[snapshot], engine_only=True
     )
     assert_frame_equal(
         replay.loc[replay["model_week"].eq(3), prediction_columns],
         changed_replay.loc[changed_replay["model_week"].eq(3), prediction_columns],
+    )
+
+    # Exercise the same frozen process artifact and final calibration as a fresh
+    # weekly runner, including future features already present in a replay cache.
+    monkeypatch.setattr(store, "PROCESSED_DIR", tmp_path / "processed")
+    monkeypatch.setattr(store, "RAW_DIR", tmp_path / "raw")
+    feature_rows = []
+    for game in replay_games.itertuples():
+        for side in ("home", "away"):
+            feature_rows.append(
+                {
+                    "game_id": game.game_id,
+                    "season": 2026,
+                    "team": getattr(game, f"{side}_team"),
+                    **dict(
+                        zip(
+                            FEATURE_COLUMNS,
+                            FEATURE_SCALE
+                            * (
+                                0.2 * getattr(game, f"{side}_team_id")
+                                + 0.01 * game.week
+                            ),
+                        )
+                    ),
+                }
+            )
+    team_games = pd.DataFrame(feature_rows)
+    previous_features = team_games.assign(season=2025)
+    previous_schedule = replay_games.rename(columns={"game_id": "id"}).assign(
+        season=2025,
+        start_date=replay_games["start_date"] - pd.DateOffset(years=1),
+    )
+    store.write_processed(previous_features, "team_games", "2025.parquet")
+    schedule_path = store.raw_path("games", 2025)
+    schedule_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_schedule.to_parquet(schedule_path, index=False)
+    with pytest.raises(FileNotFoundError, match="process_prior is required"):
+        load_process_prior(2026)
+    process_prior = build_process_prior(2026)
+    calibrated = apply_forecast_calibration(
+        expected, replay_games, team_games, process_prior, 3, cutoff.to_pydatetime()
+    )
+    assert calibrated["model_version"].eq("joint_scoring_v14").all()
+    covariance_columns = ["margin_sd", "total_sd", "margin_total_correlation"]
+    assert_frame_equal(calibrated[covariance_columns], expected[covariance_columns])
+    with pytest.raises(ValueError, match="unadjusted core projections"):
+        apply_forecast_calibration(
+            calibrated,
+            replay_games,
+            team_games,
+            process_prior,
+            3,
+            cutoff.to_pydatetime(),
+        )
+    with pytest.raises(ValueError, match="incompatible season"):
+        apply_forecast_calibration(
+            expected,
+            replay_games,
+            team_games,
+            process_prior.assign(source_season=2026),
+            3,
+            cutoff.to_pydatetime(),
+        )
+    raw = process_margin_adjustments(
+        expected, replay_games, team_games, process_prior, 3, cutoff
+    )
+    swapped = expected.assign(
+        home_team=expected["away_team"], away_team=expected["home_team"]
+    )
+    reversed_raw = process_margin_adjustments(
+        swapped, replay_games, team_games, process_prior, 3, cutoff
+    )
+    np.testing.assert_allclose(raw, -reversed_raw, rtol=0, atol=1e-12)
+    assert raw.abs().max() > 0
+    future = replay_games.iloc[[-1]].assign(
+        game_id=10000, model_week=4, start_date=cutoff + pd.Timedelta(days=7)
+    )
+    future_features = team_games.iloc[[-2, -1]].assign(game_id=10000)
+    with_future = pd.concat([replay_games, future], ignore_index=True)
+    changed_features = pd.concat([team_games, future_features], ignore_index=True)
+    future_ids = with_future.loc[with_future["model_week"].ge(3), "game_id"]
+    changed_features.loc[
+        changed_features["game_id"].isin(future_ids), list(FEATURE_COLUMNS)
+    ] = 1e6
+    np.testing.assert_allclose(
+        raw,
+        process_margin_adjustments(
+            expected, with_future, changed_features, process_prior, 3, cutoff
+        ),
+        rtol=0,
+        atol=1e-12,
+    )
+
+    # A large process correction cannot create negative scores or change risk.
+    extreme_prior = process_prior.copy()
+    extreme_prior.loc[
+        extreme_prior["team"].eq(expected.iloc[0]["home_team"]), FEATURE_COLUMNS[0]
+    ] = -1e6
+    bounded = apply_forecast_calibration(
+        expected, replay_games, team_games, extreme_prior, 3, cutoff.to_pydatetime()
+    )
+    assert bounded[["expected_home_points", "expected_away_points"]].ge(0).all().all()
+    assert bounded.iloc[0]["expected_away_points"] == 0.0
+    assert bounded.iloc[0]["process_margin_raw_adjustment"] != pytest.approx(
+        bounded.iloc[0]["process_margin_adjustment"]
+    )
+    np.testing.assert_allclose(
+        bounded["expected_home_points"] + bounded["expected_away_points"],
+        bounded["model_total"],
+    )
+    np.testing.assert_allclose(
+        bounded["expected_home_points"] - bounded["expected_away_points"],
+        bounded["home_margin"],
+    )
+    np.testing.assert_allclose(bounded["home_spread"], -bounded["home_margin"])
+    assert_frame_equal(bounded[covariance_columns], expected[covariance_columns])
+
+    production_replay = replay_production_season(
+        2026,
+        games=replay_games,
+        snapshots=[snapshot],
+        process_prior=process_prior,
+        team_games=team_games,
+    )
+    frozen_columns = [*prediction_columns, "model_version"]
+    assert_frame_equal(
+        production_replay.loc[
+            production_replay["model_week"].eq(1), frozen_columns
+        ].reset_index(drop=True),
+        snapshot.projections[frozen_columns].reset_index(drop=True),
+    )
+    calibrated_columns = [
+        *prediction_columns,
+        "model_version",
+        "process_margin_raw_adjustment",
+        "process_margin_adjustment",
+        "median_total_adjustment",
+    ]
+    for week in (2, 3):
+        weekly_target = replay_games[replay_games["model_week"].eq(week)]
+        weekly_cutoff = weekly_target["start_date"].min() - pd.Timedelta(microseconds=1)
+        weekly_fit = fit_joint_scoring(
+            replay_games,
+            week,
+            weekly_cutoff.to_pydatetime(),
+            priors=scoring_priors_from_ratings(prior_ratings, noise),
+        )
+        direct_core = pd.DataFrame(
+            p.to_record() for p in weekly_fit.project(weekly_target)
+        )
+        direct_calibrated = apply_forecast_calibration(
+            direct_core,
+            replay_games,
+            team_games,
+            process_prior,
+            week,
+            weekly_cutoff.to_pydatetime(),
+        )
+        actual = production_replay[production_replay["model_week"].eq(week)]
+        assert actual["process_prior_source"].eq("supplied_process_prior").all()
+        assert_frame_equal(
+            actual[calibrated_columns].reset_index(drop=True),
+            direct_calibrated[calibrated_columns].reset_index(drop=True),
+        )
+    changed_production_replay = replay_production_season(
+        2026,
+        games=changed_results,
+        snapshots=[snapshot],
+        process_prior=process_prior,
+        team_games=changed_features[changed_features["game_id"].ne(10000)],
+    )
+    assert_frame_equal(
+        production_replay.loc[
+            production_replay["model_week"].eq(3), prediction_columns
+        ],
+        changed_production_replay.loc[
+            changed_production_replay["model_week"].eq(3), prediction_columns
+        ],
     )
     with pytest.raises(ValueError, match="no preseason snapshot before cutoff"):
         replay_production_season(

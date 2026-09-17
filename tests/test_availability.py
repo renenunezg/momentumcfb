@@ -101,3 +101,27 @@ def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
     assert game.pure_home_margin == -7 + QB_OUT_POSTSEASON_POINTS
     assert game.market_informed_home_margin == -4 + 0.5 * QB_OUT_POSTSEASON_POINTS
     assert game.qb_availability_points == QB_OUT_POSTSEASON_POINTS
+
+    # Reproduced on the calibrated California-Wagner projection: a 0.55-point
+    # away score was floored at zero but the margin and total still moved 1.5.
+    near_zero = projections.iloc[[0]].assign(
+        expected_home_points=30.0,
+        expected_away_points=0.55,
+        home_margin=29.45,
+        home_spread=-29.45,
+        model_total=30.55,
+        pure_home_margin=29.45,
+        pure_home_spread=-29.45,
+        market_weight=0.5,
+        market_history_weight=0.25,
+        market_informed_home_margin=20.0,
+        market_informed_home_spread=-20.0,
+    )
+    bounded = apply_qb_availability(near_zero, {"Arkansas"})
+    row = bounded.iloc[0]
+    assert row.expected_away_points == 0
+    assert row.model_total == row.expected_home_points + row.expected_away_points
+    assert row.home_margin == row.expected_home_points - row.expected_away_points
+    assert row.pure_home_margin == row.home_margin
+    assert row.market_informed_home_margin == 20.0 + 0.5 * 0.75 * 0.55
+    pd.testing.assert_frame_equal(bounded, apply_qb_availability(bounded, {"Arkansas"}))

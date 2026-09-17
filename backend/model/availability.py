@@ -73,8 +73,14 @@ def apply_qb_availability(
         QB_OUT_POSTSEASON_POINTS,
         QB_OUT_POINTS,
     )
-    home_loss = np.where(fresh["home"], points, 0.0)
-    away_loss = np.where(fresh["away"], points, 0.0)
+    # A near-zero score cannot lose the full availability penalty. Use the
+    # applied loss for every derived margin, total and market blend as well.
+    home_loss = np.minimum(
+        np.where(fresh["home"], points, 0.0), out["expected_home_points"]
+    )
+    away_loss = np.minimum(
+        np.where(fresh["away"], points, 0.0), out["expected_away_points"]
+    )
     net = away_loss - home_loss
     previous = (
         pd.to_numeric(out["qb_availability_points"], errors="coerce").fillna(0.0)
