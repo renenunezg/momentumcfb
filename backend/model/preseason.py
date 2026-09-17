@@ -375,11 +375,14 @@ def _runtime_bundle_name(season: int, kind: str) -> str:
 
 def export_preseason_runtime_bundle(season: int, destination: Path) -> Path:
     """Package the frozen preseason state the weekly fit needs on a fresh runner."""
+    from backend.model.process import load_process_prior
+
     frames = {
         "ratings": store.read_preseason_forecast_artifact(season, 1, "ratings"),
         "score_noise_prior": load_score_noise_prior(season),
         "srs_prior": load_srs_prior(season),
         "market_prior": load_market_prior(season),
+        "process_prior": load_process_prior(season),
     }
     scoring_priors_from_ratings(
         frames["ratings"], frames["score_noise_prior"], frames["srs_prior"]
@@ -397,20 +400,26 @@ def install_preseason_runtime_bundle(bundle: bytes, season: int) -> None:
     """Restore the reviewed preseason state without rebuilding a frozen forecast.
 
     Bundles exported before joint_scoring_v12 lack the srs_prior, and those
-    before the market-history rating lack the market_prior; they still
-    install, and the weekly fit then fails closed until one is provided.
+    before the market-history rating lack the market_prior.
+    Bundles exported before joint_scoring_v14 lack the process_prior.
+    Older bundles still install, and the weekly fit fails closed until its
+    required priors are provided.
     """
+    from backend.model.process import validate_process_prior
+
     required = [
         _runtime_bundle_name(season, kind) for kind in ("ratings", "score_noise_prior")
     ]
     optional = _runtime_bundle_name(season, "srs_prior")
     market = _runtime_bundle_name(season, "market_prior")
+    process = _runtime_bundle_name(season, "process_prior")
     with ZipFile(BytesIO(bundle)) as archive:
         names = sorted(archive.namelist())
         if names not in (
             sorted(required),
             sorted([*required, optional]),
             sorted([*required, optional, market]),
+            sorted([*required, optional, market, process]),
         ):
             raise ValueError("preseason runtime bundle contains unexpected files")
         if any(item.file_size > 10_000_000 for item in archive.infolist()):
@@ -428,6 +437,8 @@ def install_preseason_runtime_bundle(bundle: bytes, season: int) -> None:
         or (market in frames and not frames[market]["season"].eq(season - 1).all())
     ):
         raise ValueError("preseason runtime bundle has incompatible season or model")
+    if process in frames:
+        validate_process_prior(frames[process], season)
     for name, data in payloads.items():
         path = store.PROCESSED_DIR / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1181,6 +1192,8 @@ def _flatten_cfbd_offers(lines: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResult:
+    from backend.model.process import build_process_prior
+
     if week != 1:
         raise ValueError("the preseason prior currently supports Week 1 only")
     source_names = [
@@ -1247,6 +1260,7 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
         "score_noise_prior": score_noise_prior_from_fit(previous_fit),
         "srs_prior": build_srs_prior(season),
         "market_prior": build_market_prior(season),
+        "process_prior": build_process_prior(season),
         "unit_ratings": unit_ratings,
         "projections": projections,
         "schedule_coverage": coverage,

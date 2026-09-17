@@ -447,27 +447,36 @@ def weekly_forecast_is_published(
     week: int,
     model_version: str,
 ) -> bool:
-    """Require both the forecast and decisions for its remaining games."""
+    """Require current projections and decisions for the remaining games.
+
+    Output calibration can advance the forecast version without changing the
+    underlying team ratings, so the version gate belongs to projections.
+    """
     from backend.db import engine
     from backend.recommendations import POLICY_VERSION
 
     with engine.connect() as conn:
-        if not _table_exists(conn, "team_ratings"):
+        if not all(
+            _table_exists(conn, table) for table in ("team_ratings", "game_projections")
+        ):
             return False
         return bool(
             conn.execute(
                 text(
                     "SELECT EXISTS ("
                     f"SELECT 1 FROM {CFB_SCHEMA}.team_ratings "
+                    "WHERE season = :season AND week = :week) AND EXISTS ("
+                    f"SELECT 1 FROM {CFB_SCHEMA}.game_projections "
                     "WHERE season = :season AND week = :week "
                     "AND model_version = :model_version) AND NOT EXISTS ("
                     f"SELECT 1 FROM {CFB_SCHEMA}.game_projections p "
                     "CROSS JOIN (VALUES ('h2h'), ('spreads'), ('totals')) m(market) "
                     "WHERE p.season = :season AND p.week = :week "
-                    "AND p.start_date > clock_timestamp() AND NOT EXISTS ("
+                    "AND p.start_date > clock_timestamp() AND ("
+                    "p.model_version IS DISTINCT FROM :model_version OR NOT EXISTS ("
                     f"SELECT 1 FROM {CFB_SCHEMA}.recommendations r "
                     "WHERE r.game_id = p.game_id AND r.market = m.market "
-                    "AND (r.status = 'recommended' OR r.policy_version = :policy)))"
+                    "AND (r.status = 'recommended' OR r.policy_version = :policy))))"
                 ),
                 {
                     "season": season,
