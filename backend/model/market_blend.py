@@ -36,10 +36,20 @@ def add_market_informed_margins(
     projections: pd.DataFrame,
     offers: pd.DataFrame,
     weight: float = DEFAULT_MARKET_WEIGHT,
+    history: pd.Series | None = None,
+    history_weight: float = 0.0,
 ) -> pd.DataFrame:
-    """Add pure and market-informed margin fields to projection records."""
+    """Add pure and market-informed margin fields to projection records.
+
+    ``history`` maps game ID to the margin implied by the market-history
+    rating (earlier games' closing lines, never this game's). It replaces
+    ``history_weight`` of the pure margin on the model side of the blend and
+    also informs games without a current line.
+    """
     if not 0 <= weight <= MARKET_WEIGHT_CAP:
         raise ValueError(f"market weight must be between 0 and {MARKET_WEIGHT_CAP:g}")
+    if not 0 <= history_weight < 1:
+        raise ValueError("market history weight must be in [0, 1)")
     required = {"game_id", "home_margin", "home_spread"}
     missing = sorted(required - set(projections.columns))
     if missing:
@@ -53,10 +63,21 @@ def add_market_informed_margins(
     has_market = out["market_home_spread"].notna()
     out["market_weight"] = np.where(has_market, weight, 0.0)
     market_margin = -out["market_home_spread"]
+    out["market_history_home_margin"] = (
+        np.nan if history is None else out["game_id"].map(history)
+    )
+    has_history = out["market_history_home_margin"].notna()
+    out["market_history_weight"] = np.where(has_history, history_weight, 0.0)
+    model_side = np.where(
+        has_history,
+        (1.0 - history_weight) * out["pure_home_margin"]
+        + history_weight * out["market_history_home_margin"],
+        out["pure_home_margin"],
+    )
     out["market_informed_home_margin"] = np.where(
         has_market,
-        (1.0 - weight) * out["pure_home_margin"] + weight * market_margin,
-        out["pure_home_margin"],
+        (1.0 - weight) * model_side + weight * market_margin,
+        model_side,
     )
     out["market_informed_home_spread"] = -out["market_informed_home_margin"]
     return out

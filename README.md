@@ -41,6 +41,8 @@ Team strength scales with the game's expected possessions, so a slow or fast mat
 The published margin is half the joint fit's margin and half a points-only ridge rating fitted on the same games with a nine-point prior around the previous season's final points-only rating (joint_scoring_v12); the total is untouched.
 The points-only rating keeps information the blended fit shrinks away, mainly the crossover gain that restarts each season and the FCS pool, and on the 2020 through 2025 walk-forward the blend cut margin MAE by 0.19 points on Division I games with a closing line and 0.07 on FBS versus FBS, negative in every season.
 The points-only rating and its carried chain use every completed game with a final score, including the FCS games whose play-by-play features are missing (joint_scoring_v13), which cut 2023 through 2025 margin MAE by a further 0.06 on Division I games and 0.12 on FCS versus FCS.
+The market-informed margin is a separate output that never feeds the pure margin: its model side mixes the pure margin with a rating fitted to the closing spreads of games that kicked off before the forecast week (weight 0.55 through week 3, 0.35 after; prior carried from the previous season's closing lines), and that side is then averaged with the game's own consensus line.
+Selected on 2020 through 2022 and scored once on 2023 through 2025, the market-history rating cut the market-informed margin MAE from 12.07 to 12.00 (t -4.3), negative in every season.
 The projected margin standard deviation is scaled by 0.915, which returns 80 percent interval coverage from 0.85 to 0.81.
 
 The in-game baseline combines the current score and possession state with a frozen pregame anchor.

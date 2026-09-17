@@ -14,6 +14,11 @@ from backend.features.weather import weather_context
 from backend.model.availability import apply_qb_availability, pregame_qb_outs
 from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.market_blend import add_market_informed_margins
+from backend.model.market_history import (
+    history_weight,
+    load_market_prior,
+    market_history_margins,
+)
 from backend.model.preseason import (
     MISSING_INPUT_COLUMNS,
     load_preseason_ratings,
@@ -359,7 +364,20 @@ def run_weekly_forecast(
         raise ValueError(
             "the Odds API returned no priced spread matched to the forecast week"
         )
-    projections = add_market_informed_margins(projections, offers)
+    market_prior = load_market_prior(season)
+    projections = add_market_informed_margins(
+        projections,
+        offers,
+        history=market_history_margins(
+            games,
+            store.read_lines(season),
+            forecast_week,
+            pd.Timestamp(created_at),
+            target,
+            market_prior,
+        ),
+        history_weight=history_weight(forecast_week),
+    )
     comparisons = compare_priced_offers(projections, offers)
 
     from backend.diagnostics import disagreement_audit
@@ -465,6 +483,7 @@ def run_weekly_forecast(
             "ratings": ratings,
             "score_noise_prior": score_noise_prior,
             "srs_prior": srs_prior,
+            "market_prior": market_prior,
             "unit_ratings": unit_ratings,
             "projections": projections,
             "schedule_coverage": coverage,

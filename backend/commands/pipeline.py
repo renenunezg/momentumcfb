@@ -340,6 +340,31 @@ def handle_srs_prior(args: Namespace) -> None:
     )
 
 
+def handle_market_prior(args: Namespace) -> None:
+    from backend.etl import store
+    from backend.model.market_history import build_market_prior, load_market_prior
+
+    frame = build_market_prior(args.season)
+    store.write_processed(
+        frame, "preseason", "market_prior", f"{args.season}_01.parquet"
+    )
+    loaded = load_market_prior(args.season)
+    log.info(
+        "%s market_prior: %d teams from the %d closing lines (chain from %d)",
+        args.season,
+        len(loaded),
+        int(loaded["season"].iloc[0]),
+        int(loaded["chain_start_season"].iloc[0]),
+    )
+    log.info(
+        loaded.sort_values("market_rating", ascending=False)[
+            ["team", "classification", "market_rating"]
+        ]
+        .head(25)
+        .to_string(index=False)
+    )
+
+
 def handle_preseason_bundle(args: Namespace) -> None:
     import hashlib
     from pathlib import Path
