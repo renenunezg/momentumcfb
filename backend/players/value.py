@@ -31,7 +31,7 @@ from backend.players.ingest import read_season_source, read_weekly
 
 log = logging.getLogger(__name__)
 
-MODEL_VERSION = "cfb_player_value_v2"
+MODEL_VERSION = "cfb_player_value_v3"
 # Games are the opportunity unit for replacement and shrinkage: a defender's
 # credited plays are disruption events, not snaps, so plays cannot be the
 # denominator on one side of the ball and the opportunity count on the other.
@@ -241,7 +241,9 @@ def season_unit_effects(
         window = games[games["model_week"].lt(week)]
         completed = window[window["completed"].fillna(False).astype(bool)]
         current = previous.copy()
-        if not completed.empty:
+        window_units = unit_games[unit_games["game_id"].isin(completed["game_id"])]
+        # A completed game without play data adds no evidence; keep the prior.
+        if not window_units.empty:
             latest = pd.to_datetime(completed["start_date"], utc=True).max()
             as_of = (latest + pd.Timedelta(days=1)).to_pydatetime()
             fitted = fit_unit_ratings(
@@ -252,7 +254,6 @@ def season_unit_effects(
                 channel_priors=baseline.reset_index(),
                 per_play=True,
             ).frame.set_index("team")
-            window_units = unit_games[unit_games["game_id"].isin(completed["game_id"])]
             for offense, defense, plays_column in CHANNEL_UNITS.values():
                 per_game = float(window_units[plays_column].mean())
                 if not np.isfinite(per_game) or per_game <= 0:
