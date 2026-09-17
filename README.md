@@ -143,7 +143,7 @@ The commands fall into six groups.
 | Serving | `ingame-stream`, `serving-anchors`, `serve-game`, `serve-verify` | Anchor builds run in workflows; the others are operator checks that prove streamed output equals batch output |
 | Market | `live-odds`, `kickoff-check`, `kickoff-run`, `live-replay` | Kickoff capture workflow; `kickoff-check` and `live-replay` are read-only diagnostics |
 | Publish | `publish`, `publish-anchors`, `fetch-anchors`, `grade`, `publish-grading` | Workflows; every database write requires `MOMENTUMCFB_DB_WRITES=1` |
-| Players | `ingest-players`, `player-values`, `heisman`, `publish-players` | Weekly workflow; opponent-adjusted player value above replacement and the Heisman ballot forecast behind `/cfb/heisman` |
+| Players | `player-prior`, `ingest-players`, `player-values`, `heisman`, `publish-players` | Weekly workflow; opponent-adjusted player value above replacement and the Heisman ballot forecast behind `/cfb/heisman` |
 
 ## Production workflows
 
@@ -154,6 +154,10 @@ The commands fall into six groups.
 
 Publishing is a separate, explicit boundary.
 Local model and evaluation commands do not require database write access.
+
+Player-value v2 uses exposure-weighted rush/pass efficiency and a frozen previous-season opponent prior instead of resetting opening opponents to average.
+Before activating v2, run `python -m backend player-prior --season 2026 --runtime-bundle /path/to/player-runtime-2026.zip` where the previous season's raw plays and existing Heisman runtime artifacts are cached.
+The weekly runner requires that reviewed bundle, validates the prior before paid ingestion, and never downloads historical inputs or silently substitutes zero opponent effects.
 
 ## Known limits
 

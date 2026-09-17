@@ -401,6 +401,14 @@ def _add_publish_commands(sub) -> None:
     )
     qb_starters.add_argument("--season", type=int, required=True)
 
+    player_prior = sub.add_parser(
+        "player-prior", help="Build prior-season player opponent effects offline"
+    )
+    player_prior.add_argument("--season", type=int, required=True)
+    player_prior.add_argument(
+        "--runtime-bundle", help="Export the reviewed player runtime ZIP"
+    )
+
     player_values = sub.add_parser(
         "player-values",
         help="build opponent-adjusted player value snapshots for each week",

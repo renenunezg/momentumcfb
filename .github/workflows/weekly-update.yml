@@ -115,6 +115,7 @@ jobs:
         with:
           path: |
             backend/data/raw/players/${{ env.SEASON }}/
+            backend/data/processed/players/opponent_priors/
             backend/data/processed/players/models/
             backend/data/processed/ingame/baseline_summary.parquet
           key: cfb-players-v2-${{ env.SEASON }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -184,6 +185,9 @@ jobs:
       - name: Validate frozen preseason state before CFBD calls
         run: |
           poetry run python -c 'import os; from backend.etl import store; from backend.model.preseason import load_score_noise_prior, load_srs_prior, scoring_priors_from_ratings; season = int(os.environ["SEASON"]); scoring_priors_from_ratings(store.read_preseason_forecast_artifact(season, 1, "ratings"), load_score_noise_prior(season), load_srs_prior(season))'
+
+      - name: Validate frozen player opponent prior before CFBD calls
+        run: poetry run python -c 'import os; from backend.players.value import load_opponent_prior; load_opponent_prior(int(os.environ["SEASON"]))'
 
       - name: Verify required secrets
         shell: bash
@@ -256,6 +260,7 @@ jobs:
         with:
           name: heisman-model-${{ env.SEASON }}
           path: |
+            backend/data/processed/players/opponent_priors/${{ env.SEASON }}.parquet
             backend/data/processed/players/models/heisman_${{ env.SEASON }}.json
             backend/data/processed/ingame/baseline_summary.parquet
           if-no-files-found: error
@@ -279,6 +284,7 @@ jobs:
         with:
           path: |
             backend/data/raw/players/${{ env.SEASON }}/
+            backend/data/processed/players/opponent_priors/
             backend/data/processed/players/models/
             backend/data/processed/ingame/baseline_summary.parquet
           key: ${{ steps.player-cache.outputs.cache-primary-key }}

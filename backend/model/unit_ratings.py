@@ -33,6 +33,7 @@ def _two_sided_ridge(
     observations: pd.DataFrame,
     teams: list[str],
     classifications: np.ndarray,
+    prior_units: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fit value = unit(team) - counter(opponent) with class-aware priors."""
     if observations.empty:
@@ -47,9 +48,11 @@ def _two_sided_ridge(
 
     target = observations["value"].to_numpy(float)
     weights = observations["weight"].to_numpy(float)
-    center = float(np.average(target, weights=weights))
+    prior_mean = np.zeros(2 * n_teams) if prior_units is None else prior_units
+    # With preseason evidence, estimate the intercept after accounting for
+    # schedule strength; a weak opponent is not an average-unit observation.
+    center = float(np.average(target - design @ prior_mean, weights=weights))
     centered_target = target - center
-    prior_mean = np.zeros(2 * n_teams)
     prior_sd = np.full(2 * n_teams, CHANNEL_PRIOR_SD)
 
     initial, _ = _solve_ridge(
@@ -61,7 +64,7 @@ def _two_sided_ridge(
     )
     fbs = classifications == "fbs"
     fcs = classifications == "fcs"
-    if fbs.any() and fcs.any():
+    if prior_units is None and fbs.any() and fcs.any():
         fcs_indices = np.flatnonzero(fcs)
         prior_mean[fcs_indices] = (
             initial[:n_teams][fcs].mean() - initial[:n_teams][fbs].mean()
@@ -213,8 +216,10 @@ def fit_unit_ratings(
     forecast_week: int,
     as_of: datetime,
     recency_by_game: Mapping[int | str, float] | None = None,
+    channel_priors: pd.DataFrame | None = None,
+    per_play: bool = False,
 ) -> UnitRatings:
-    """Fit each unit channel using games strictly before ``forecast_week``."""
+    """Fit pregame units; per-play mode returns only rush/pass player channels."""
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
     if games["season"].nunique() != 1:
@@ -251,11 +256,44 @@ def fit_unit_ratings(
         "pass_block": "pass_block_value",
         "run_block": "run_block_value",
     }.items():
-        observations = _channel_frame(window, column, team_set)
+        if per_play and name not in {"rush", "pass"}:
+            continue
+        channel_window = window
+        if per_play and name in {"rush", "pass"}:
+            # Player credit is per play: normalize game totals to common
+            # exposure and weight the rate by its actual sample size.
+            channel_window = window.copy()
+            counts = channel_window[f"{name}_plays"]
+            exposure = float(counts.mean())
+            if not np.isfinite(exposure) or exposure <= 0:
+                raise ValueError("per-play unit fit requires positive exposure")
+            channel_window[column] = (channel_window[column] / counts * exposure).where(
+                counts.gt(0)
+            )
+            channel_window["weight"] = channel_window["weight"] * counts / exposure
+        observations = _channel_frame(channel_window, column, team_set)
+        prior_units = None
+        if channel_priors is not None and name in {"rush", "pass"}:
+            aligned = channel_priors.set_index("team").reindex(teams)
+            per_game = float(window[f"{name}_plays"].mean())
+            prior_units = (
+                np.concatenate(
+                    [
+                        aligned[f"{name}_offense"].to_numpy(float),
+                        aligned[f"{name}_defense"].to_numpy(float),
+                    ]
+                )
+                * per_game
+            )
+            if not np.isfinite(prior_units).all() or per_game <= 0:
+                raise ValueError(
+                    "unit channel priors must cover every team with finite effects"
+                )
         unit, counter = _two_sided_ridge(
             observations,
             teams,
             classifications,
+            prior_units,
         )
         if name == "rush":
             ratings["rush_offense"] = unit
@@ -267,8 +305,8 @@ def fit_unit_ratings(
             ratings[name] = unit
 
     frame = catalog[["team_id", "team", "classification"]].copy()
-    for column in COLUMNS:
-        frame[column] = ratings[column]
+    for column, rating in ratings.items():
+        frame[column] = rating
     return UnitRatings(
         season=int(games["season"].iloc[0]),
         week=int(forecast_week),

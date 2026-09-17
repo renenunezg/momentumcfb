@@ -104,3 +104,17 @@ def handle_qb_starters(args: Namespace) -> None:
                 index=False
             )
         )
+
+
+def handle_player_prior(args: Namespace) -> None:
+    from pathlib import Path
+
+    from backend.etl import store
+    from backend.players.artifacts import export_runtime_bundle
+    from backend.players.value import build_opponent_prior, opponent_prior_artifact
+
+    prior = build_opponent_prior(args.season)
+    store.write_processed(prior, *opponent_prior_artifact(args.season))
+    log.info("player opponent prior %s: %s teams", args.season, len(prior))
+    if args.runtime_bundle:
+        export_runtime_bundle(args.season, Path(args.runtime_bundle))
