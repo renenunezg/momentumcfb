@@ -21,7 +21,8 @@ def handle_publish(args: Namespace) -> None:
 
 def handle_refresh_picks(args: Namespace) -> None:
     """Re-decide one published week's picks from the frozen projections and
-    fresh prices. Published picks stay frozen; only No Play rows can change."""
+    fresh prices. Published picks stay frozen unless a newer model version no
+    longer makes them; those and No Play rows take the fresh decision."""
     from datetime import datetime, timezone
 
     import pandas as pd
@@ -35,7 +36,6 @@ def handle_refresh_picks(args: Namespace) -> None:
     from backend.publish import (
         CFB_SCHEMA,
         _publish_recommendations,
-        _withdraw_superseded,
         ensure_recommendation_schema,
         fetch_qb_availability,
     )
@@ -75,12 +75,11 @@ def handle_refresh_picks(args: Namespace) -> None:
     )
     decisions = build_recommendations(projections, offers, decision_at=decided_at)
     with engine.begin() as conn:
-        withdrawn = _withdraw_superseded(conn, decisions, decided_at)
-        _publish_recommendations(conn, decisions)
+        replaced = _publish_recommendations(conn, decisions)
     picks = decisions[decisions["status"].eq("recommended")]
     log.info(
-        f"refreshed {args.season} week {args.week}: {withdrawn} superseded picks "
-        f"withdrawn, {len(offers)} offers on "
+        f"refreshed {args.season} week {args.week}: {replaced} picks the current "
+        f"model no longer makes replaced, {len(offers)} offers on "
         f"{int(matches['matched'].sum()) if not matches.empty else 0} matched events, "
         f"{len(picks)} qualifying picks "
         f"({picks['market'].value_counts().to_dict()}), "

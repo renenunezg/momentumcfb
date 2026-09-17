@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
 
 import pandas as pd
 from sqlalchemy import text
@@ -541,9 +540,6 @@ def publish(
         projections = projections[projections["game_id"].isin(game_ids)]
         market = market[market["game_id"].isin(game_ids)]
         decisions = decisions[decisions["game_id"].isin(game_ids)]
-        withdrawn = _withdraw_superseded(conn, decisions, datetime.now(timezone.utc))
-        if withdrawn:
-            log.info("withdrew %d picks superseded by the current model", withdrawn)
         _publish_recommendations(conn, decisions)
         if teams is not None:
             # A dimension with no natural version: replace it wholesale so a
@@ -786,50 +782,23 @@ def publish_players(season: int) -> dict[str, int]:
         }
 
 
-def _withdraw_superseded(conn, decisions, withdrawn_at):
-    """Settle void every open pick that a newer model version no longer makes.
-
-    Runs before the fresh decisions are stored, so the withdrawn row keeps
-    its original price contract as the record for that game and market.
-    """
-    from backend.recommendations import withdraw_superseded
+def _publish_recommendations(conn, decisions):
+    from backend.recommendations import RECOMMENDATION_COLUMNS, superseded_picks
 
     if decisions.empty:
         return 0
+    rows = _serving_frame(decisions, RECOMMENDATION_COLUMNS)
     existing = pd.read_sql_query(
         text(
-            "SELECT game_id, market, decision_at, start_date, status, outcome, "
-            f"side, model_version FROM {CFB_SCHEMA}.recommendations "
+            "SELECT game_id, market, start_date, status, outcome, side, "
+            f"model_version FROM {CFB_SCHEMA}.recommendations "
             "WHERE game_id = ANY(:ids) AND status = 'recommended' "
             "AND outcome = 'pending'"
         ),
         conn,
         params={"ids": [int(g) for g in decisions["game_id"].unique()]},
     )
-    settlements = withdraw_superseded(existing, decisions, withdrawn_at=withdrawn_at)
-    if settlements.empty:
-        return 0
-    return conn.execute(
-        text(
-            f"UPDATE {CFB_SCHEMA}.recommendations SET outcome = 'void', "
-            "profit_units = 0, graded_at = :graded_at, "
-            "settlement_reason = :settlement_reason "
-            "WHERE game_id = :game_id AND market = :market "
-            "AND decision_at = :decision_at AND status = 'recommended' "
-            "AND outcome = 'pending' AND start_date > clock_timestamp()"
-        ),
-        settlements[
-            ["game_id", "market", "decision_at", "graded_at", "settlement_reason"]
-        ].to_dict("records"),
-    ).rowcount
-
-
-def _publish_recommendations(conn, decisions):
-    from backend.recommendations import RECOMMENDATION_COLUMNS
-
-    if decisions.empty:
-        return
-    rows = _serving_frame(decisions, RECOMMENDATION_COLUMNS)
+    superseded = superseded_picks(existing, decisions)
     # Keep the original pick visible as void if the schedule moves, rather
     # than showing its old price as a recommendation for the new kickoff.
     conn.execute(
@@ -856,14 +825,19 @@ def _publish_recommendations(conn, decisions):
         text(
             f"INSERT INTO {CFB_SCHEMA}.recommendations ({columns}) VALUES ({values}) "
             f"ON CONFLICT (game_id, market) DO UPDATE SET {updates}, published_at = clock_timestamp() "
-            f"WHERE {CFB_SCHEMA}.recommendations.status = 'no_play' "
+            # A pick a newer model no longer makes is replaced the same way.
+            f"WHERE ({CFB_SCHEMA}.recommendations.status = 'no_play' OR :superseded) "
             f"AND {CFB_SCHEMA}.recommendations.outcome = 'pending' "
             f"AND {CFB_SCHEMA}.recommendations.start_date > clock_timestamp() "
             f"AND excluded.start_date > clock_timestamp() "
             f"AND excluded.decision_at > {CFB_SCHEMA}.recommendations.decision_at"
         ),
-        rows.to_dict("records"),
+        [
+            {**row, "superseded": (row["game_id"], row["market"]) in superseded}
+            for row in rows.to_dict("records")
+        ],
     )
+    return len(superseded)
 
 
 def fetch_qb_availability(season):

@@ -487,8 +487,8 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         )
 
 
-def test_superseded_picks_withdraw_only_on_a_new_model_before_kickoff():
-    from backend.recommendations import WITHDRAWAL_REASON, withdraw_superseded
+def test_picks_are_superseded_only_by_a_new_model_before_kickoff():
+    from backend.recommendations import superseded_picks
 
     now = pd.Timestamp("2026-09-15T20:00:00Z")
     decided = pd.Timestamp("2026-09-14T18:00:00Z")
@@ -530,13 +530,10 @@ def test_superseded_picks_withdraw_only_on_a_new_model_before_kickoff():
             + ["joint_scoring_v11", "joint_scoring_v12"],
         )
     )
-    withdrawn = withdraw_superseded(existing, fresh, withdrawn_at=now)
     # Same side still made: kept. Below the gate or flipped under the new
-    # model: withdrawn. No price, same model version, settled, started, or
+    # model: superseded. No price, same model version, settled, started, or
     # absent from the fresh decisions: untouched.
-    assert sorted(withdrawn.game_id) == [2, 3]
-    assert withdrawn.outcome.eq("void").all()
-    assert withdrawn.profit_units.eq(0).all()
-    assert withdrawn.settlement_reason.eq(WITHDRAWAL_REASON).all()
-    assert (withdrawn.graded_at == now).all()
-    assert withdrawn.superseding_model_version.eq("joint_scoring_v12").all()
+    assert superseded_picks(existing, fresh, now=now) == {
+        (2, "spreads"),
+        (3, "spreads"),
+    }
