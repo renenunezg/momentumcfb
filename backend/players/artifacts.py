@@ -12,6 +12,7 @@ import pandas as pd
 
 from backend.config import PROCESSED_DIR
 from backend.players import heisman
+from backend.players import value as player_value
 
 ARTIFACT_VERSION = 1
 EVALUATION_KIND = heisman.EVALUATION_KIND
@@ -150,33 +151,46 @@ def export_runtime_bundle(cutoff_season: int, destination: Path) -> Path:
     from backend.model.ingame import load_baseline_params
 
     load_heisman_model(cutoff_season)
+    player_value.load_opponent_prior(cutoff_season)
+    prior = PROCESSED_DIR.joinpath(*player_value.opponent_prior_artifact(cutoff_season))
     baseline = PROCESSED_DIR / "ingame" / "baseline_summary.parquet"
     load_baseline_params(pd.read_parquet(baseline))
     destination.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(destination, "w", compression=ZIP_DEFLATED) as bundle:
-        for source in (model_path(cutoff_season), baseline):
+        for source in (model_path(cutoff_season), baseline, prior):
             bundle.write(source, str(source.relative_to(PROCESSED_DIR)))
     return destination
 
 
 def install_runtime_bundle(bundle: bytes, cutoff_season: int) -> None:
-    """Restore only the two expected data files after validating both."""
+    """Restore only the expected data files after validating all three."""
     from backend.model.ingame import load_baseline_params
 
     model_name = f"players/models/heisman_{cutoff_season}.json"
     baseline_name = "ingame/baseline_summary.parquet"
+    prior_name = "/".join(player_value.opponent_prior_artifact(cutoff_season))
     with ZipFile(BytesIO(bundle)) as archive:
-        if sorted(archive.namelist()) != sorted([model_name, baseline_name]):
+        if sorted(archive.namelist()) != sorted(
+            [model_name, baseline_name, prior_name]
+        ):
             raise ValueError("player runtime bundle contains unexpected files")
         if any(item.file_size > 10_000_000 for item in archive.infolist()):
             raise ValueError("player runtime bundle exceeds the data size limit")
-        model_bytes, baseline_bytes = (
+        model_bytes, baseline_bytes, prior_bytes = (
             archive.read(model_name),
             archive.read(baseline_name),
+            archive.read(prior_name),
         )
     _validate(json.loads(model_bytes), cutoff_season)
     load_baseline_params(pd.read_parquet(BytesIO(baseline_bytes)))
-    for name, data in ((model_name, model_bytes), (baseline_name, baseline_bytes)):
+    player_value.validate_opponent_prior(
+        pd.read_parquet(BytesIO(prior_bytes)), cutoff_season
+    )
+    for name, data in (
+        (model_name, model_bytes),
+        (baseline_name, baseline_bytes),
+        (prior_name, prior_bytes),
+    ):
         path = PROCESSED_DIR / name
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".tmp")

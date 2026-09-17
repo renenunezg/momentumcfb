@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from backend.players import value
 from backend.players.credit import assign_play_credit
@@ -192,12 +193,73 @@ def _unit_games(games: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_opponent_effect_for_a_week_never_sees_that_weeks_games():
+def test_opponent_effect_for_a_week_never_sees_that_weeks_games(monkeypatch, tmp_path):
     with_week_four = _games({1, 2, 3, 4})
     without_week_four = _games({1, 2, 3})
     units = _unit_games(with_week_four)
-    effects_seen = value.season_unit_effects(with_week_four, units)
-    effects_unseen = value.season_unit_effects(without_week_four, units)
+    prior = pd.DataFrame(
+        {
+            "season": 2025,
+            "source_season": 2024,
+            "model_version": value.MODEL_VERSION,
+            "source_last_game_start": "2025-01-20T00:00:00Z",
+            "team_id": range(1, 7),
+            "team": list("ABCDEF"),
+            "classification": "fbs",
+            "rush_offense": [0.2, -0.2, 0.1, -0.1, 0.0, 0.0],
+            "pass_offense": [0.3, -0.3, 0.2, -0.2, 0.0, 0.0],
+            "rush_defense": [0.2, -0.2, 0.1, -0.1, 0.0, 0.0],
+            "pass_defense": [0.3, -0.3, 0.2, -0.2, 0.0, 0.0],
+        }
+    )
+    effects_seen = value.season_unit_effects(with_week_four, units, prior)
+    effects_unseen = value.season_unit_effects(without_week_four, units, prior)
+    opening = effects_seen[effects_seen.model_week.eq(1)].set_index("team")
+    assert opening.loc["B", "pass_defense"] == -0.3
+    assert opening.loc["A", "pass_defense"] == 0.3
+    # Identical opening-week production must lose credit against the weak unit.
+    schedule = with_week_four.iloc[[0]].copy()
+    credit = pd.DataFrame(
+        {
+            "game_id": schedule.game_id.iloc[0],
+            "opponent": ["A", "B"],
+            "channel": "pass",
+            "side": "offense",
+            "share": 0.6,
+            "credit_epa": 1.0,
+        }
+    )
+    adjusted = value.adjust_credit(credit, effects_seen, schedule)
+    assert adjusted.adjusted_epa.iloc[0] > 1.0 > adjusted.adjusted_epa.iloc[1]
+    # Even changing the held-out week's observed EPA cannot change its own adjustment.
+    altered = units.copy()
+    altered.loc[
+        altered.game_id.isin(
+            with_week_four.loc[with_week_four.model_week.eq(4), "game_id"]
+        ),
+        ["rush_ppa", "pass_ppa"],
+    ] = 10000.0
+    effects_altered = value.season_unit_effects(with_week_four, altered, prior)
+    pd.testing.assert_frame_equal(effects_seen, effects_altered)
+    # Equal per-play efficiency must not create strength differences solely
+    # because teams faced different numbers of passes and rushes.
+    steady = units.copy()
+    steady["pass_ppa"] = 0.2 * steady["pass_plays"]
+    steady["rush_ppa"] = 0.1 * steady["rush_plays"]
+    columns = [c for channels in value.CHANNEL_UNITS.values() for c in channels[:2]]
+    neutral = prior.copy()
+    neutral[columns] = 0.0
+    normalized = value.season_unit_effects(with_week_four, steady, neutral)
+    assert np.allclose(normalized[columns], 0.0, atol=1e-12)
+    monkeypatch.setattr(value.store, "PROCESSED_DIR", tmp_path)
+    with pytest.raises(FileNotFoundError, match="Missing player opponent prior"):
+        value.load_opponent_prior(2025)
+    value.store.write_processed(prior, *value.opponent_prior_artifact(2025))
+    pd.testing.assert_frame_equal(prior, value.load_opponent_prior(2025))
+    with pytest.raises(ValueError, match="previous season"):
+        value.season_unit_effects(
+            with_week_four, units, prior.assign(source_season=2025)
+        )
     week_four_seen = (
         effects_seen[effects_seen["model_week"].eq(4)]
         .sort_values("team")
