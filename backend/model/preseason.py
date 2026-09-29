@@ -100,8 +100,9 @@ def scoring_priors_from_ratings(
     The average expected possession count recovers the common scale used when
     those ratings were built. This keeps market data out of the rating state:
     only the pure preseason team ratings enter the weekly fit.
-    Split published power variance equally between independent offense and
-    defense priors, preserving the uncertainty added for missing inputs.
+    Split published power variance into independence-equivalent component SDs.
+    The weekly solver rescales these before introducing correlation, preserving
+    the power variance and the uncertainty added for missing inputs.
     """
     required = {
         "team_id",

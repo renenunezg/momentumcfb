@@ -270,6 +270,29 @@ def _strength_prior_precision(
     return precision
 
 
+@dataclass(frozen=True, slots=True)
+class PointsRatingFit:
+    rating: np.ndarray
+    home_field: float
+    # Joint team/HFA covariance before centering; matchup differences cancel
+    # the rating origin. Team SDs must use the same FBS centering as rating.
+    parameter_covariance: np.ndarray
+    observation_variance: float
+
+    def rating_variance(self, classifications: np.ndarray) -> np.ndarray:
+        weights = (classifications == "fbs").astype(float)
+        if not weights.any():
+            weights[:] = 1.0
+        weights /= weights.sum()
+        covariance = self.parameter_covariance[:-1, :-1]
+        return np.maximum(
+            np.diag(covariance)
+            - 2 * (covariance @ weights)
+            + weights @ covariance @ weights,
+            0.0,
+        )
+
+
 def _fit_points_rating(
     training: pd.DataFrame,
     team_index: dict[int, int],
@@ -278,7 +301,7 @@ def _fit_points_rating(
     prior_mean_points: np.ndarray,
     teams_with_priors: np.ndarray,
     prior_sd_points: float,
-) -> tuple[np.ndarray, float]:
+) -> PointsRatingFit:
     """Points-only ridge margin rating on the same cutoff as the joint fit.
 
     Home margin is r_home - r_away + hfa on non-neutral fields. Ratings
@@ -286,7 +309,8 @@ def _fit_points_rating(
     shrink toward their classification's fitted mean, iterated to a fixed
     point. Rows are weighted by recency over the residual margin variance of
     a first pass, so the prior SD is a points-scale statement. Returns the
-    ratings centered on the FBS mean and the home-field points.
+    ratings centered on the FBS mean, home-field points, and conditional
+    covariance. Estimated noise and fallback pool means are treated as fixed.
     """
     n_teams = len(team_index)
     n_games = len(training)
@@ -304,10 +328,10 @@ def _fit_points_rating(
     missing = ~teams_with_priors
     classes = pd.Series(classifications)
 
-    def solve(noise: float) -> np.ndarray:
+    def solve(noise: float) -> tuple[np.ndarray, np.ndarray]:
         weights = recency / noise
         mean = prior_mean.copy()
-        parameters, _ = _solve_ridge(design, margin, weights, mean, prior_sd)
+        parameters, covariance = _solve_ridge(design, margin, weights, mean, prior_sd)
         for _ in range(30 if missing.any() else 0):
             updated = mean.copy()
             for _, members in classes.groupby(classes).groups.items():
@@ -317,24 +341,26 @@ def _fit_points_rating(
                     updated[selection[gap]] = parameters[selection].mean()
             shift = float(np.abs(updated - mean).max())
             mean = updated
-            parameters, _ = _solve_ridge(design, margin, weights, mean, prior_sd)
+            parameters, covariance = _solve_ridge(
+                design, margin, weights, mean, prior_sd
+            )
             if shift < SRS_FALLBACK_TOLERANCE_POINTS:
                 break
-        return parameters
+        return parameters, covariance
 
     centered = margin - np.average(margin, weights=recency)
     noise = max(
         float(np.average(np.square(centered), weights=recency)), SRS_NOISE_FLOOR
     )
-    residual = margin - design @ solve(noise)
+    residual = margin - design @ solve(noise)[0]
     noise = max(
         float(np.average(np.square(residual), weights=recency)), SRS_NOISE_FLOOR
     )
-    parameters = solve(noise)
+    parameters, covariance = solve(noise)
     rating = parameters[:-1]
     center = classifications == "fbs"
     rating = rating - (rating[center].mean() if center.any() else rating.mean())
-    return rating, float(parameters[-1])
+    return PointsRatingFit(rating, float(parameters[-1]), covariance, noise)
 
 
 def fit_season_points_rating(
@@ -368,7 +394,7 @@ def fit_season_points_rating(
         if carried is not None:
             prior[index] = float(carried)
             has_prior[index] = True
-    rating, _ = _fit_points_rating(
+    fitted = _fit_points_rating(
         training,
         team_index,
         catalog["classification"].fillna("").str.lower().to_numpy(),
@@ -382,7 +408,7 @@ def fit_season_points_rating(
             "team_id": catalog["team_id"].astype(int).to_numpy(),
             "team": catalog["team"].to_numpy(),
             "classification": catalog["classification"].to_numpy(),
-            "srs_rating": rating,
+            "srs_rating": fitted.rating,
         }
     )
 
@@ -999,7 +1025,7 @@ def fit_joint_scoring(
                 if index is not None:
                     srs_prior_points[index] = rating
                     srs_teams_with_priors[index] = True
-        srs_rating, srs_hfa_points = _fit_points_rating(
+        srs_fit = _fit_points_rating(
             scored,
             team_index,
             classifications.to_numpy(),
@@ -1012,6 +1038,7 @@ def fit_joint_scoring(
             srs_teams_with_priors,
             config.srs_prior_sd_points,
         )
+        srs_rating, srs_hfa_points = srs_fit.rating, srs_fit.home_field
     if priors is not None and priors.score_noise_covariance is not None:
         if priors.score_noise_season != int(training["season"].iloc[-1]) - 1:
             raise ValueError("score noise prior must come from the previous season")

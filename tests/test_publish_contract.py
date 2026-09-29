@@ -7,6 +7,41 @@ from backend.odds.markets import compare_priced_offers
 from backend.publish import MARKET_COMPARISONS_COLUMNS, _serving_frame
 
 
+def test_market_ratings_publish_only_with_the_matching_model_snapshot(
+    tmp_path, monkeypatch
+):
+    from backend import publish
+
+    monkeypatch.setattr(publish, "PROCESSED_DIR", tmp_path)
+    for kind in ("ratings", "market_ratings"):
+        (tmp_path / kind).mkdir()
+    snapshot = pd.DataFrame(
+        {
+            "team_id": [1, 2],
+            "season": [2026, 2026],
+            "week": [5, 5],
+            "as_of": [pd.Timestamp("2026-09-28T12:00:00Z")] * 2,
+            "power_rating": [20.0, 10.0],
+        }
+    )
+    snapshot.to_parquet(tmp_path / "ratings/2026_05.parquet")
+    # Older forecasts remain readable and never invent a market estimate.
+    assert publish.load_team_ratings("weekly", 2026, 5).market_rating.isna().all()
+    market = snapshot.drop(columns="power_rating").assign(
+        market_rating=[21.5, 9.0], market_rating_sd=[3.2, 4.1], games_with_lines=[4, 0]
+    )
+    market.to_parquet(tmp_path / "market_ratings/2026_05.parquet")
+    served = publish.load_team_ratings("weekly", 2026, 5)
+    assert served.power_rating.tolist() == [20.0, 10.0]
+    assert served.market_rating.tolist() == [21.5, 9.0]
+    assert served.market_rating_sd.tolist() == [3.2, 4.1]
+    assert served.market_rating_games.tolist() == [4, 0]
+    market["as_of"] += pd.Timedelta(days=1)
+    market.to_parquet(tmp_path / "market_ratings/2026_05.parquet")
+    with pytest.raises(ValueError, match="must match the model rating snapshot"):
+        publish.load_team_ratings("weekly", 2026, 5)
+
+
 def test_cfbd_line_comparisons_fill_the_published_contract():
     lines = pd.DataFrame(
         [

@@ -63,6 +63,11 @@ def _add_pipeline_commands(sub) -> None:
     )
     calibrate.add_argument("--production-replay", action="store_true")
     calibrate.add_argument(
+        "--rating-uncertainty",
+        action="store_true",
+        help="validate pure-prior and market uncertainty on cached 2020-2025 splits",
+    )
+    calibrate.add_argument(
         "--weekly-improvements",
         action="store_true",
         help="run fixed cached historical weekly-model experiments",
