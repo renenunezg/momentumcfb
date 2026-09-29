@@ -16,9 +16,9 @@ from backend.model.forecast_calibration import apply_forecast_calibration
 from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.market_blend import add_market_informed_margins
 from backend.model.market_history import (
+    fit_market_history,
     history_weight,
     load_market_prior,
-    market_history_margins,
 )
 from backend.model.preseason import (
     MISSING_INPUT_COLUMNS,
@@ -377,17 +377,20 @@ def run_weekly_forecast(
             "the Odds API returned no priced spread matched to the forecast week"
         )
     market_prior = load_market_prior(season)
+    market_fit = fit_market_history(
+        games,
+        store.read_lines(season),
+        forecast_week,
+        pd.Timestamp(created_at),
+        market_prior,
+    )
+    market_projections = (
+        market_fit.project(target) if market_fit is not None else pd.DataFrame()
+    )
     projections = add_market_informed_margins(
         projections,
         offers,
-        history=market_history_margins(
-            games,
-            store.read_lines(season),
-            forecast_week,
-            pd.Timestamp(created_at),
-            target,
-            market_prior,
-        ),
+        history=market_projections.get("market_history_home_margin"),
         history_weight=history_weight(forecast_week),
     )
     comparisons = compare_priced_offers(projections, offers)
@@ -496,6 +499,10 @@ def run_weekly_forecast(
             "score_noise_prior": score_noise_prior,
             "srs_prior": srs_prior,
             "market_prior": market_prior,
+            "market_ratings": (
+                market_fit.ratings() if market_fit is not None else pd.DataFrame()
+            ),
+            "market_line_forecasts": market_projections.reset_index(names="game_id"),
             "process_prior": process_prior,
             "process_training_features": process_team_games[
                 process_team_games["game_id"].isin(

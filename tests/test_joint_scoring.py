@@ -15,7 +15,7 @@ from backend.features.scoring import (
 from backend.model.calibration import fbs_calibration_cohort
 from backend.model.forecast_calibration import apply_forecast_calibration
 from backend.model.joint_scoring import DEFAULT_CONFIG, fit_joint_scoring
-from backend.model.market_history import market_history_margins
+from backend.model.market_history import fit_market_history
 from backend.model.preseason import (
     score_noise_prior_from_fit,
     scoring_priors_from_ratings,
@@ -701,8 +701,33 @@ def test_market_history_never_reads_the_forecast_week_lines():
             }
         )
 
-    first = market_history_margins(games, lines(-30.0), 3, as_of, target, prior)
-    second = market_history_margins(games, lines(30.0), 3, as_of, target, prior)
-    assert list(first.index) == list(target["game_id"])
-    assert np.isfinite(first).all()
-    pd.testing.assert_series_equal(first, second)
+    first = fit_market_history(games, lines(-30.0), 3, as_of, prior)
+    second = fit_market_history(games, lines(30.0), 3, as_of, prior)
+    assert first is not None and second is not None
+    forecasts = first.project(target)
+    assert list(forecasts.index) == list(target["game_id"])
+    assert np.isfinite(forecasts.select_dtypes("number").to_numpy()).all()
+    assert (forecasts.market_line_sd > 0).all()
+    pd.testing.assert_frame_equal(forecasts, second.project(target))
+    ratings = first.ratings()
+    pd.testing.assert_frame_equal(ratings, second.ratings())
+    assert ratings.market_rating_sd.gt(0).all()
+    assert ratings.games_with_lines.sum() == 2 * len(first.training)
+    assert ratings.last_training_kickoff.lt(as_of).all()
+    # Parameter uncertainty for a matchup includes shared opponent/HFA
+    # covariance, not just the sum of two marginal rating variances.
+    order = dict(zip(first.teams.team_id, range(len(first.teams))))
+    design = np.zeros((len(target), len(order) + 1))
+    for row, game in enumerate(target.itertuples()):
+        design[row, order[game.home_team_id]] = 1
+        design[row, order[game.away_team_id]] = -1
+        design[row, -1] = not game.neutral_site
+    expected = np.einsum(
+        "ij,jk,ik->i", design, first.fitted.parameter_covariance, design
+    )
+    np.testing.assert_allclose(forecasts.market_parameter_variance, expected)
+    # Replaying before the first kickoff has no current-season information.
+    assert (
+        fit_market_history(games, lines(-30.0), 1, games.start_date.min(), prior)
+        is None
+    )

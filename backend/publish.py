@@ -61,6 +61,9 @@ TEAM_RATINGS_COLUMNS = [
     "expected_possessions",
     "power_rating_sd",
     "missing_input_count",
+    "market_rating",
+    "market_rating_sd",
+    "market_rating_games",
 ]
 
 TEAM_UNIT_RATINGS_COLUMNS = [
@@ -297,7 +300,24 @@ def load_teams(season: int) -> pd.DataFrame:
 
 def load_team_ratings(source: str, season: int, week: int) -> pd.DataFrame:
     path = _artifact_dir(source, "ratings") / f"{season}_{week:02d}.parquet"
-    return _serving_frame(pd.read_parquet(path), TEAM_RATINGS_COLUMNS)
+    ratings = pd.read_parquet(path)
+    market_path = _artifact_dir(source, "market_ratings") / path.name
+    if market_path.exists():
+        market = pd.read_parquet(market_path)
+        if not market.empty:
+            keys = ["team_id", "season", "week", "as_of"]
+            columns = [*keys, "market_rating", "market_rating_sd", "games_with_lines"]
+            market = market[columns].rename(
+                columns={"games_with_lines": "market_rating_games"}
+            )
+            ratings["as_of"] = pd.to_datetime(ratings["as_of"], utc=True)
+            market["as_of"] = pd.to_datetime(market["as_of"], utc=True)
+            ratings = ratings.merge(
+                market, on=keys, how="outer", validate="one_to_one", indicator=True
+            )
+            if ratings["_merge"].eq("right_only").any():
+                raise ValueError("Market ratings must match the model rating snapshot")
+    return _serving_frame(ratings, TEAM_RATINGS_COLUMNS)
 
 
 def load_team_unit_ratings(source: str, season: int, week: int) -> pd.DataFrame:

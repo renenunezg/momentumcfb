@@ -160,6 +160,25 @@ def handle_weekly_update(args: Namespace) -> None:
 
 
 def handle_calibrate(args: Namespace) -> None:
+    if getattr(args, "rating_uncertainty", False):
+        if (
+            args.weekly_improvements
+            or args.recommendations
+            or args.production_replay
+            or args.seasons
+        ):
+            raise SystemExit("--rating-uncertainty uses fixed historical splits")
+        from pathlib import Path
+
+        from backend.config import PROCESSED_DIR
+        from backend.model.rating_uncertainty import evaluate_rating_uncertainty
+
+        evaluate_rating_uncertainty(
+            Path(args.output_directory)
+            if args.output_directory
+            else PROCESSED_DIR / "calibration" / "rating_uncertainty"
+        )
+        return
     if getattr(args, "weekly_improvements", False):
         if args.recommendations or args.production_replay or args.seasons:
             raise SystemExit("--weekly-improvements uses fixed historical splits")

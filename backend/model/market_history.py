@@ -14,12 +14,18 @@ own line, by 0.073 (12.070 to 11.997, t -4.3), negative in every season. About
 70 percent of the gain is the current season's earlier lines.
 """
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
 from backend.etl import store
 from backend.features.scoring import build_weekly_scoring_games, load_scoring_team_games
-from backend.model.joint_scoring import _fit_points_rating, _team_catalog
+from backend.model.joint_scoring import (
+    PointsRatingFit,
+    _fit_points_rating,
+    _team_catalog,
+)
 from backend.serving.market import flatten_closing_lines
 
 MARKET_PRIOR_MODEL_VERSION = "market_carryover_v1"
@@ -28,6 +34,12 @@ LINE_HALF_LIFE_WEEKS = 3.0
 EARLY_WEEKS = 3
 EARLY_HISTORY_WEIGHT = 0.55
 LATE_HISTORY_WEIGHT = 0.35
+MARKET_UNCERTAINTY_VERSION = "market_uncertainty_v1"
+# Gaussian NLL optimum on 2,775 chronological 2020-2022 forecasts.
+# On 4,376 reused 2023-2025 validation games, 80% future-line coverage
+# improves from 91.75% to 77.81%, with NLL 3.12434 -> 3.06137.
+# This scales future-line prediction intervals, not latent rating SDs.
+MARKET_LINE_SD_SCALE = 0.6866868661624285
 MARKET_PRIOR_COLUMNS = [
     "season",
     "team",
@@ -60,7 +72,7 @@ def _fit_market_rating(
     catalog: pd.DataFrame,
     prior_by_team: dict[str, float],
     recency: np.ndarray,
-) -> tuple[np.ndarray, float]:
+) -> PointsRatingFit:
     prior = catalog["team"].map(prior_by_team)
     return _fit_points_rating(
         lined,
@@ -97,10 +109,9 @@ def build_market_prior(season: int) -> pd.DataFrame:
         )
         lined = lined_games(games, store.read_lines(year))
         catalog = _team_catalog(lined)
-        rating, home_field = _fit_market_rating(
-            lined, catalog, carried, np.ones(len(lined))
-        )
-        carried.update(zip(catalog["team"], rating.astype(float)))
+        fitted = _fit_market_rating(lined, catalog, carried, np.ones(len(lined)))
+        home_field = fitted.home_field
+        carried.update(zip(catalog["team"], fitted.rating.astype(float)))
         classes.update(zip(catalog["team"], catalog["classification"]))
     frame = pd.DataFrame(
         {
@@ -139,44 +150,117 @@ def load_market_prior(season: int) -> pd.DataFrame:
     return frame
 
 
-def market_history_margins(
+@dataclass(frozen=True, slots=True)
+class MarketHistoryFit:
+    teams: pd.DataFrame
+    fitted: PointsRatingFit
+    season: int
+    week: int
+    as_of: pd.Timestamp
+    training: pd.DataFrame
+
+    def ratings(self) -> pd.DataFrame:
+        """Conditional strength SD, distinct from future-line prediction SD.
+
+        This covariance conditions on the estimated noise, prior means and
+        fallback pools. Future-line coverage does not validate latent team
+        strength coverage, so no predictive calibration scalar is applied here.
+        """
+        out = self.teams[["team_id", "team", "classification"]].copy()
+        games = pd.concat(
+            [self.training["home_team_id"], self.training["away_team_id"]]
+        ).value_counts()
+        out["market_rating"] = self.fitted.rating
+        out["market_rating_sd"] = np.sqrt(
+            self.fitted.rating_variance(out["classification"].to_numpy())
+        )
+        out["games_with_lines"] = out["team_id"].map(games).fillna(0).astype(int)
+        out["season"], out["week"], out["as_of"] = self.season, self.week, self.as_of
+        out["home_field_points"] = self.fitted.home_field
+        out["last_training_kickoff"] = self.training["start_date"].max()
+        out["model_version"] = MARKET_UNCERTAINTY_VERSION
+        out["sd_method"] = "conditional_ridge_posterior"
+        out["source"] = "prior_week_closing_spread_median"
+        return out
+
+    def project(self, target: pd.DataFrame) -> pd.DataFrame:
+        """Forecast a later closing line, not a realized game margin."""
+        index = dict(zip(self.teams["team_id"].astype(int), range(len(self.teams))))
+        home = target["home_team_id"].map(index).to_numpy(int)
+        away = target["away_team_id"].map(index).to_numpy(int)
+        venue = (~target["neutral_site"].astype(bool)).to_numpy(float)
+        covariance = self.fitted.parameter_covariance
+        parameter_variance = (
+            covariance[home, home]
+            + covariance[away, away]
+            - 2 * covariance[home, away]
+            + venue**2 * covariance[-1, -1]
+            + 2 * venue * (covariance[home, -1] - covariance[away, -1])
+        )
+        return pd.DataFrame(
+            {
+                "market_history_home_margin": (
+                    self.fitted.rating[home]
+                    - self.fitted.rating[away]
+                    + self.fitted.home_field * venue
+                ),
+                "market_parameter_variance": np.maximum(parameter_variance, 0.0),
+                "market_observation_variance": self.fitted.observation_variance,
+                "market_line_sd": MARKET_LINE_SD_SCALE
+                * np.sqrt(
+                    np.maximum(parameter_variance, 0.0)
+                    + self.fitted.observation_variance
+                ),
+                "season": self.season,
+                "week": self.week,
+                "as_of": self.as_of,
+                "model_version": MARKET_UNCERTAINTY_VERSION,
+                "sd_method": "dev_scaled_future_closing_line_normal",
+                "sd_scale": MARKET_LINE_SD_SCALE,
+                "last_training_kickoff": self.training["start_date"].max(),
+            },
+            index=pd.Index(target["game_id"].to_numpy(), name="game_id"),
+        )
+
+
+def fit_market_history(
     games: pd.DataFrame,
     lines: pd.DataFrame,
     forecast_week: int,
     as_of: pd.Timestamp,
-    target: pd.DataFrame,
     market_prior: pd.DataFrame,
-) -> pd.Series:
+) -> MarketHistoryFit | None:
     """Home margin implied by lines of games that kicked off before the week.
 
-    Returns an empty series when no earlier game of the season has a line, so
+    Returns None when no earlier game of the season has a line, so
     the market-informed margin falls back to its previous construction.
     """
     if not any(
         offer.get("spread") is not None for offers in lines["lines"] for offer in offers
     ):
-        return pd.Series(dtype=float)
+        return None
     lined = lined_games(games, lines)
     lined = lined[
         lined["model_week"].lt(forecast_week)
         & pd.to_datetime(lined["start_date"], utc=True).lt(as_of)
     ]
     if lined.empty:
-        return pd.Series(dtype=float)
+        return None
     catalog = _team_catalog(games)
     recency = 0.5 ** (
         (forecast_week - 1 - lined["model_week"].to_numpy(float)) / LINE_HALF_LIFE_WEEKS
     )
-    rating, home_field = _fit_market_rating(
+    fitted = _fit_market_rating(
         lined,
         catalog,
         dict(zip(market_prior["team"], market_prior["market_rating"].astype(float))),
         recency,
     )
-    by_team = dict(zip(catalog["team_id"].astype(int), rating))
-    margin = (
-        target["home_team_id"].astype(int).map(by_team)
-        - target["away_team_id"].astype(int).map(by_team)
-        + home_field * (~target["neutral_site"].astype(bool)).astype(float)
+    return MarketHistoryFit(
+        catalog,
+        fitted,
+        int(games["season"].iloc[0]),
+        forecast_week,
+        as_of,
+        lined,
     )
-    return pd.Series(margin.to_numpy(float), index=target["game_id"].to_numpy())
