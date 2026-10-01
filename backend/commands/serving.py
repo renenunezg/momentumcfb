@@ -184,3 +184,37 @@ def handle_serve_verify(args: Namespace) -> None:
         )
     if problems:
         raise SystemExit(1)
+
+
+def handle_live_win_probability(args: Namespace) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from backend.cfbd.client import CFBDClient
+    from backend.db import writes_allowed
+    from backend.serving import live_publish
+    from backend.serving.serve import load_frozen_params
+
+    if args.interval < 30:
+        raise SystemExit("--interval must be at least 30 seconds")
+    if args.duration is not None and (args.duration <= 0 or not args.watch):
+        raise SystemExit("--duration requires --watch and a positive number of seconds")
+    if args.publish and not writes_allowed():
+        raise SystemExit("publication requires MOMENTUMCFB_DB_WRITES=1")
+    client = CFBDClient(max_calls=args.max_calls, min_remaining=args.min_remaining)
+    publisher = live_publish.LivePublisher(
+        load_frozen_params(),
+        load_games=live_publish.load_games,
+        load_saved=live_publish.load_saved,
+        # A failed poll is retried by the next one, never inside this one.
+        fetch_board=lambda: client.get("/scoreboard", retries=1, timeout=15),
+        write=live_publish.write_snapshots if args.publish else None,
+        expires_at=(
+            datetime.now(timezone.utc) + timedelta(seconds=args.duration)
+            if args.duration
+            else None
+        ),
+    )
+    live_publish.run(
+        publisher, watch=args.watch, interval=args.interval, duration=args.duration
+    )
+    log.info(f"{client.calls_used} CFBD calls used; {client.remaining} remaining")

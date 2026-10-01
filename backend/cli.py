@@ -499,6 +499,17 @@ def parse_args(argv=None):
     )
     pilot.add_argument("--output-directory")
     _cfbd_budget_arguments(pilot)
+    live = sub.add_parser(
+        "live-win-probability",
+        help="score in-progress games from the scoreboard; read only by default",
+    )
+    live.add_argument("--watch", action="store_true")
+    live.add_argument("--interval", type=int, default=60)
+    live.add_argument(
+        "--duration", type=int, help="stop a watch worker after this many seconds"
+    )
+    live.add_argument("--publish", action="store_true")
+    _cfbd_budget_arguments(live)
     return parser.parse_args(argv)
 
 
