@@ -47,6 +47,7 @@ from backend.commands.publishing import (
     handle_refresh_picks,
 )
 from backend.commands.serving import (
+    handle_live_win_probability,
     handle_serve_game,
     handle_serve_verify,
     handle_serving_anchors,
@@ -83,6 +84,7 @@ HANDLERS: dict[str, Handler] = {
     "serving-anchors": handle_serving_anchors,
     "serve-game": handle_serve_game,
     "serve-verify": handle_serve_verify,
+    "live-win-probability": handle_live_win_probability,
     "kickoff-check": handle_kickoff_check,
     "kickoff-run": handle_kickoff_run,
     "live-odds": handle_live_odds,
