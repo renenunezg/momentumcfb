@@ -64,6 +64,7 @@ TEAM_RATINGS_COLUMNS = [
     "market_rating",
     "market_rating_sd",
     "market_rating_games",
+    "forecast_alignment_points",
 ]
 
 TEAM_UNIT_RATINGS_COLUMNS = [

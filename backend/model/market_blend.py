@@ -118,3 +118,47 @@ def add_market_informed_margins(
     out["market_informed_home_points"] = (out["market_informed_total"] + margin) / 2.0
     out["market_informed_away_points"] = (out["market_informed_total"] - margin) / 2.0
     return out
+
+
+def align_ratings_to_forecast(
+    ratings: pd.DataFrame, projections: pd.DataFrame
+) -> pd.DataFrame:
+    """Shift team ratings so they reproduce the week's published lines.
+
+    The fitted ratings carry no market information, quarterback report, or
+    pace term, so their difference plus home field can sit several points from
+    the published market-informed line. Each game's gap is split evenly
+    between its two teams (the minimum-norm solution, which also handles a
+    team with two games), leaving teams without a game unchanged. Offense and
+    defense each take half of a team's shift, so they still sum to the power
+    rating. ``forecast_alignment_points`` records the shift, so the fitted
+    rating stays recoverable.
+    """
+    out = ratings.copy()
+    index = {int(team_id): row for row, team_id in enumerate(out["team_id"])}
+    if len(index) != len(out):
+        raise ValueError("rating alignment requires unique team IDs")
+    home = projections["home_team_id"].map(index)
+    away = projections["away_team_id"].map(index)
+    if home.isna().any() or away.isna().any():
+        raise ValueError("every projected team needs a rating to align")
+    home, away = home.to_numpy(dtype=int), away.to_numpy(dtype=int)
+    power = out["power_rating"].to_numpy(dtype=float)
+    gap = (
+        projections["market_informed_home_margin"].to_numpy(dtype=float)
+        - power[home]
+        + power[away]
+        - projections["home_field_points"].to_numpy(dtype=float)
+    )
+    if not np.isfinite(gap).all():
+        raise ValueError("rating alignment requires finite margins and ratings")
+    games = np.zeros((len(projections), len(out)))
+    rows = np.arange(len(projections))
+    games[rows, home] = 1.0
+    games[rows, away] = -1.0
+    shift = np.linalg.lstsq(games, gap, rcond=None)[0]
+    out["power_rating"] = power + shift
+    out["offense_points"] = out["offense_points"] + shift / 2.0
+    out["defense_points"] = out["defense_points"] + shift / 2.0
+    out["forecast_alignment_points"] = shift
+    return out
