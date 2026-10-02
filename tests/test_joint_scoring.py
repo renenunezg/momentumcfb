@@ -124,6 +124,19 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path, monkeypatch):
     rating_by_id = {rating.team_id: rating for rating in ratings}
     for rating in ratings:
         assert rating.power_rating == rating.offense_points + rating.defense_points
+    # The published rating is the one the margin uses: at the average pace a
+    # blended rating difference plus home field is the projected margin.
+    level_pace = replace(fitted, pace=np.zeros_like(fitted.pace))
+    blended_by_id = {rating.team_id: rating for rating in fitted.blended_ratings()}
+    for projection in level_pace.project(target):
+        home = blended_by_id[projection.home_team_id]
+        away = blended_by_id[projection.away_team_id]
+        assert projection.home_margin == pytest.approx(
+            home.power_rating - away.power_rating + projection.home_field_points
+        )
+        assert home.scoring_environment == pytest.approx(
+            rating_by_id[home.team_id].scoring_environment
+        )
     # joint_scoring_v12: the published margin is half the joint fit's rating
     # margin and half the points-only rating margin, with the total and the
     # joint fit's margin SD (before the fixed scalar) untouched by the blend.
@@ -135,7 +148,7 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path, monkeypatch):
         home = rating_by_id[projection.home_team_id]
         away = rating_by_id[projection.away_team_id]
         expected_margin = (
-            home.power_rating - away.power_rating + projection.home_field_points
+            home.power_rating - away.power_rating + joint.home_field_points
         )
         assert abs(joint.home_margin - expected_margin) < 1e-10
         assert joint.srs_home_margin is None
