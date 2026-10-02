@@ -267,7 +267,11 @@ def priced_candidates(projection, game_offers: pd.DataFrame) -> list[dict]:
 def compare_priced_offers(
     projections: pd.DataFrame, offers: pd.DataFrame
 ) -> pd.DataFrame:
-    from backend.recommendations import build_recommendations
+    from backend.recommendations import (
+        PRICING_MARGIN_SD,
+        PRICING_TOTAL_SD,
+        build_recommendations,
+    )
 
     decisions = build_recommendations(projections, offers)
     recommended = {
@@ -285,6 +289,15 @@ def compare_priced_offers(
         priced = game_offers.dropna(subset=["price"])
         eligible = priced[priced["execution_eligibility_verified"].eq(True)]
         executable = not eligible.empty
+        # Compare the published market-informed forecast, with the dispersion
+        # picks are priced with, not the pure model.
+        projection = projection._replace(
+            home_margin=projection.market_informed_home_margin,
+            home_spread=-projection.market_informed_home_margin,
+            model_total=projection.market_informed_total,
+            margin_sd=PRICING_MARGIN_SD,
+            total_sd=PRICING_TOTAL_SD,
+        )
         candidates = priced_candidates(projection, eligible if executable else priced)
         row = {
             "game_id": projection.game_id,

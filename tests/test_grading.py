@@ -10,6 +10,7 @@ from scipy import stats
 from backend import grading
 from backend.model.calibration import _interval_coverage
 from backend.odds.markets import OFFER_COLUMNS, compare_priced_offers
+from backend.recommendations import PRICING_MARGIN_SD
 
 
 def _projection(game_id, as_of, margin=7.0):
@@ -37,6 +38,7 @@ def _projection(game_id, as_of, margin=7.0):
         "market_weight": 0.5,
         "market_home_spread": -(margin - 2.0),
         "model_total": 50.0,
+        "market_informed_total": 49.0,
         "margin_sd": 14.0,
         "total_sd": 12.0,
         "distribution": "bivariate_student_t",
@@ -207,10 +209,17 @@ def test_grades_only_pregame_projections_and_keeps_stored_rows(monkeypatch, tmp_
         ]
     ).reindex(columns=OFFER_COLUMNS)
     priced = compare_priced_offers(student, offers)
-    assert priced.iloc[0].best_offer_model_cover_probability == pytest.approx(expected)
+    # The comparison prices the published market-informed line with the
+    # dispersion picks are priced with.
+    assert priced.iloc[0].best_offer_model_cover_probability == pytest.approx(
+        stats.t.cdf(6.0 / (PRICING_MARGIN_SD * np.sqrt(5.0 / 7.0)), 7.0)
+    )
     boundary = student_grade.assign(actual_margin=7.0 + 18.0)
-    assert grading._coverage(boundary, 0.8) == 0.0
-    assert grading._coverage(boundary, 0.8) == _interval_coverage(
+    pure_coverage = grading._coverage(
+        boundary, boundary["pure_home_margin"], boundary["margin_sd"], 0.8
+    )
+    assert pure_coverage == 0.0
+    assert pure_coverage == _interval_coverage(
         np.array([18.0]), np.array([14.0]), np.array([7.0]), 0.8
     )
 

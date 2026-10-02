@@ -393,16 +393,23 @@ def load_games(start: datetime, end: datetime) -> list[Game]:
     from sqlalchemy import text
 
     from backend.db import CFB_SCHEMA, engine
+    from backend.recommendations import PRICING_MARGIN_SD
 
+    # The anchor is the published market-informed line with the dispersion
+    # picks are priced with, so the pregame probability agrees with the rest
+    # of the site. A row from before the blend existed keeps its pure pair.
     with engine.connect() as conn:
         rows = conn.execute(
             text(
                 "SELECT game_id, season, week, start_date, home_team_id, "
-                "away_team_id, home_team, away_team, home_margin, margin_sd, "
+                "away_team_id, home_team, away_team, "
+                "COALESCE(market_informed_home_margin, home_margin) AS home_margin, "
+                "CASE WHEN market_informed_home_margin IS NULL THEN margin_sd "
+                "ELSE :pricing_sd END AS margin_sd, "
                 f"as_of, model_version FROM {CFB_SCHEMA}.game_projections "
                 "WHERE start_date BETWEEN :start AND :end"
             ),
-            {"start": start, "end": end},
+            {"start": start, "end": end, "pricing_sd": PRICING_MARGIN_SD},
         ).mappings()
         return [
             Game(

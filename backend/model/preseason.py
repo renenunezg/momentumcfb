@@ -21,7 +21,10 @@ from backend.model.joint_scoring import (
     fit_season_points_rating,
     margin_total_distribution,
 )
-from backend.model.market_blend import add_market_informed_margins
+from backend.model.market_blend import (
+    add_market_informed_margins,
+    align_ratings_to_forecast,
+)
 from backend.model.market_history import build_market_prior, load_market_prior
 from backend.model.outputs import GameProjection
 from backend.model.unit_ratings import COLUMNS as UNIT_RATING_COLUMNS
@@ -459,8 +462,13 @@ def load_preseason_ratings(season: int, week: int = 1) -> tuple[pd.DataFrame, st
         from backend.db import CFB_SCHEMA, engine
 
         query = text(
+            # Published ratings are shifted to the opening lines; take the
+            # shift back out to recover the market-free prior.
             "SELECT team_id, team, conference, classification, "
-            "offense_points, defense_points, expected_possessions, "
+            "offense_points - COALESCE(forecast_alignment_points, 0) / 2 "
+            "AS offense_points, "
+            "defense_points - COALESCE(forecast_alignment_points, 0) / 2 "
+            "AS defense_points, expected_possessions, "
             "power_rating_sd, "
             f"missing_input_count FROM {CFB_SCHEMA}.team_ratings "
             "WHERE season = :season AND week = :week "
@@ -1257,7 +1265,10 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
     comparisons["source_snapshot_as_of"] = source_snapshot_as_of.isoformat()
     comparisons["forecast_created_at"] = forecast_created_at.isoformat()
     outputs = {
+        # ``ratings`` is the market-free prior the weekly model starts from;
+        # the published copy reproduces the published opening lines.
         "ratings": ratings,
+        "published_ratings": align_ratings_to_forecast(ratings, projections),
         "score_noise_prior": score_noise_prior_from_fit(previous_fit),
         "srs_prior": build_srs_prior(season),
         "market_prior": build_market_prior(season),

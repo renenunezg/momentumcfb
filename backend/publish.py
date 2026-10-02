@@ -304,7 +304,10 @@ def load_teams(season: int) -> pd.DataFrame:
 
 def load_team_ratings(source: str, season: int, week: int) -> pd.DataFrame:
     path = _artifact_dir(source, "ratings") / f"{season}_{week:02d}.parquet"
-    ratings = pd.read_parquet(path)
+    # The preseason run keeps its market-free prior under ``ratings`` and
+    # writes the ratings to publish beside it.
+    published = _artifact_dir(source, "published_ratings") / path.name
+    ratings = pd.read_parquet(published if published.exists() else path)
     market_path = _artifact_dir(source, "market_ratings") / path.name
     if market_path.exists():
         market = pd.read_parquet(market_path)
