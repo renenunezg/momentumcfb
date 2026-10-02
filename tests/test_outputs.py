@@ -4,7 +4,10 @@ import pandas as pd
 import pytest
 
 from backend.model import GameProjection, TeamRating
-from backend.model.market_blend import add_market_informed_margins
+from backend.model.market_blend import (
+    add_market_informed_margins,
+    align_ratings_to_forecast,
+)
 
 
 def test_output_contract_preserves_rating_and_market_conventions():
@@ -68,6 +71,28 @@ def test_output_contract_preserves_rating_and_market_conventions():
     assert blended.market_informed_total == 50.5
     assert blended.market_informed_home_points == 28.0
     assert blended.market_informed_away_points == 22.5
+    # Published ratings reproduce the published line; a team without a game
+    # this week keeps its fitted rating.
+    aligned = align_ratings_to_forecast(
+        pd.DataFrame(
+            {
+                "team_id": [333, 61, 99],
+                "power_rating": [13.0, 9.0, 1.0],
+                "offense_points": [8.0, 4.0, 1.0],
+                "defense_points": [5.0, 5.0, 0.0],
+            }
+        ),
+        pd.DataFrame([blended]),
+    ).set_index("team_id")
+    assert aligned.power_rating[333] - aligned.power_rating[61] + 2.0 == pytest.approx(
+        5.5
+    )
+    assert aligned.forecast_alignment_points.tolist() == pytest.approx(
+        [-0.25, 0.25, 0.0]
+    )
+    assert (aligned.offense_points + aligned.defense_points).tolist() == pytest.approx(
+        aligned.power_rating.tolist()
+    )
     unpriced = add_market_informed_margins(
         pd.DataFrame([projection.to_record()]),
         pd.DataFrame(),

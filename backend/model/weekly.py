@@ -14,7 +14,10 @@ from backend.features.weather import weather_context
 from backend.model.availability import apply_qb_availability, pregame_qb_outs
 from backend.model.forecast_calibration import apply_forecast_calibration
 from backend.model.joint_scoring import fit_joint_scoring
-from backend.model.market_blend import add_market_informed_margins
+from backend.model.market_blend import (
+    add_market_informed_margins,
+    align_ratings_to_forecast,
+)
 from backend.model.market_history import (
     fit_market_history,
     history_weight,
@@ -488,6 +491,9 @@ def run_weekly_forecast(
         weather = target[["game_id", "start_date"]].copy()
         weather["weather_missing"] = True
         weather["weather_error"] = str(exc)
+    # The fitted ratings above stay market-free for the audit and next
+    # season's priors; the published ones reproduce the published lines.
+    published_ratings = align_ratings_to_forecast(ratings, projections)
     log_directory = store.write_forecast_outputs(
         "weekly",
         season,
@@ -495,7 +501,7 @@ def run_weekly_forecast(
         created_at,
         {
             "weather_context": weather,
-            "ratings": ratings,
+            "ratings": published_ratings,
             "score_noise_prior": score_noise_prior,
             "srs_prior": srs_prior,
             "market_prior": market_prior,
@@ -539,7 +545,7 @@ def run_weekly_forecast(
     )
     return WeeklyForecastResult(
         week=forecast_week,
-        ratings=ratings,
+        ratings=published_ratings,
         unit_ratings=unit_ratings,
         projections=projections,
         market_offers=offers,
