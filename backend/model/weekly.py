@@ -122,7 +122,9 @@ def resolve_ready_forecast_week(
     resolved_at = resolved_at.astimezone(timezone.utc)
     games = load_weekly_games(season)
     forecast_week = resolve_forecast_week(games, requested_week, resolved_at)
-    _validate_weekly_inputs(games, forecast_week, resolved_at)
+    _validate_weekly_inputs(
+        games, forecast_week, resolved_at, allow_started=requested_week is not None
+    )
     return forecast_week
 
 
@@ -130,6 +132,7 @@ def _validate_weekly_inputs(
     games: pd.DataFrame,
     forecast_week: int,
     as_of: datetime,
+    allow_started: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     completed = games["completed"].fillna(False).astype(bool)
     prior = games[games["model_week"].lt(forecast_week)]
@@ -180,17 +183,20 @@ def _validate_weekly_inputs(
         raise WeeklyForecastNotReady(
             f"no unplayed future D1 games are scheduled for model Week {forecast_week}"
         )
-    started_target = target[
-        target["completed"].fillna(False).astype(bool) | target["start_date"].le(as_of)
-    ]
-    if not started_target.empty:
+    started = target["completed"].fillna(False).astype(bool) | target["start_date"].le(
+        as_of
+    )
+    if started.any() and not (allow_started and not started.all()):
         descriptions = ", ".join(
             f"{row.away_team} at {row.home_team} ({int(row.game_id)})"
-            for row in started_target.head(8).itertuples()
+            for row in target[started].head(8).itertuples()
         )
         raise WeeklyForecastNotReady(
             f"model Week {forecast_week} has already started: {descriptions}"
         )
+    # An explicitly requested week under way is reforecast for its unstarted
+    # games only; started games keep the forecast they kicked off with.
+    target = target[~started].copy()
     return target, missing_features
 
 
@@ -320,7 +326,7 @@ def run_weekly_forecast(
     games = load_weekly_games(season)
     forecast_week = resolve_forecast_week(games, week, created_at)
     target, excluded_training_games = _validate_weekly_inputs(
-        games, forecast_week, created_at
+        games, forecast_week, created_at, allow_started=week is not None
     )
 
     preseason_ratings, prior_source = load_preseason_ratings(season)
