@@ -86,7 +86,8 @@ def test_cfbd_line_comparisons_fill_the_published_contract():
     assert row["market_available"] is True
     assert row["priced_offer_available"] is False
     assert row["review_status"] == "no_priced_offer"
-    assert row["model_home_spread"] == -6.0
+    # The comparison carries the published market-informed line.
+    assert row["model_home_spread"] == -4.875
     assert row["best_offer_point"] is None
     assert row["best_offer_expected_value_per_unit"] is None
 

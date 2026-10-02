@@ -16,6 +16,7 @@ import pandas as pd
 from backend.config import PROCESSED_DIR
 from backend.etl import store
 from backend.model.distributions import marginal_cdf, marginal_interval_half_width
+from backend.recommendations import PRICING_MARGIN_SD
 from backend.serving.market import flatten_closing_lines, flatten_closing_totals
 
 CLOSING_SOURCE = "cfbd_lines_median"
@@ -60,6 +61,7 @@ GRADED_GAME_COLUMNS = [
     "market_weight",
     "forecast_market_home_spread",
     "model_total",
+    "market_informed_total",
     "margin_sd",
     "total_sd",
     "distribution",
@@ -207,6 +209,7 @@ def build_graded_games(
             "market_weight": merged["market_weight"],
             "forecast_market_home_spread": merged["market_home_spread"],
             "model_total": merged["model_total"],
+            "market_informed_total": merged.get("market_informed_total"),
             "margin_sd": merged["margin_sd"],
             "total_sd": merged["total_sd"],
             "distribution": merged["distribution"],
@@ -306,17 +309,24 @@ def _source_columns(graded: pd.DataFrame, source: str) -> tuple[pd.Series, pd.Se
     if source == "pure_model":
         return graded["pure_home_margin"], graded["model_total"]
     if source == "market_informed":
-        return graded["market_informed_home_margin"], pd.Series(
-            np.nan, index=graded.index
-        )
+        # Games published before the blended total existed have none to grade.
+        return graded["market_informed_home_margin"], graded["market_informed_total"]
     return -graded["closing_spread"], graded["closing_total"]
 
 
-def _coverage(frame: pd.DataFrame, level: float) -> float | None:
-    width = marginal_interval_half_width(
-        level, frame["margin_sd"], frame["degrees_of_freedom"]
-    )
-    error = (frame["pure_home_margin"] - frame["actual_margin"]).abs()
+def _margin_sd(frame: pd.DataFrame, source: str) -> pd.Series:
+    """The pure model's frozen predictive sd, or for the market-informed line
+    the dispersion its picks are priced with."""
+    if source == "pure_model":
+        return frame["margin_sd"]
+    return pd.Series(PRICING_MARGIN_SD, index=frame.index)
+
+
+def _coverage(
+    frame: pd.DataFrame, prediction: pd.Series, sd: pd.Series, level: float
+) -> float | None:
+    width = marginal_interval_half_width(level, sd, frame["degrees_of_freedom"])
+    error = (prediction - frame["actual_margin"]).abs()
     return float((error <= width).mean())
 
 
@@ -379,10 +389,21 @@ def compute_performance_metrics(
                 "log_loss": None,
                 "computed_at": computed_at,
             }
-            if source == "pure_model":
+            if source != "closing_market":
+                prediction = margin_prediction[frame.index]
+                sd = _margin_sd(frame, source)
                 for level in COVERAGE_LEVELS:
-                    row[f"coverage_{int(level * 100)}"] = _coverage(frame, level)
-                probability = frame["home_win_probability"].dropna()
+                    row[f"coverage_{int(level * 100)}"] = _coverage(
+                        frame, prediction, sd, level
+                    )
+                probability = (
+                    frame["home_win_probability"]
+                    if source == "pure_model"
+                    else pd.Series(
+                        marginal_cdf(prediction, sd, frame["degrees_of_freedom"]),
+                        index=frame.index,
+                    )
+                ).dropna()
                 if not probability.empty:
                     won = (frame.loc[probability.index, "actual_margin"] > 0).astype(
                         float

@@ -499,7 +499,12 @@ def run_weekly_forecast(
         weather["weather_error"] = str(exc)
     # The fitted ratings above stay market-free for the audit and next
     # season's priors; the published ones reproduce the published lines.
-    published_ratings = align_ratings_to_forecast(ratings, projections)
+    published_ratings = align_ratings_to_forecast(
+        ratings,
+        projections,
+        market_fit.ratings() if market_fit is not None else None,
+        history_weight(forecast_week),
+    )
     log_directory = store.write_forecast_outputs(
         "weekly",
         season,
