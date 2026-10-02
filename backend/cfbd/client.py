@@ -43,11 +43,17 @@ class CFBDClient:
         )
         self.calls_used = 0
         self.remaining: int | None = None
+        # Set only by a response that carried no quota header; a request that
+        # died before any response says nothing about the quota.
+        self.quota_unreported = False
         self._planned_calls = 0
         if self.usage_file and self.usage_file.exists():
             usage = json.loads(self.usage_file.read_text())
             self.calls_used = int(usage["calls_used"])
             self.remaining = usage["remaining"]
+            self.quota_unreported = usage.get(
+                "quota_unreported", self.remaining is None and bool(self.calls_used)
+            )
 
     def ensure_budget(self, estimated_calls: int) -> None:
         """Reserve a sequential job before its first useful quota-reading request.
@@ -67,7 +73,7 @@ class CFBDClient:
                 f"spent; session budget is {self.max_calls}. More than 100 calls "
                 "requires explicit approval before increasing --max-calls."
             )
-        if self.remaining is None and self.calls_used:
+        if self.quota_unreported:
             raise CFBDError("CFBD response omitted X-CallLimit-Remaining; stopping")
         if (
             self.remaining is not None
@@ -92,7 +98,13 @@ class CFBDClient:
             self.usage_file.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.usage_file.with_suffix(".tmp")
             temporary.write_text(
-                json.dumps({"calls_used": self.calls_used, "remaining": self.remaining})
+                json.dumps(
+                    {
+                        "calls_used": self.calls_used,
+                        "remaining": self.remaining,
+                        "quota_unreported": self.quota_unreported,
+                    }
+                )
             )
             temporary.replace(self.usage_file)
 
@@ -142,6 +154,7 @@ class CFBDClient:
                 self.remaining = int(remaining) if remaining is not None else None
             except (TypeError, ValueError):
                 self.remaining = None
+            self.quota_unreported = self.remaining is None
             self._persist_usage()
             if resp.status_code == 429:
                 if attempt < retries - 1:

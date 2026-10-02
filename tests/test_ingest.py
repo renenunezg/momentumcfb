@@ -230,6 +230,43 @@ def test_cfbd_quota_gate_counts_retries_and_persists_across_commands(
         assert constrained.calls_used == 1
 
 
+def test_cfbd_request_without_a_response_does_not_trip_the_quota_header_gate(
+    tmp_path, monkeypatch
+):
+    import requests
+
+    from backend.cfbd import client as cfbd
+
+    answers = iter(
+        [
+            requests.ReadTimeout("read timed out"),
+            SimpleNamespace(
+                status_code=200,
+                headers={"X-CallLimit-Remaining": "5000"},
+                json=lambda: [],
+            ),
+        ]
+    )
+
+    def get(*args, **kwargs):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    usage = tmp_path / "usage.json"
+    client = cfbd.CFBDClient("test", usage_file=usage)
+    monkeypatch.setattr(client.session, "get", get)
+    with pytest.raises(requests.ReadTimeout):
+        client.get("/scoreboard", retries=1)
+    # The timed-out attempt is spent, but no response was read, so the next
+    # call and a resumed command may still go out and read the quota.
+    assert cfbd.CFBDClient("test", usage_file=usage).calls_used == 1
+    cfbd.CFBDClient("test", usage_file=usage).ensure_budget(1)
+    assert client.get("/scoreboard", retries=1) == []
+    assert (client.calls_used, client.remaining) == (2, 5000)
+
+
 def test_paid_weather_snapshots_preserve_pregame_cutoff_and_missingness(tmp_path):
     import json
 
