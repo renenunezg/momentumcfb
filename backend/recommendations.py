@@ -8,10 +8,10 @@ import pandas as pd
 from scipy.optimize import brentq
 
 from backend.model.distributions import marginal_cdf
-from backend.model.market_blend import TOTAL_MARKET_WEIGHT, consensus_total
+from backend.model.market_blend import consensus_total
 from backend.odds.markets import _american_profit, priced_candidates
 
-POLICY_VERSION = "cfb-picks-v6"
+POLICY_VERSION = "cfb-picks-v7"
 # Minimum points the priced line must sit beyond the offered price's
 # break-even line. Measured in margin or total points, the same yardstick for
 # favourites and underdogs, so a mispriced tail cannot clear the gate on one
@@ -250,9 +250,10 @@ def _offer_reason(offer, paired, now, start):
 def build_recommendations(projections, offers, *, decision_at=None):
     """One best eligible side per game and market, or an explicit No Play.
 
-    Sides use the market-informed margin and totals the model total blended
-    toward the median posted total, so every edge is measured after shrinking
-    toward the market being bet into. Each pick records that market total.
+    Sides use the published market-informed margin and totals the published
+    market-informed total, so every edge is measured after shrinking toward
+    the market and every pick agrees with the forecast the site shows. Each
+    pick records the median posted total at decision time.
     Moneylines are priced from the consensus market margin moved
     H2H_MODEL_WEIGHT toward the pure model. Everything is priced with the
     empirical dispersion around the priced line, not the pure model's wider
@@ -292,15 +293,16 @@ def build_recommendations(projections, offers, *, decision_at=None):
             subset=["price"]
         )
         candidates = priced_candidates(projection, game_offers)
+        # Totals are priced from the published total, the same number the
+        # site shows, the way spreads are priced from the published line. The
+        # median posted total at decision time is recorded for reference.
         market_total = consensus_total(game_offers)
         priced_projection = projection._replace(
             margin_sd=PRICING_MARGIN_SD, total_sd=PRICING_TOTAL_SD
         )
-        if np.isfinite(market_total) and np.isfinite(projection.model_total):
-            priced_projection = priced_projection._replace(
-                model_total=(1.0 - TOTAL_MARKET_WEIGHT) * projection.model_total
-                + TOTAL_MARKET_WEIGHT * market_total
-            )
+        published_total = getattr(projection, "market_informed_total", np.nan)
+        if pd.notna(published_total) and np.isfinite(published_total):
+            priced_projection = priced_projection._replace(model_total=published_total)
         for market in MARKETS:
             row = {
                 key: getattr(projection, key, None)

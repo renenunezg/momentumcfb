@@ -38,7 +38,7 @@ def _projection(game_id, as_of, margin=7.0):
         "market_weight": 0.5,
         "market_home_spread": -(margin - 2.0),
         "model_total": 50.0,
-        "market_informed_total": 49.0,
+        "market_informed_total": 46.5,
         "margin_sd": 14.0,
         "total_sd": 12.0,
         "distribution": "bivariate_student_t",
@@ -286,6 +286,7 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         ]
     ).reindex(columns=OFFER_COLUMNS)
     projections.loc[projections.game_id.eq(4), "model_total"] = 36.0
+    projections.loc[projections.game_id.eq(4), "market_informed_total"] = 39.5
     # Production includes the universal unavailable-injury flag on both teams.
     projections.loc[
         projections.game_id.eq(5),
@@ -326,11 +327,11 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
     blended = projections.set_index("game_id").market_informed_home_margin
     spreads = decisions[decisions.market.ne("h2h")]
     assert spreads.model_home_margin.eq(spreads.game_id.map(blended)).all()
-    # Totals price from the model total blended toward the posted total.
+    # Totals price from the published total; the posted total is recorded.
     totals = decisions[decisions.market.eq("totals")]
     assert totals.market_total.eq(43.0).all()
-    assert totals[totals.game_id.ne(4)].model_total.eq(46.5).all()
-    assert totals[totals.game_id.eq(4)].model_total.eq(39.5).all()
+    published = projections.set_index("game_id").market_informed_total
+    assert totals.model_total.eq(totals.game_id.map(published)).all()
     home = decisions[(decisions.game_id.eq(1)) & decisions.market.eq("spreads")].iloc[0]
     assert home.side == "home" and home.point == -3 and home.price == -110
     assert home.push_probability > 0
