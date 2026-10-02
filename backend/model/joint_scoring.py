@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from math import isfinite, isnan
 
@@ -508,6 +508,15 @@ class JointScoringFit:
     preseason_base_ppp: float | None = None
     srs_rating: np.ndarray | None = None
     srs_hfa_points: float = 0.0
+    srs_rating_sd: np.ndarray | None = None
+
+    @property
+    def home_field_points(self) -> float:
+        """Home-field points a projected margin carries on a non-neutral field."""
+        weight = self.config.srs_blend_weight
+        return (
+            1.0 - weight
+        ) * self.base_possessions * self.hfa_ppp + weight * self.srs_hfa_points
 
     @property
     def model_version(self) -> str:
@@ -556,6 +565,52 @@ class JointScoringFit:
                 )
             )
         return sorted(ratings, key=lambda rating: rating.power_rating, reverse=True)
+
+    def blended_ratings(self) -> list[TeamRating]:
+        """Team strength as the projected margin uses it.
+
+        At the average pace, a rating difference plus the home-field points
+        is the projected margin: the joint fit's rating with its pool-level
+        crossover, blended with the points-only rating. The blend moves a
+        team's offense and defense equally, as it moves a game's two scores,
+        and keeps the joint fit's origin. ``ratings`` stays the joint fit
+        alone, which is the state next season's priors carry.
+        """
+        ratings = self.ratings()
+        weight = self.config.srs_blend_weight
+        if not weight:
+            return ratings
+        if self.srs_rating is None or self.srs_rating_sd is None:
+            raise ValueError("srs_blend_weight requires a fitted SRS")
+        index = self.team_index
+        joint = np.array([rating.power_rating for rating in ratings])
+        order = np.array([index[rating.team_id] for rating in ratings])
+        crossover = (
+            0.5 * self.crossover_gain * self.base_possessions * self.pool_level[order]
+        )
+        shift = (
+            (1.0 - weight) * (joint + crossover)
+            + weight * self.srs_rating[order]
+            - joint
+        )
+        fbs = (
+            self.teams["classification"].fillna("").str.lower().eq("fbs").to_numpy()
+        )[order]
+        shift -= shift[fbs].mean() if fbs.any() else shift.mean()
+        blended = [
+            replace(
+                rating,
+                offense_points=rating.offense_points + 0.5 * move,
+                defense_points=rating.defense_points + 0.5 * move,
+                # The two ratings are fitted to the same games, so their
+                # errors are treated as moving together rather than averaging
+                # out; this is the widest SD the blend can have.
+                power_rating_sd=(1.0 - weight) * rating.power_rating_sd
+                + weight * float(sd),
+            )
+            for rating, move, sd in zip(ratings, shift, self.srs_rating_sd[order])
+        ]
+        return sorted(blended, key=lambda rating: rating.power_rating, reverse=True)
 
     def project(self, schedule: pd.DataFrame) -> list[GameProjection]:
         projections = []
@@ -677,7 +732,9 @@ class JointScoringFit:
                     away_team_id=int(game.away_team_id),
                     away_team=game.away_team,
                     neutral_site=bool(game.neutral_site),
-                    home_field_points=float(home_field),
+                    home_field_points=(
+                        0.0 if bool(game.neutral_site) else self.home_field_points
+                    ),
                     # The linear strength model is unconstrained, but football
                     # scores are not. Extreme mismatches can otherwise produce
                     # a negative mean for the underdog and abort the forecast.
@@ -1011,7 +1068,7 @@ def fit_joint_scoring(
             floor=4.0,
             shrinkage=config.covariance_shrinkage,
         )
-    srs_rating, srs_hfa_points = None, 0.0
+    srs_rating, srs_hfa_points, srs_rating_sd = None, 0.0, None
     if config.srs_blend_weight:
         srs_prior_points = base_possessions * (
             prior_mean[:n_teams] + prior_mean[n_teams : 2 * n_teams]
@@ -1039,6 +1096,7 @@ def fit_joint_scoring(
             config.srs_prior_sd_points,
         )
         srs_rating, srs_hfa_points = srs_fit.rating, srs_fit.home_field
+        srs_rating_sd = np.sqrt(srs_fit.rating_variance(classifications.to_numpy()))
     if priors is not None and priors.score_noise_covariance is not None:
         if priors.score_noise_season != int(training["season"].iloc[-1]) - 1:
             raise ValueError("score noise prior must come from the previous season")
@@ -1068,4 +1126,5 @@ def fit_joint_scoring(
         preseason_base_ppp=priors.base_ppp if priors is not None else None,
         srs_rating=srs_rating,
         srs_hfa_points=srs_hfa_points,
+        srs_rating_sd=srs_rating_sd,
     )

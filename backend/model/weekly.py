@@ -332,7 +332,7 @@ def run_weekly_forecast(
         created_at,
         priors=priors,
     )
-    ratings = pd.DataFrame(rating.to_record() for rating in fitted.ratings())
+    ratings = pd.DataFrame(rating.to_record() for rating in fitted.blended_ratings())
     projections = pd.DataFrame(
         projection.to_record() for projection in fitted.project(target)
     )
