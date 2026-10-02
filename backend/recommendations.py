@@ -8,6 +8,7 @@ import pandas as pd
 from scipy.optimize import brentq
 
 from backend.model.distributions import marginal_cdf
+from backend.model.market_blend import TOTAL_MARKET_WEIGHT, consensus_total
 from backend.odds.markets import _american_profit, priced_candidates
 
 POLICY_VERSION = "cfb-picks-v6"
@@ -24,9 +25,6 @@ MIN_EDGE_POINTS = 2.0
 # residual is the honest width for a line that is half market.
 PRICING_MARGIN_SD = 15.35
 PRICING_TOTAL_SD = 15.93
-# Independent totals policy. Closing-only research does not establish a
-# better executable blend; retain the existing model share and dispersion.
-TOTAL_MARKET_WEIGHT = 0.50
 # Weight of the pure model in the margin that prices a moneyline. The
 # half-market blend that prices spreads is a product line that keeps model
 # opinion; for winning outright it is not calibrated. On the 2021 through
@@ -249,16 +247,6 @@ def _offer_reason(offer, paired, now, start):
     return None
 
 
-def _consensus_total(game_offers):
-    """Median posted total across a game's offers, or NaN without one."""
-    if game_offers.empty or "market" not in game_offers:
-        return float("nan")
-    points = pd.to_numeric(
-        game_offers.loc[game_offers["market"].eq("totals"), "point"], errors="coerce"
-    ).dropna()
-    return float(points.median()) if len(points) else float("nan")
-
-
 def build_recommendations(projections, offers, *, decision_at=None):
     """One best eligible side per game and market, or an explicit No Play.
 
@@ -304,7 +292,7 @@ def build_recommendations(projections, offers, *, decision_at=None):
             subset=["price"]
         )
         candidates = priced_candidates(projection, game_offers)
-        market_total = _consensus_total(game_offers)
+        market_total = consensus_total(game_offers)
         priced_projection = projection._replace(
             margin_sd=PRICING_MARGIN_SD, total_sd=PRICING_TOTAL_SD
         )

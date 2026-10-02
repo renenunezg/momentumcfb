@@ -1,9 +1,10 @@
 """Output-only market context for pregame projections.
 
-The pure model remains the source of team ratings, expected scores, totals,
-and model-versus-market comparisons. These helpers add a separately named
-market-informed margin so consumers cannot mistake a blended line for the
-model's independent opinion.
+The pure model remains the source of team ratings and of the pure score,
+margin, and total columns that picks, grading, and evaluation read. These
+helpers add separately named market-informed margin, total, and score columns,
+which are the forecast the site publishes, so consumers cannot mistake a
+blended number for the model's independent opinion.
 """
 
 import numpy as np
@@ -14,6 +15,19 @@ import pandas as pd
 # product blend that preserves model opinion, not independent model skill.
 DEFAULT_MARKET_WEIGHT = 0.50
 MARKET_WEIGHT_CAP = 0.50
+# Independent totals policy. Closing-only research does not establish a
+# better executable blend; retain the existing model share and dispersion.
+TOTAL_MARKET_WEIGHT = 0.50
+
+
+def consensus_total(game_offers: pd.DataFrame) -> float:
+    """Median posted total across a game's offers, or NaN without one."""
+    if game_offers.empty or "market" not in game_offers:
+        return float("nan")
+    points = pd.to_numeric(
+        game_offers.loc[game_offers["market"].eq("totals"), "point"], errors="coerce"
+    ).dropna()
+    return float(points.median()) if len(points) else float("nan")
 
 
 def _consensus_home_spread(offers: pd.DataFrame) -> pd.Series:
@@ -39,18 +53,21 @@ def add_market_informed_margins(
     history: pd.Series | None = None,
     history_weight: float = 0.0,
 ) -> pd.DataFrame:
-    """Add pure and market-informed margin fields to projection records.
+    """Add pure and market-informed margin, total, and score fields.
 
     ``history`` maps game ID to the margin implied by the market-history
     rating (earlier games' closing lines, never this game's). It replaces
     ``history_weight`` of the pure margin on the model side of the blend and
-    also informs games without a current line.
+    also informs games without a current line. The market-informed total
+    moves the model total toward the median posted total, and the
+    market-informed scores are the pair with that total and the
+    market-informed margin.
     """
     if not 0 <= weight <= MARKET_WEIGHT_CAP:
         raise ValueError(f"market weight must be between 0 and {MARKET_WEIGHT_CAP:g}")
     if not 0 <= history_weight < 1:
         raise ValueError("market history weight must be in [0, 1)")
-    required = {"game_id", "home_margin", "home_spread"}
+    required = {"game_id", "home_margin", "home_spread", "model_total"}
     missing = sorted(required - set(projections.columns))
     if missing:
         raise ValueError("projections are missing blend columns: " + ", ".join(missing))
@@ -80,4 +97,24 @@ def add_market_informed_margins(
         model_side,
     )
     out["market_informed_home_spread"] = -out["market_informed_home_margin"]
+
+    model_total = pd.to_numeric(out["model_total"], errors="raise")
+    market_total = out["game_id"].map(
+        {
+            game_id: consensus_total(group)
+            for game_id, group in offers.groupby("game_id")
+        }
+        if "game_id" in offers
+        else {}
+    )
+    blended_total = np.where(
+        market_total.notna(),
+        (1.0 - TOTAL_MARKET_WEIGHT) * model_total + TOTAL_MARKET_WEIGHT * market_total,
+        model_total,
+    )
+    # A total below the margin would publish a negative score.
+    margin = out["market_informed_home_margin"]
+    out["market_informed_total"] = np.maximum(blended_total, margin.abs())
+    out["market_informed_home_points"] = (out["market_informed_total"] + margin) / 2.0
+    out["market_informed_away_points"] = (out["market_informed_total"] - margin) / 2.0
     return out
