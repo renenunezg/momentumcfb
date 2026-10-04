@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
+from backend.cfbd.client import CFBDClient
 from backend.model.ingame import IngameBaselineParams
-from backend.serving.live_publish import Game, LivePublisher
+from backend.serving.live_publish import Game, LivePublisher, run
 
 KICKOFF = datetime(2026, 10, 3, 19, 0, tzinfo=timezone.utc)
 PARAMS = IngameBaselineParams(1.4, 0.03, 3.0)
@@ -87,3 +89,35 @@ def test_a_game_that_never_plays_is_closed_instead_of_polled_forever():
 
     assert not publisher.poll(KICKOFF + timedelta(hours=3, minutes=1))
     assert written[-1]["abstract_state"] == "Off" and len(calls) == 2
+
+
+def test_a_gateway_error_page_costs_one_poll_and_the_worker_reaches_the_final(
+    monkeypatch,
+):
+    # Oct 3: one Cloudflare error page, which carries no quota header, ended
+    # ten workers. Only the HTTP call is stubbed; the client, the publisher
+    # and the worker loop are the real ones.
+    final = [_row(10, "completed", home=28, away=10, period=4, clock="00:00")]
+    answers = iter(
+        [
+            SimpleNamespace(status_code=502, headers={}, text="Bad gateway"),
+            SimpleNamespace(
+                status_code=200,
+                headers={"X-CallLimit-Remaining": "5000"},
+                json=lambda: final,
+            ),
+        ]
+    )
+    client = CFBDClient("test")
+    monkeypatch.setattr(client.session, "get", lambda *a, **k: next(answers))
+    publisher, _, written = _publisher([_game(10)], [])
+    publisher.fetch_board = lambda: client.get("/scoreboard", retries=1, timeout=15)
+
+    run(
+        publisher,
+        watch=True,
+        interval=30,
+        sleep=lambda seconds: None,
+        now=lambda: KICKOFF + timedelta(hours=3),
+    )
+    assert client.calls_used == 2 and written[-1]["abstract_state"] == "Final"

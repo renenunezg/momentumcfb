@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
-from backend.cfbd.client import CFBDError
+from backend.cfbd.client import CFBDError, CFBDUnavailable
 from backend.model.ingame import (
     MODEL_VERSION,
     REGULATION_SECONDS,
@@ -371,9 +371,13 @@ def run(
         started = monotonic()
         try:
             more = publisher.poll(now())
-        except CFBDError:
-            # A spent or refused quota must stop the worker, not loop on it.
-            raise
+        except CFBDError as exc:
+            # A spent or refused quota must stop the worker, not loop on it; a
+            # gateway error only costs this poll.
+            if not watch or not isinstance(exc, CFBDUnavailable):
+                raise
+            log.warning("%s; previous snapshots age visibly on the site", exc)
+            more = True
         except Exception:
             if not watch:
                 raise
