@@ -13,6 +13,10 @@ class CFBDError(RuntimeError):
     pass
 
 
+class CFBDUnavailable(CFBDError):
+    """A server or gateway error outlasted the retries; the quota is unaffected."""
+
+
 log = logging.getLogger(__name__)
 
 
@@ -150,21 +154,28 @@ class CFBDClient:
             self._persist_usage()
             resp = self.session.get(url, params=params, timeout=timeout)
             remaining = resp.headers.get("X-CallLimit-Remaining")
-            try:
-                self.remaining = int(remaining) if remaining is not None else None
-            except (TypeError, ValueError):
-                self.remaining = None
-            self.quota_unreported = self.remaining is None
+            # A gateway error page is answered in front of CFBD and carries no
+            # quota header; it says nothing about the quota, so the count stands.
+            if remaining is not None or resp.status_code < 500:
+                try:
+                    self.remaining = int(remaining) if remaining is not None else None
+                except (TypeError, ValueError):
+                    self.remaining = None
+                self.quota_unreported = self.remaining is None
             self._persist_usage()
             if resp.status_code == 429:
                 if attempt < retries - 1:
                     time.sleep(5 * (attempt + 1))
                     continue
                 raise CFBDError(f"GET {path} rate limited after {retries} attempts")
-            if resp.status_code >= 500 and attempt < retries - 1:
-                # Gateway errors clear within seconds; the call is idempotent.
-                time.sleep(10 * (attempt + 1))
-                continue
+            if resp.status_code >= 500:
+                if attempt < retries - 1:
+                    # Gateway errors clear within seconds; the call is idempotent.
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                raise CFBDUnavailable(
+                    f"GET {path} returned {resp.status_code}: {resp.text[:200]}"
+                )
             if resp.status_code != 200:
                 raise CFBDError(
                     f"GET {path} returned {resp.status_code}: {resp.text[:200]}"
