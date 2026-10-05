@@ -1,7 +1,7 @@
 """Output-only market context for pregame projections.
 
-The pure model remains the source of team ratings and of the pure score,
-margin, and total columns that picks, grading, and evaluation read. These
+The fitted model supplies the independent score, margin, and total inputs.
+Published ratings, picks, and live grading use the market-informed forecast. These
 helpers add separately named market-informed margin, total, and score columns,
 which are the forecast the site publishes, so consumers cannot mistake a
 blended number for the model's independent opinion.
@@ -106,6 +106,9 @@ def add_market_informed_margins(
         }
         if "game_id" in offers
         else {}
+    )
+    out["market_total_weight"] = np.where(
+        market_total.notna(), TOTAL_MARKET_WEIGHT, 0.0
     )
     blended_total = np.where(
         market_total.notna(),

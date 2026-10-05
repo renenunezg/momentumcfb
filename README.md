@@ -166,3 +166,18 @@ The weekly runner requires that reviewed bundle, validates the prior before paid
 - FCS teams have less complete preseason data and carry wider uncertainty.
 - The 2026 live performance sample is small early in the season and is reported with its game count rather than as a conclusion.
 - The project does not automate wagers, size positions, or claim profitability.
+
+
+## Database recovery and release contract
+
+The secret-free schema snapshot in `sql/baseline/2026_10_05.sql` restores the deployed schema as inspected on October 5, 2026, without production rows.
+On an empty Supabase project, install `momentumweb/sql/001_site_revalidate.sql` first, restore this baseline with `psql -X -v ON_ERROR_STOP=1`, then apply 020_decision_forecast.sql and 021_site_revalidate.sql from `sql`.
+The baseline includes the earlier migrations; do not replay those on top of it.
+The shared function requires pg_net and Vault, with `site_revalidate_secret` provisioned separately and matched to the site's `REVALIDATE_SECRET`.
+A plain PostgreSQL test database needs the `anon`, `authenticated`, and `service_role` roles and a local callback substitute.
+Production schema changes require separate approval.
+
+New forecast publication reads only a completed, hash-verified run directory.
+Late quarterback reports produce a separately recorded `decision_forecast` containing published inputs, adjusted inputs, and the reports available at decision time.
+Existing recommended picks remain frozen.
+Older forecasts without `market_total_weight` cannot be safely reconstructed from totals alone and must be republished from source artifacts before adjusting late totals.

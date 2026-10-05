@@ -87,6 +87,10 @@ def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
         market_weight=0.5,
         market_informed_home_margin=[0.0, -4.0],
         market_informed_home_spread=[0.0, 4.0],
+        market_informed_total=[48.5, 49.0],
+        market_total_weight=[0.0, 0.5],
+        market_informed_home_points=[24.25, 22.5],
+        market_informed_away_points=[24.25, 26.5],
     )
     decided = apply_qb_availability(
         published,
@@ -101,6 +105,16 @@ def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
     assert game.pure_home_margin == -7 + QB_OUT_POSTSEASON_POINTS
     assert game.market_informed_home_margin == -4 + 0.5 * QB_OUT_POSTSEASON_POINTS
     assert game.qb_availability_points == QB_OUT_POSTSEASON_POINTS
+    assert game.market_informed_total == 47.0
+    assert (
+        game.market_informed_home_points + game.market_informed_away_points
+        == game.market_informed_total
+    )
+    assert (
+        game.market_informed_home_points - game.market_informed_away_points
+        == game.market_informed_home_margin
+    )
+    assert published.iloc[1].market_informed_total == 49.0
 
     # Reproduced on the calibrated California-Wagner projection: a 0.55-point
     # away score was floored at zero but the margin and total still moved 1.5.

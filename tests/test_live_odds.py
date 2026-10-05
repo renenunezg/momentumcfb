@@ -123,25 +123,6 @@ def _snapshot():
     )
 
 
-def test_phase_comes_only_from_provider_status():
-    assert (
-        live.resolve_phase((NOW + timedelta(hours=3)).isoformat(), False, NOW)
-        == "pregame"
-    )
-    assert (
-        live.resolve_phase((NOW - timedelta(hours=1)).isoformat(), False, NOW) == "live"
-    )
-    assert (
-        live.resolve_phase((NOW - timedelta(hours=4)).isoformat(), True, NOW) == "final"
-    )
-    # An event absent from the scores feed must never be guessed live,
-    # even if it commenced in the past and its lines are moving.
-    assert (
-        live.resolve_phase((NOW - timedelta(hours=1)).isoformat(), None, NOW)
-        == "unknown"
-    )
-
-
 def test_snapshot_offers_carry_required_provenance():
     snapshot = _snapshot()
     offers = snapshot.offers

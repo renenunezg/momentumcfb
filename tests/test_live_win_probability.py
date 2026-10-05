@@ -69,13 +69,30 @@ def test_polling_starts_at_kickoff_and_stops_at_the_final():
     live = written[-1]
     assert live["abstract_state"] == "Live" and live["home_win_probability"] > 0.8
 
+    for minute, replacement in enumerate(
+        [
+            [],
+            [_row(10, "completed", home=None, away=7)],
+            [_row(10, "suspended", home=14, away=0)],
+        ],
+        1,
+    ):
+        board[:] = replacement
+        assert publisher.poll(KICKOFF + timedelta(hours=3, minutes=minute))
+        assert written[-1]["abstract_state"] == "Live"
+        assert 10 not in publisher.done
+    saved = written[-1]
+    publisher, calls, written = _publisher([_game(10)], board)
+    publisher.load_saved = lambda ids: {10: saved}
+    board[:] = [_row(10, "completed", home=28, away=10, period=4, clock="00:00")]
+
     board[0] = _row(10, "completed", home=28, away=10, period=4, clock="00:00")
-    assert not publisher.poll(KICKOFF + timedelta(hours=3))
+    assert not publisher.poll(KICKOFF + timedelta(hours=3, minutes=4))
     assert written[-1]["home_win_probability"] == 1.0
     assert [p["s"] for p in written[-1]["history"]] == [0, 1350, 3600]
 
     spent, rows = len(calls), len(written)
-    assert not publisher.poll(KICKOFF + timedelta(hours=3, minutes=1))
+    assert not publisher.poll(KICKOFF + timedelta(hours=3, minutes=5))
     assert (len(calls), len(written)) == (spent, rows)
 
 

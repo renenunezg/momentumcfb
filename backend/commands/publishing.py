@@ -60,13 +60,69 @@ def handle_refresh_picks(args: Namespace) -> None:
     # was made adjusts only the lines these fresh prices are decided against.
     decided_at = datetime.now(timezone.utc)
     games = store.read_games(args.season)
+    published = projections.copy()
+    availability = fetch_qb_availability(args.season)
     projections = apply_qb_availability(
         projections,
-        pregame_qb_outs(
-            fetch_qb_availability(args.season), args.season, args.week, decided_at
-        ),
+        pregame_qb_outs(availability, args.season, args.week, decided_at),
         set(games.loc[games["season_type"].eq("postseason"), "id"]),
     )
+    # Persist both views with each fresh decision, including the exact reports
+    # that were eligible at its cutoff. Existing recommended picks stay frozen.
+    import json
+
+    forecast_columns = [
+        "game_id",
+        "as_of",
+        "model_total",
+        "home_margin",
+        "expected_home_points",
+        "expected_away_points",
+        "market_informed_home_margin",
+        "market_informed_total",
+        "market_informed_home_points",
+        "market_informed_away_points",
+        "market_total_weight",
+        "home_qb_out",
+        "away_qb_out",
+        "qb_availability_points",
+    ]
+    reports = (
+        availability[
+            pd.to_datetime(availability["reported_at"], utc=True).lt(decided_at)
+            & availability["season"].eq(args.season)
+            & availability["week"].eq(args.week)
+        ]
+        if not availability.empty
+        else availability
+    )
+    original_rows = json.loads(
+        published.reindex(columns=forecast_columns).to_json(
+            orient="records", date_format="iso"
+        )
+    )
+    adjusted_rows = json.loads(
+        projections.reindex(columns=forecast_columns).to_json(
+            orient="records", date_format="iso"
+        )
+    )
+    report_rows = json.loads(reports.to_json(orient="records", date_format="iso"))
+    projections["decision_forecast"] = [
+        {
+            "version": 1,
+            "decision_at": decided_at.isoformat(),
+            "published": original,
+            "adjusted": adjusted,
+            "availability": [
+                report
+                for report in report_rows
+                if report.get("team") in (game.home_team, game.away_team)
+            ],
+        }
+        for original, adjusted, game in zip(
+            original_rows, adjusted_rows, projections.itertuples()
+        )
+    ]
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     store.write_processed(
         offers,

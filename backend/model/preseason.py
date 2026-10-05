@@ -484,6 +484,7 @@ def load_preseason_ratings(season: int, week: int = 1) -> tuple[pd.DataFrame, st
             raise FileNotFoundError(
                 f"no published preseason ratings for {season} Week {week}"
             )
+        ratings["power_rating"] = ratings["offense_points"] + ratings["defense_points"]
         return ratings, "published_team_ratings"
 
 
@@ -1281,6 +1282,7 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
         "odds_match_coverage": odds_match_coverage,
         "source_manifest": manifest,
     }
+    outputs["forecast_schedule"] = sources["games"]
     log_directory = store.write_forecast_outputs(
         "preseason",
         season,

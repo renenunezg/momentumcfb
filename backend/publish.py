@@ -128,6 +128,7 @@ GAME_PROJECTIONS_OPTIONAL_COLUMNS = [
     "market_history_home_margin",
     "market_history_weight",
     "market_informed_total",
+    "market_total_weight",
     "market_informed_home_points",
     "market_informed_away_points",
 ]
@@ -302,13 +303,27 @@ def load_teams(season: int) -> pd.DataFrame:
     return _serving_frame(out, TEAMS_COLUMNS)
 
 
-def load_team_ratings(source: str, season: int, week: int) -> pd.DataFrame:
-    path = _artifact_dir(source, "ratings") / f"{season}_{week:02d}.parquet"
+def load_team_ratings(
+    source: str, season: int, week: int, run_directory=None
+) -> pd.DataFrame:
+    path = (
+        run_directory / "ratings.parquet"
+        if run_directory
+        else _artifact_dir(source, "ratings") / f"{season}_{week:02d}.parquet"
+    )
     # The preseason run keeps its market-free prior under ``ratings`` and
     # writes the ratings to publish beside it.
-    published = _artifact_dir(source, "published_ratings") / path.name
+    published = (
+        run_directory / "published_ratings.parquet"
+        if run_directory
+        else _artifact_dir(source, "published_ratings") / path.name
+    )
     ratings = pd.read_parquet(published if published.exists() else path)
-    market_path = _artifact_dir(source, "market_ratings") / path.name
+    market_path = (
+        run_directory / "market_ratings.parquet"
+        if run_directory
+        else _artifact_dir(source, "market_ratings") / path.name
+    )
     if market_path.exists():
         market = pd.read_parquet(market_path)
         if not market.empty:
@@ -327,26 +342,41 @@ def load_team_ratings(source: str, season: int, week: int) -> pd.DataFrame:
     return _serving_frame(ratings, TEAM_RATINGS_COLUMNS)
 
 
-def load_team_unit_ratings(source: str, season: int, week: int) -> pd.DataFrame:
-    path = _artifact_dir(source, "unit_ratings") / f"{season}_{week:02d}.parquet"
+def load_team_unit_ratings(
+    source: str, season: int, week: int, run_directory=None
+) -> pd.DataFrame:
+    path = (
+        run_directory / "unit_ratings.parquet"
+        if run_directory
+        else _artifact_dir(source, "unit_ratings") / f"{season}_{week:02d}.parquet"
+    )
     return _serving_frame(pd.read_parquet(path), TEAM_UNIT_RATINGS_COLUMNS)
 
 
-def load_game_projections(source: str, season: int, week: int) -> pd.DataFrame:
-    path = _artifact_dir(source, "projections") / f"{season}_{week:02d}.parquet"
+def load_game_projections(
+    source: str, season: int, week: int, run_directory=None
+) -> pd.DataFrame:
+    path = (
+        run_directory / "projections.parquet"
+        if run_directory
+        else _artifact_dir(source, "projections") / f"{season}_{week:02d}.parquet"
+    )
     projections = pd.read_parquet(path)
-    # conference_game is absent from the forecast artifact; read it from the
-    # schedule snapshot rather than inferring it from conference names.
+    # Use the schedule captured by the same completed forecast run.
     schedule_path = (
-        RAW_DIR / "preseason" / str(season) / "games.parquet"
+        run_directory / "forecast_schedule.parquet"
+        if run_directory
+        else RAW_DIR / "preseason" / str(season) / "games.parquet"
         if source == "preseason"
         else RAW_DIR / "games" / f"{season}.parquet"
     )
     if schedule_path.exists():
-        schedule = pd.read_parquet(schedule_path, columns=["id", "conference_game"])
-        projections["conference_game"] = projections["game_id"].map(
-            schedule.set_index("id")["conference_game"]
-        )
+        schedule = pd.read_parquet(schedule_path)
+        if "conference_game" in schedule:
+            key = "game_id" if "game_id" in schedule else "id"
+            projections["conference_game"] = projections["game_id"].map(
+                schedule.set_index(key)["conference_game"]
+            )
     return _serving_frame(
         projections,
         [*GAME_PROJECTIONS_COLUMNS, *GAME_PROJECTIONS_OPTIONAL_COLUMNS],
@@ -376,9 +406,15 @@ def _table_columns(conn, table: str) -> set[str]:
     }
 
 
-def load_market_comparisons(source: str, season: int, week: int) -> pd.DataFrame:
+def load_market_comparisons(
+    source: str, season: int, week: int, run_directory=None
+) -> pd.DataFrame:
     directory = _artifact_dir(source, "market_comparisons")
-    path = directory / f"{season}_{week:02d}.parquet"
+    path = (
+        run_directory / "market_comparisons.parquet"
+        if run_directory
+        else directory / f"{season}_{week:02d}.parquet"
+    )
     return _serving_frame(pd.read_parquet(path), MARKET_COMPARISONS_COLUMNS)
 
 
@@ -527,13 +563,18 @@ def publish(
     # Team identity comes from the preseason /teams snapshot, which an
     # in-season fit publish does not produce; skip it rather than fail.
     teams = load_teams(season) if teams_path(season).exists() else None
-    ratings = load_team_ratings(source, season, week)
+    from backend.etl.store import completed_forecast_run
+
+    run_directory = completed_forecast_run(
+        "preseason" if source == "preseason" else "weekly", season, week
+    )
+    ratings = load_team_ratings(source, season, week, run_directory)
     try:
-        unit_ratings = load_team_unit_ratings(source, season, week)
+        unit_ratings = load_team_unit_ratings(source, season, week, run_directory)
     except FileNotFoundError:
         unit_ratings = None
-    projections = load_game_projections(source, season, week)
-    market = load_market_comparisons(source, season, week)
+    projections = load_game_projections(source, season, week, run_directory)
+    market = load_market_comparisons(source, season, week, run_directory)
     backtest = load_backtest_predictions() if include_backtest else None
 
     # Delete projections by game id, not by week, so a game that moved weeks
@@ -543,9 +584,7 @@ def publish(
     from backend.odds.markets import OFFER_COLUMNS
     from backend.recommendations import build_recommendations
 
-    offers_path = (
-        _artifact_dir(source, "market_offers") / f"{season}_{week:02d}.parquet"
-    )
+    offers_path = run_directory / "market_offers.parquet"
     offers = (
         pd.read_parquet(offers_path)
         if offers_path.exists()
@@ -824,6 +863,11 @@ def _publish_recommendations(conn, decisions):
     if decisions.empty:
         return 0
     rows = _serving_frame(decisions, RECOMMENDATION_COLUMNS)
+    import json
+
+    rows["decision_forecast"] = rows["decision_forecast"].map(
+        lambda value: json.dumps(value, allow_nan=False) if value is not None else None
+    )
     existing = pd.read_sql_query(
         text(
             "SELECT game_id, market, start_date, status, outcome, side, "
@@ -851,7 +895,10 @@ def _publish_recommendations(conn, decisions):
         ].to_dict("records"),
     )
     columns = ", ".join(RECOMMENDATION_COLUMNS)
-    values = ", ".join(f":{c}" for c in RECOMMENDATION_COLUMNS)
+    values = ", ".join(
+        "CAST(:decision_forecast AS jsonb)" if c == "decision_forecast" else f":{c}"
+        for c in RECOMMENDATION_COLUMNS
+    )
     updates = ", ".join(
         f"{c} = excluded.{c}"
         for c in RECOMMENDATION_COLUMNS

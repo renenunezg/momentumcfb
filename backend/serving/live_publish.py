@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 PROBABILITY_SOURCE = "pregame_anchored_game_state"
-CALLED_OFF = {"postponed", "canceled", "cancelled", "forfeit", "suspended"}
+CALLED_OFF = {"postponed", "canceled", "cancelled", "forfeit"}
 TERMINAL_STATES = {"Final", "Off"}
 # The dispatcher treats a row newer than four minutes as a living worker.
 HEARTBEAT_SECONDS = 120
@@ -139,6 +139,7 @@ def score_game(
     now: datetime,
     *,
     board_fetched: bool,
+    previously_live: bool = False,
 ) -> dict:
     """One game's serving payload from its scoreboard row and frozen anchor."""
     pregame = _probability(
@@ -155,7 +156,7 @@ def score_game(
         "game_id": game.game_id,
         "season": game.season,
         "week": game.week,
-        "abstract_state": "Pre",
+        "abstract_state": "Live" if previously_live else "Pre",
         "status": "scheduled",
         "home_team": game.home_team,
         "away_team": game.away_team,
@@ -186,11 +187,14 @@ def score_game(
         result["abstract_state"] = "Off"
         return unavailable("Game was called off")
     if row is None or status not in ACTIVE | FINAL:
-        if now - game.start > NO_START_LIMIT:
+        if (
+            status == "scheduled"
+            and not previously_live
+            and now - game.start > NO_START_LIMIT
+        ):
             result["abstract_state"] = "Off"
             return unavailable("Game did not start")
-        return result
-    result["abstract_state"] = "Final" if status in FINAL else "Live"
+        return unavailable("Scoreboard is temporarily unavailable")
     try:
         home_team, away_team = row["homeTeam"], row["awayTeam"]
         if (home_team["id"], away_team["id"]) != (
@@ -230,6 +234,7 @@ def score_game(
             )
     except (KeyError, TypeError, ValueError) as exc:
         return unavailable(str(exc))
+    result["abstract_state"] = "Final" if status in FINAL else "Live"
     result.update(
         home_win_probability=probability, away_win_probability=1 - probability
     )
@@ -269,6 +274,7 @@ class LivePublisher:
         self.history: dict[int, list[dict]] = {}
         self.written: dict[int, tuple[str, datetime]] = {}
         self.done: set[int] = set()
+        self.observed_live: set[int] = set()
         self.next_schedule: datetime | None = None
 
     def _refresh_schedule(self, now: datetime) -> None:
@@ -293,6 +299,8 @@ class LivePublisher:
                     model_version=anchor["model_version"],
                 )
                 self.history[game_id] = payload["history"]
+                if payload["abstract_state"] == "Live":
+                    self.observed_live.add(game_id)
                 if payload["abstract_state"] in TERMINAL_STATES:
                     self.done.add(game_id)
             self.games[game_id] = game
@@ -301,6 +309,7 @@ class LivePublisher:
             self.history.pop(game_id, None)
             self.written.pop(game_id, None)
             self.done.discard(game_id)
+            self.observed_live.discard(game_id)
         self.next_schedule = now + timedelta(seconds=SCHEDULE_REFRESH_SECONDS)
 
     def poll(self, now: datetime) -> bool:
@@ -323,9 +332,12 @@ class LivePublisher:
                 self.history.get(game.game_id, []),
                 now,
                 board_fetched=board_fetched and game.start <= now,
+                previously_live=game.game_id in self.observed_live,
             )
             payload["worker_expires_at"] = self.expires_at
             self.history[game.game_id] = payload["history"]
+            if payload["abstract_state"] == "Live":
+                self.observed_live.add(game.game_id)
             terminal = payload["abstract_state"] in TERMINAL_STATES
             signature = _signature(payload)
             previous = self.written.get(game.game_id)

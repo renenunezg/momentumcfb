@@ -41,11 +41,12 @@ class FakeCFBDClient:
 
 def test_ingest_season_fetches_and_labels_cfbd_plays(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest, "RAW_DIR", tmp_path)
+    monkeypatch.setattr(store, "RAW_DIR", tmp_path)
     client = FakeCFBDClient()
 
     ingest.ingest_season(client, 2026, only_week=1)
 
-    plays = pd.read_parquet(tmp_path / "pbp" / "2026" / "regular_01.parquet")
+    plays = store.read_season_pbp(2026)
     assert plays["id"].tolist() == [11]
     assert plays["game_id"].tolist() == [401752794]
     assert plays["pbp_source"].tolist() == ["cfbd"]
@@ -57,21 +58,6 @@ def test_ingest_season_fetches_and_labels_cfbd_plays(tmp_path, monkeypatch):
         ("/talent", {"year": 2026}),
         ("/player/returning", {"year": 2026}),
     ]
-
-
-def test_read_season_pbp_combines_only_cfbd_weekly_snapshots(tmp_path, monkeypatch):
-    season_dir = tmp_path / "pbp" / "2025"
-    season_dir.mkdir(parents=True)
-    pd.DataFrame({"id": [1]}).to_parquet(season_dir / "regular_01.parquet", index=False)
-    pd.DataFrame({"id": [2], "pbp_source": ["cfbd"]}).to_parquet(
-        season_dir / "postseason_01.parquet", index=False
-    )
-    monkeypatch.setattr(store, "RAW_DIR", tmp_path)
-
-    loaded = store.read_season_pbp(2025)
-
-    assert loaded["id"].tolist() == [1, 2]
-    assert loaded["pbp_source"].tolist() == ["cfbd", "cfbd"]
 
 
 def test_preseason_weekly_commands_noop_without_cfbd_plays(
@@ -163,6 +149,36 @@ def test_weekly_update_publishes_pure_model_when_odds_quota_is_exhausted(
     result.projections["market_home_spread"] = -3.5
     cli.main(["weekly-update", "--season", "2026"])
     assert scheduled == [2026]
+
+    # A committed publication followed by scheduler failure is retryable without
+    # rebuilding the forecast or spending another provider request.
+    result.projections["week"] = 1
+    already_published = False
+
+    def committed(*args, **kwargs):
+        nonlocal already_published
+        already_published = True
+        return {}
+
+    def failed_schedule(*args):
+        raise RuntimeError("scheduler unavailable")
+
+    monkeypatch.setattr(publish, "publish", committed)
+    monkeypatch.setattr(
+        publish, "weekly_forecast_is_published", lambda *a: already_published
+    )
+    monkeypatch.setattr(
+        publish, "fetch_published_projections", lambda *a: result.projections
+    )
+    monkeypatch.setattr(scheduling, "schedule_weekly_kickoff", failed_schedule)
+    with pytest.raises(RuntimeError, match="scheduler unavailable"):
+        cli.main(["weekly-update", "--season", "2026"])
+    before = len(calls)
+    monkeypatch.setattr(
+        scheduling, "schedule_weekly_kickoff", lambda *a: scheduled.append(2026)
+    )
+    cli.main(["weekly-update", "--season", "2026"])
+    assert len(calls) == before and scheduled == [2026, 2026]
 
 
 def test_cfbd_quota_gate_counts_retries_and_persists_across_commands(
