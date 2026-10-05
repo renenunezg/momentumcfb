@@ -78,6 +78,7 @@ def handle_weekly_update(args: Namespace) -> None:
     from backend.odds.client import OddsAPIClient, OddsAPIError
     from backend.publish import (
         ensure_recommendation_schema,
+        fetch_published_projections,
         fetch_qb_availability,
         publish,
         weekly_forecast_is_published,
@@ -101,8 +102,16 @@ def handle_weekly_update(args: Namespace) -> None:
     ):
         log.info(
             f"weekly update already published for {args.season} "
-            f"model Week {forecast_week}; no changes made"
+            f"model Week {forecast_week}; reconciling kickoff capture"
         )
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            from backend.odds.scheduling import schedule_weekly_kickoff
+
+            projections = fetch_published_projections(args.season)
+            projections = projections[projections["week"].eq(forecast_week)]
+            if projections["market_home_spread"].notna().any():
+                dispatch_at = schedule_weekly_kickoff(projections, args.season)
+                log.info(f"kickoff capture reconciled for {dispatch_at}")
         return
     qb_availability = fetch_qb_availability(args.season)
     try:

@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -67,10 +69,38 @@ def write_forecast_outputs(
         PROCESSED_DIR / kind / "forecast_log" / f"{season}_{week:02d}_{timestamp}"
     )
     log_directory.mkdir(parents=True, exist_ok=True)
+    hashes = {}
+    for name, frame in outputs.items():
+        path = log_directory / f"{name}.parquet"
+        frame.to_parquet(path, index=False)
+        hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    # Publication switches to this complete immutable run with one rename.
+    manifest = {"directory": log_directory.name, "files": hashes}
+    pointer = log_directory.parent / f"{season}_{week:02d}.json"
+    temporary = pointer.with_name(f".{log_directory.name}.json")
+    temporary.write_text(json.dumps(manifest, sort_keys=True))
+    temporary.replace(pointer)
     for name, frame in outputs.items():
         write_processed(frame, *canonical_prefix, name, filename)
-        frame.to_parquet(log_directory / f"{name}.parquet", index=False)
     return log_directory
+
+
+def completed_forecast_run(kind: str, season: int, week: int) -> Path:
+    root = PROCESSED_DIR / kind / "forecast_log"
+    manifest = json.loads((root / f"{season}_{week:02d}.json").read_text())
+    directory = root / manifest["directory"]
+    if directory.parent != root or not manifest["files"]:
+        raise ValueError("Invalid completed forecast manifest")
+    for name, digest in manifest["files"].items():
+        path = directory / name
+        if (
+            path.parent != directory
+            or hashlib.sha256(path.read_bytes()).hexdigest() != digest
+        ):
+            raise ValueError(
+                f"Forecast artifact differs from its completed run: {name}"
+            )
+    return directory
 
 
 def read_preseason_forecast_artifact(

@@ -17,6 +17,15 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
 
     steps:
       - name: Check out repository
@@ -50,5 +59,17 @@ jobs:
       - name: Compile Python
         run: poetry run python -m compileall -q backend tests
 
+      - name: Restore the serving contract in disposable PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -X -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role;
+          CREATE FUNCTION public.site_revalidate() RETURNS trigger
+          LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+          SQL
+          psql -X -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -f sql/baseline/2026_10_05.sql -f sql/020_decision_forecast.sql -f sql/021_site_revalidate.sql
       - name: Run tests
+        env:
+          CFB_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
         run: poetry run pytest -q

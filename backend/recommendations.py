@@ -11,7 +11,7 @@ from backend.model.distributions import marginal_cdf
 from backend.model.market_blend import consensus_total
 from backend.odds.markets import _american_profit, priced_candidates
 
-POLICY_VERSION = "cfb-picks-v7"
+POLICY_VERSION = "cfb-picks-v8"
 # Minimum points the priced line must sit beyond the offered price's
 # break-even line. Measured in margin or total points, the same yardstick for
 # favourites and underdogs, so a mispriced tail cannot clear the gate on one
@@ -56,6 +56,7 @@ RECOMMENDATION_COLUMNS = [
     "away_team",
     "model_version",
     "forecast_as_of",
+    "decision_forecast",
     "home_missing_input_count",
     "away_missing_input_count",
     "policy_version",
@@ -251,8 +252,8 @@ def build_recommendations(projections, offers, *, decision_at=None):
     """One best eligible side per game and market, or an explicit No Play.
 
     Sides use the published market-informed margin and totals the published
-    market-informed total, so every edge is measured after shrinking toward
-    the market and every pick agrees with the forecast the site shows. Each
+    market-informed total. A late QB report creates a separately recorded
+    decision forecast without rewriting the published original. Each
     pick records the median posted total at decision time.
     Moneylines are priced from the consensus market margin moved
     H2H_MODEL_WEIGHT toward the pure model. Everything is priced with the
@@ -293,8 +294,8 @@ def build_recommendations(projections, offers, *, decision_at=None):
             subset=["price"]
         )
         candidates = priced_candidates(projection, game_offers)
-        # Totals are priced from the published total, the same number the
-        # site shows, the way spreads are priced from the published line. The
+        # The supplied forecast is either the published original or the
+        # recorded availability-adjusted decision forecast. The
         # median posted total at decision time is recorded for reference.
         market_total = consensus_total(game_offers)
         priced_projection = projection._replace(
@@ -323,6 +324,7 @@ def build_recommendations(projections, offers, *, decision_at=None):
             row.update(
                 market=market,
                 forecast_as_of=forecast,
+                decision_forecast=getattr(projection, "decision_forecast", None),
                 decision_at=now,
                 policy_version=POLICY_VERSION,
                 status="no_play",

@@ -113,6 +113,21 @@ def apply_qb_availability(
         )
         out["market_informed_home_spread"] = -out["market_informed_home_margin"]
     out["model_total"] = out["model_total"] - home_loss - away_loss
+    if "market_informed_total" in out:
+        if "market_total_weight" not in out or out["market_total_weight"].isna().any():
+            raise ValueError(
+                "Late availability requires a published market_total_weight; republish the forecast first"
+            )
+        weights = pd.to_numeric(out["market_total_weight"], errors="raise")
+        if not weights.between(0, 1).all():
+            raise ValueError("Invalid published total blend weight")
+        margin = out["market_informed_home_margin"]
+        out["market_informed_total"] = np.maximum(
+            out["market_informed_total"] - (1 - weights) * (home_loss + away_loss),
+            margin.abs(),
+        )
+        out["market_informed_home_points"] = (out["market_informed_total"] + margin) / 2
+        out["market_informed_away_points"] = (out["market_informed_total"] - margin) / 2
     return out
 
 
