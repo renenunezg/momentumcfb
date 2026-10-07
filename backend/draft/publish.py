@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import io
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -82,9 +83,32 @@ def current_depth(season, now, receipts):
         "pos_slot",
         "pos_rank",
         "player_name",
+        "espn_id",
         "apy_cap_pct",
     ]
     return normalize_depth(records(depth[columns])), depth.depth_as_of.min().isoformat()
+
+
+def attach_prospect_ids(board, catalog):
+    """Join portraits by an exact school/name identity, never a guessed CDN id."""
+
+    def key(name, school):
+        name = (
+            "Brauntae Johnson"
+            if name == "Tae Johnson" and school == "Notre Dame"
+            else name
+        )
+        return re.sub(r"[^a-z0-9]", "", name.casefold()), school
+
+    identities = {}
+    for player in catalog:
+        identities.setdefault(key(player["athlete_name"], player["team"]), set()).add(
+            player["athlete_id"]
+        )
+    for prospect in board["prospects"]:
+        matches = identities.get(key(prospect["name"], prospect["school"]), set())
+        if len(matches) == 1:
+            prospect["athlete_id"] = next(iter(matches))
 
 
 def publish(season, bootstrap=None, dry_run=False):
@@ -139,6 +163,7 @@ def publish(season, bootstrap=None, dry_run=False):
         )
     else:
         raise ValueError("Initial publication requires an audited bootstrap directory")
+    attach_prospect_ids(board, catalog)
     # The latest published college record owns team and position. Catalog-only
     # players remain searchable but never inherit a stale score after a transfer.
     measured = values[values.classification.eq("fbs")][PLAYER_COLUMNS].copy()
