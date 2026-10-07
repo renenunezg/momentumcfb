@@ -68,3 +68,40 @@ def test_captured_sources_preserve_owners_and_deduplicate_real_player():
     )
     with pytest.raises(ValueError, match="32 unique"):
         parse_board(pages, seed, now)
+
+
+def test_portrait_identity_never_uses_name_alone_or_ambiguous_matches():
+    from backend.draft.publish import attach_prospect_ids
+
+    board = {
+        "prospects": [
+            {"name": "Jeremiah Smith", "school": "Ohio State"},
+            {"name": "Tae Johnson", "school": "Notre Dame"},
+            {"name": "Duplicate Name", "school": "USC"},
+        ]
+    }
+    catalog = [
+        {
+            "athlete_name": "Jeremiah Smith",
+            "team": "Louisiana Tech",
+            "athlete_id": "wrong",
+        },
+        {
+            "athlete_name": "Jeremiah Smith",
+            "team": "Ohio State",
+            "athlete_id": "5079720",
+        },
+        {
+            "athlete_name": "Brauntae Johnson",
+            "team": "Notre Dame",
+            "athlete_id": "verified-alias",
+        },
+        {"athlete_name": "Duplicate Name", "team": "USC", "athlete_id": "one"},
+        {"athlete_name": "Duplicate Name", "team": "USC", "athlete_id": "two"},
+    ]
+    attach_prospect_ids(board, catalog)
+    assert [p.get("athlete_id") for p in board["prospects"]] == [
+        "5079720",
+        "verified-alias",
+        None,
+    ]
