@@ -1,0 +1,818 @@
+{
+  "edition": "2027-2026-10-07",
+  "season": 2027,
+  "order_date": "2026-10-06",
+  "rank_date": "2026-10-03",
+  "needs_date": "2026-10-01",
+  "sources": {
+    "order": "https://profootballmania.com/nfl-draft/order/",
+    "rank": "https://profootballmania.com/nfl-draft/big-board/",
+    "needs": "https://profootballmania.com/nfl-draft/team-needs/"
+  },
+  "teams": {
+    "HOU": {
+      "name": "Houston Texans",
+      "needs": [
+        "OT",
+        "IOL",
+        "WR"
+      ]
+    },
+    "TEN": {
+      "name": "Tennessee Titans",
+      "needs": [
+        "WR",
+        "IOL",
+        "CB"
+      ]
+    },
+    "TB": {
+      "name": "Tampa Bay Buccaneers",
+      "needs": [
+        "QB",
+        "DT",
+        "LB"
+      ]
+    },
+    "LAC": {
+      "name": "Los Angeles Chargers",
+      "needs": [
+        "DT",
+        "CB",
+        "EDGE"
+      ]
+    },
+    "MIA": {
+      "name": "Miami Dolphins",
+      "needs": [
+        "QB",
+        "WR",
+        "CB"
+      ]
+    },
+    "NYJ": {
+      "name": "New York Jets",
+      "needs": [
+        "QB",
+        "CB",
+        "EDGE"
+      ]
+    },
+    "NO": {
+      "name": "New Orleans Saints",
+      "needs": [
+        "IOL",
+        "EDGE",
+        "QB"
+      ]
+    },
+    "WAS": {
+      "name": "Washington Commanders",
+      "needs": [
+        "CB",
+        "IOL",
+        "EDGE"
+      ]
+    },
+    "ARI": {
+      "name": "Arizona Cardinals",
+      "needs": [
+        "QB",
+        "OT",
+        "EDGE"
+      ]
+    },
+    "CIN": {
+      "name": "Cincinnati Bengals",
+      "needs": [
+        "EDGE",
+        "DT",
+        "LB"
+      ]
+    },
+    "DAL": {
+      "name": "Dallas Cowboys",
+      "needs": [
+        "EDGE",
+        "CB",
+        "RB"
+      ]
+    },
+    "IND": {
+      "name": "Indianapolis Colts",
+      "needs": [
+        "QB",
+        "WR",
+        "DT"
+      ]
+    },
+    "PIT": {
+      "name": "Pittsburgh Steelers",
+      "needs": [
+        "QB",
+        "OT",
+        "S"
+      ]
+    },
+    "GB": {
+      "name": "Green Bay Packers",
+      "needs": [
+        "CB",
+        "OT",
+        "DT"
+      ]
+    },
+    "DET": {
+      "name": "Detroit Lions",
+      "needs": [
+        "CB",
+        "EDGE",
+        "OT"
+      ]
+    },
+    "PHI": {
+      "name": "Philadelphia Eagles",
+      "needs": [
+        "OT",
+        "TE",
+        "S"
+      ]
+    },
+    "ATL": {
+      "name": "Atlanta Falcons",
+      "needs": [
+        "OT",
+        "CB",
+        "EDGE"
+      ]
+    },
+    "DEN": {
+      "name": "Denver Broncos",
+      "needs": [
+        "DT",
+        "LB",
+        "TE"
+      ]
+    },
+    "CAR": {
+      "name": "Carolina Panthers",
+      "needs": [
+        "CB",
+        "EDGE",
+        "IOL"
+      ]
+    },
+    "NE": {
+      "name": "New England Patriots",
+      "needs": [
+        "WR",
+        "OT",
+        "EDGE"
+      ]
+    },
+    "LA": {
+      "name": "Los Angeles Rams",
+      "needs": [
+        "QB",
+        "OT",
+        "LB"
+      ]
+    },
+    "BAL": {
+      "name": "Baltimore Ravens",
+      "needs": [
+        "EDGE",
+        "S",
+        "IOL"
+      ]
+    },
+    "JAX": {
+      "name": "Jacksonville Jaguars",
+      "needs": [
+        "CB",
+        "OT",
+        "S"
+      ]
+    },
+    "CLE": {
+      "name": "Cleveland Browns",
+      "needs": [
+        "QB",
+        "WR",
+        "OT"
+      ]
+    },
+    "BUF": {
+      "name": "Buffalo Bills",
+      "needs": [
+        "CB",
+        "DT",
+        "EDGE"
+      ]
+    },
+    "NYG": {
+      "name": "New York Giants",
+      "needs": [
+        "QB",
+        "IOL",
+        "DT"
+      ]
+    },
+    "LV": {
+      "name": "Las Vegas Raiders",
+      "needs": [
+        "QB",
+        "WR",
+        "CB"
+      ]
+    },
+    "CHI": {
+      "name": "Chicago Bears",
+      "needs": [
+        "DT",
+        "EDGE",
+        "IOL"
+      ]
+    },
+    "SEA": {
+      "name": "Seattle Seahawks",
+      "needs": [
+        "OT",
+        "EDGE",
+        "IOL"
+      ]
+    },
+    "MIN": {
+      "name": "Minnesota Vikings",
+      "needs": [
+        "DT",
+        "QB",
+        "CB"
+      ]
+    },
+    "KC": {
+      "name": "Kansas City Chiefs",
+      "needs": [
+        "TE",
+        "OT",
+        "EDGE"
+      ]
+    },
+    "SF": {
+      "name": "San Francisco 49ers",
+      "needs": [
+        "OT",
+        "CB",
+        "IOL"
+      ]
+    }
+  },
+  "picks": [
+    {
+      "pick": 1,
+      "original": "HOU",
+      "owner": "HOU",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 2,
+      "original": "TEN",
+      "owner": "TEN",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 3,
+      "original": "TB",
+      "owner": "TB",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 4,
+      "original": "LAC",
+      "owner": "LAC",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 5,
+      "original": "MIA",
+      "owner": "MIA",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 6,
+      "original": "NYJ",
+      "owner": "NYJ",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 7,
+      "original": "NO",
+      "owner": "NO",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 8,
+      "original": "WAS",
+      "owner": "WAS",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 9,
+      "original": "ARI",
+      "owner": "ARI",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 10,
+      "original": "CIN",
+      "owner": "CIN",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 11,
+      "original": "DAL",
+      "owner": "NYJ",
+      "ownership_note": "Earlier of Dallas and Green Bay firsts to New York; Dallas retains the later pick.",
+      "ownership_source": "https://www.nfl.com/news/jets-trade-dt-quinnen-williams-to-cowboys-for-first-round-pick",
+      "playoff_projection": false
+    },
+    {
+      "pick": 12,
+      "original": "IND",
+      "owner": "NYJ",
+      "ownership_note": "Indianapolis first to New York in the Sauce Gardner trade.",
+      "ownership_source": "https://www.nfl.com/news/sauce-gardner-trade-jets-colts-two-first-round-picks",
+      "playoff_projection": false
+    },
+    {
+      "pick": 13,
+      "original": "PIT",
+      "owner": "PIT",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 14,
+      "original": "GB",
+      "owner": "DAL",
+      "ownership_note": "Green Bay first acquired for Micah Parsons. Dallas retains this later pick under the Williams condition.",
+      "ownership_source": "https://www.nfl.com/news/micah-parsons-packers-cowboys-trade",
+      "playoff_projection": false
+    },
+    {
+      "pick": 15,
+      "original": "DET",
+      "owner": "DET",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 16,
+      "original": "PHI",
+      "owner": "PHI",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 17,
+      "original": "ATL",
+      "owner": "ATL",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 18,
+      "original": "DEN",
+      "owner": "DEN",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": false
+    },
+    {
+      "pick": 19,
+      "original": "CAR",
+      "owner": "CAR",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 20,
+      "original": "NE",
+      "owner": "NE",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 21,
+      "original": "LA",
+      "owner": "CLE",
+      "ownership_note": "Rams first to Cleveland in the Myles Garrett trade.",
+      "ownership_source": "https://www.nfl.com/news/myles-garrett-trade-winners-and-losers-rams-super-bowl-ready-what-can-jared-verse-do-with-browns",
+      "playoff_projection": true
+    },
+    {
+      "pick": 22,
+      "original": "BAL",
+      "owner": "BAL",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 23,
+      "original": "JAX",
+      "owner": "JAX",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 24,
+      "original": "CLE",
+      "owner": "CLE",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 25,
+      "original": "BUF",
+      "owner": "BUF",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 26,
+      "original": "NYG",
+      "owner": "NYG",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 27,
+      "original": "LV",
+      "owner": "LV",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 28,
+      "original": "CHI",
+      "owner": "CHI",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 29,
+      "original": "SEA",
+      "owner": "SEA",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 30,
+      "original": "MIN",
+      "owner": "MIN",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 31,
+      "original": "KC",
+      "owner": "KC",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    },
+    {
+      "pick": 32,
+      "original": "SF",
+      "owner": "SF",
+      "ownership_note": "Own first-round pick.",
+      "ownership_source": "https://profootballmania.com/nfl-draft/order/",
+      "playoff_projection": true
+    }
+  ],
+  "prospects": [
+    {
+      "id": "jeremiah-smith",
+      "name": "Jeremiah Smith",
+      "position": "WR",
+      "school": "Ohio State",
+      "rank": 1
+    },
+    {
+      "id": "leonard-moore",
+      "name": "Leonard Moore",
+      "position": "CB",
+      "school": "Notre Dame",
+      "rank": 2
+    },
+    {
+      "id": "colin-simmons",
+      "name": "Colin Simmons",
+      "position": "EDGE",
+      "school": "Texas",
+      "rank": 3
+    },
+    {
+      "id": "dylan-stewart",
+      "name": "Dylan Stewart",
+      "position": "EDGE",
+      "school": "South Carolina",
+      "rank": 4
+    },
+    {
+      "id": "arch-manning",
+      "name": "Arch Manning",
+      "position": "QB",
+      "school": "Texas",
+      "rank": 5
+    },
+    {
+      "id": "dante-moore",
+      "name": "Dante Moore",
+      "position": "QB",
+      "school": "Oregon",
+      "rank": 6
+    },
+    {
+      "id": "cam-coleman",
+      "name": "Cam Coleman",
+      "position": "WR",
+      "school": "Texas",
+      "rank": 7
+    },
+    {
+      "id": "trevor-goosby",
+      "name": "Trevor Goosby",
+      "position": "OT",
+      "school": "Texas",
+      "rank": 8
+    },
+    {
+      "id": "jordan-seaton",
+      "name": "Jordan Seaton",
+      "position": "OT",
+      "school": "LSU",
+      "rank": 9
+    },
+    {
+      "id": "ellis-robinson-iv",
+      "name": "Ellis Robinson IV",
+      "position": "CB",
+      "school": "Georgia",
+      "rank": 10
+    },
+    {
+      "id": "a-mauri-washington",
+      "name": "A'Mauri Washington",
+      "position": "DT",
+      "school": "Oregon",
+      "rank": 11
+    },
+    {
+      "id": "jadan-baugh",
+      "name": "Jadan Baugh",
+      "position": "RB",
+      "school": "Florida",
+      "rank": 12
+    },
+    {
+      "id": "k-j-bolden",
+      "name": "K.J. Bolden",
+      "position": "S",
+      "school": "Georgia",
+      "rank": 13
+    },
+    {
+      "id": "david-stone",
+      "name": "David Stone",
+      "position": "DT",
+      "school": "Oklahoma",
+      "rank": 14
+    },
+    {
+      "id": "will-echoles",
+      "name": "Will Echoles",
+      "position": "DT",
+      "school": "Ole Miss",
+      "rank": 15
+    },
+    {
+      "id": "charlie-becker",
+      "name": "Charlie Becker",
+      "position": "WR",
+      "school": "Indiana",
+      "rank": 16
+    },
+    {
+      "id": "yhonzae-pierre",
+      "name": "Yhonzae Pierre",
+      "position": "EDGE",
+      "school": "Alabama",
+      "rank": 17
+    },
+    {
+      "id": "jamari-johnson",
+      "name": "Jamari Johnson",
+      "position": "TE",
+      "school": "Oregon",
+      "rank": 18
+    },
+    {
+      "id": "julian-sayin",
+      "name": "Julian Sayin",
+      "position": "QB",
+      "school": "Ohio State",
+      "rank": 19
+    },
+    {
+      "id": "kelley-jones",
+      "name": "Kelley Jones",
+      "position": "CB",
+      "school": "Mississippi State",
+      "rank": 20
+    },
+    {
+      "id": "trinidad-chambliss",
+      "name": "Trinidad Chambliss",
+      "position": "QB",
+      "school": "Ole Miss",
+      "rank": 21
+    },
+    {
+      "id": "ashton-hampton",
+      "name": "Ashton Hampton",
+      "position": "CB",
+      "school": "Clemson",
+      "rank": 22
+    },
+    {
+      "id": "justin-scott",
+      "name": "Justin Scott",
+      "position": "DT",
+      "school": "Miami",
+      "rank": 23
+    },
+    {
+      "id": "c-j-carr",
+      "name": "C.J. Carr",
+      "position": "QB",
+      "school": "Notre Dame",
+      "rank": 24
+    },
+    {
+      "id": "trevor-lauck",
+      "name": "Trevor Lauck",
+      "position": "OT",
+      "school": "Iowa",
+      "rank": 25
+    },
+    {
+      "id": "darian-mensah",
+      "name": "Darian Mensah",
+      "position": "QB",
+      "school": "Miami",
+      "rank": 26
+    },
+    {
+      "id": "kewan-lacy",
+      "name": "Kewan Lacy",
+      "position": "RB",
+      "school": "Ole Miss",
+      "rank": 27
+    },
+    {
+      "id": "trey-dez-green",
+      "name": "Trey'Dez Green",
+      "position": "TE",
+      "school": "LSU",
+      "rank": 28
+    },
+    {
+      "id": "drew-mestemaker",
+      "name": "Drew Mestemaker",
+      "position": "QB",
+      "school": "Oklahoma State",
+      "rank": 29
+    },
+    {
+      "id": "brauntae-johnson",
+      "name": "Brauntae Johnson",
+      "position": "S",
+      "school": "Notre Dame",
+      "rank": 30
+    },
+    {
+      "id": "cayden-green",
+      "name": "Cayden Green",
+      "position": "OT",
+      "school": "Missouri",
+      "rank": 32
+    },
+    {
+      "id": "matayo-uiagalelei",
+      "name": "Matayo Uiagalelei",
+      "position": "EDGE",
+      "school": "Oregon",
+      "rank": 33
+    },
+    {
+      "id": "sammy-brown",
+      "name": "Sammy Brown",
+      "position": "LB",
+      "school": "Clemson",
+      "rank": 34
+    },
+    {
+      "id": "ryan-coleman-williams",
+      "name": "Ryan Coleman-Williams",
+      "position": "WR",
+      "school": "Alabama",
+      "rank": 35
+    },
+    {
+      "id": "chris-cole",
+      "name": "Chris Cole",
+      "position": "LB",
+      "school": "Georgia",
+      "rank": 36
+    },
+    {
+      "id": "a-j-holmes-jr",
+      "name": "A.J. Holmes Jr.",
+      "position": "DT",
+      "school": "Texas Tech",
+      "rank": 37
+    },
+    {
+      "id": "nick-marsh",
+      "name": "Nick Marsh",
+      "position": "WR",
+      "school": "Indiana",
+      "rank": 38
+    },
+    {
+      "id": "greg-johnson",
+      "name": "Greg Johnson",
+      "position": "IOL",
+      "school": "Minnesota",
+      "rank": 39
+    },
+    {
+      "id": "ahmad-hardy",
+      "name": "Ahmad Hardy",
+      "position": "RB",
+      "school": "Missouri",
+      "rank": 40
+    },
+    {
+      "id": "jayden-maiava",
+      "name": "Jayden Maiava",
+      "position": "QB",
+      "school": "USC",
+      "rank": null,
+      "source": "https://ultimatebigboard.com/nfl/2027/players/jayden-maiava/",
+      "note": "Additional scenario option requested by the user. Outside the imported PFM top 40; not assigned a comparable rank."
+    }
+  ],
+  "corrections": [
+    {
+      "note": "PFM ranks Brauntae Johnson and Tae Johnson separately at 30 and 31. They are the same player; retain rank 30 only.",
+      "source": "https://fightingirish.com/sports/football/roster/player/tae-johnson"
+    }
+  ]
+}
