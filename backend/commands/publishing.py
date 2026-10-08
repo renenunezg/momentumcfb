@@ -32,7 +32,7 @@ def handle_refresh_picks(args: Namespace) -> None:
     from backend.etl import store
     from backend.model.availability import apply_qb_availability, pregame_qb_outs
     from backend.model.weekly import odds_frames
-    from backend.odds.client import OddsAPIClient
+    from backend.odds.client import pregame_odds_client
     from backend.publish import (
         CFB_SCHEMA,
         _publish_recommendations,
@@ -53,7 +53,7 @@ def handle_refresh_picks(args: Namespace) -> None:
         )
     if projections.empty:
         raise ValueError(f"no published projections for {args.season} week {args.week}")
-    _, offers, matches, snapshot = odds_frames(OddsAPIClient(), projections)
+    _, offers, matches, snapshot = odds_frames(pregame_odds_client(), projections)
     # The decision is timed after the prices arrive: an offer fetched after
     # the decision timestamp would otherwise read as stale and block every
     # pick. The published forecast stays frozen; an absence reported since it

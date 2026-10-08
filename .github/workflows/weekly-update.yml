@@ -66,6 +66,7 @@ jobs:
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       ODDS_API_BOOKMAKERS: ${{ secrets.ODDS_API_BOOKMAKERS }}
       ODDS_API_REGIONS: ${{ secrets.ODDS_API_REGIONS }}
+      ODDS_SOURCE: ${{ vars.ODDS_SOURCE || 'odds_api' }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       HEISMAN_MODEL_RUN_ID: ${{ inputs.heisman_model_run_id || vars.HEISMAN_MODEL_RUN_ID }}
       OPENING_FORECAST_RUN_ID: ${{ inputs.opening_forecast_run_id || vars.OPENING_FORECAST_RUN_ID }}

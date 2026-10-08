@@ -75,7 +75,7 @@ def handle_weekly_update(args: Namespace) -> None:
         resolve_ready_forecast_week,
         run_weekly_forecast,
     )
-    from backend.odds.client import OddsAPIClient, OddsAPIError
+    from backend.odds.client import OddsAPIError, pregame_odds_client
     from backend.publish import (
         ensure_recommendation_schema,
         fetch_published_projections,
@@ -119,7 +119,7 @@ def handle_weekly_update(args: Namespace) -> None:
             result = run_weekly_forecast(
                 args.season,
                 forecast_week,
-                odds_client=OddsAPIClient(),
+                odds_client=pregame_odds_client(),
                 require_market=True,
                 as_of=as_of,
                 qb_availability=qb_availability,
@@ -408,7 +408,7 @@ def handle_preseason(args: Namespace) -> None:
     from backend.cfbd.client import CFBDClient
     from backend.etl.ingest import ingest_preseason_sources
     from backend.model.preseason import run_preseason_forecast
-    from backend.odds.client import OddsAPIClient, OddsAPIError
+    from backend.odds.client import OddsAPIError, pregame_odds_client
 
     if args.with_odds_api and not args.refresh:
         raise SystemExit("--with-odds-api requires --refresh")
@@ -416,7 +416,7 @@ def handle_preseason(args: Namespace) -> None:
         odds_client = None
         if args.with_odds_api:
             try:
-                odds_client = OddsAPIClient()
+                odds_client = pregame_odds_client()
             except OddsAPIError as exc:
                 raise SystemExit(str(exc)) from exc
         ingest_preseason_sources(CFBDClient(), args.season, odds_client=odds_client)
