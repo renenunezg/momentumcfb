@@ -111,7 +111,9 @@ def attach_prospect_ids(board, catalog):
             prospect["athlete_id"] = next(iter(matches))
 
 
-def publish(season, bootstrap=None, dry_run=False):
+def publish(season, bootstrap=None, dry_run=False, output=None):
+    if output is not None and not dry_run:
+        raise ValueError("Local output requires --dry-run")
     from backend.db import engine
 
     now = datetime.now(timezone.utc)
@@ -185,7 +187,7 @@ def publish(season, bootstrap=None, dry_run=False):
     if len({p["athlete_id"] for p in players}) != len(players):
         raise ValueError("Duplicate college player identities")
     payload = dict(
-        schema_version=1,
+        schema_version=2,
         board=board,
         roster=depth,
         players=players,
@@ -201,6 +203,8 @@ def publish(season, bootstrap=None, dry_run=False):
         ),
     )
     encoded = json.dumps(payload, allow_nan=False, separators=(",", ":"))
+    if output is not None:
+        output.write_text(encoded)
     if not dry_run:
         with engine.begin() as connection:
             connection.execute(
@@ -226,5 +230,12 @@ if __name__ == "__main__":
     parser.add_argument("--season", type=int, required=True)
     parser.add_argument("--bootstrap", type=Path)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--output", type=Path, help="Save a dry-run publication for local review"
+    )
     args = parser.parse_args()
-    print(json.dumps(publish(args.season, args.bootstrap, args.dry_run), indent=2))
+    print(
+        json.dumps(
+            publish(args.season, args.bootstrap, args.dry_run, args.output), indent=2
+        )
+    )

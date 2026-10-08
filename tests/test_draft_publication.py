@@ -50,19 +50,36 @@ def test_captured_sources_preserve_owners_and_deduplicate_real_player():
     pages = json.loads(Path("tests/fixtures/draft/source_tables.json").read_text())
     now = datetime(2026, 10, 7, tzinfo=timezone.utc)
     board = parse_board(pages, seed, now)
-    assert [p["pick"] for p in board["picks"]] == list(range(1, 33))
-    assert [p["pick"] for p in board["picks"] if p["owner"] == "NYJ"] == [6, 11, 12]
+    assert [p["pick"] for p in board["picks"]] == list(range(1, 258))
+    assert {p["round"] for p in board["picks"]} == set(range(1, 8))
+    assert [
+        p["pick"] for p in board["picks"] if p["owner"] == "NYJ" and p["round"] == 1
+    ] == [6, 11, 12]
     assert board["picks"][13]["original"] == "GB"
     assert board["picks"][13]["owner"] == "DAL"
     assert board["picks"][20]["owner"] == "CLE"
-    assert len(board["prospects"]) == 40
-    assert len({p["id"] for p in board["prospects"]}) == 40
+    assert len(board["prospects"]) == 323
+    assert len({p["id"] for p in board["prospects"]}) == 323
     assert [
         p["name"]
         for p in board["prospects"]
-        if p["school"] == "Notre Dame" and p["position"] == "S"
+        if p["school"] == "Notre Dame" and "Johnson" in p["name"]
     ] == ["Tae Johnson"]
     assert board["teams"]["HOU"]["needs"] == ["OT", "IOL", "WR"]
+    assert any(p["compensatory"] for p in board["picks"])
+    assert board["picks"][-1]["round"] == 7
+    from copy import deepcopy
+
+    incomplete = deepcopy(pages)
+    incomplete["capital"] = incomplete["capital"].replace(
+        "R7 · No. 257", "R7 · No. 256"
+    )
+    with pytest.raises(ValueError, match="Missing or duplicate"):
+        parse_board(incomplete, seed, now)
+    incomplete = deepcopy(pages)
+    incomplete["rank"] = incomplete["rank"].replace('"boardData"', '"missingData"')
+    with pytest.raises(ValueError, match="Missing complete scouting board"):
+        parse_board(incomplete, seed, now)
     pages["order"] = pages["order"].replace(
         'pfm-draft-pick-no">1<', 'pfm-draft-pick-no">2<', 1
     )

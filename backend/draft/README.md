@@ -8,14 +8,14 @@ The frontend reads only Supabase and owns mock-selection behavior and presentati
 
 `Refresh draft board` runs after a successful `Weekly CFB update` on main, with a separate manual dispatch for recovery.
 It reads the latest already-published college player values without making additional CFBD calls.
-Each run retrieves three Pro Football Mania pages and two nflverse files: current depth charts and contracts.
-It validates the draft year, all 32 pick slots and original teams, every team's three priorities, prospect identities within the source board, supported position codes, and source freshness before one atomic upsert.
+Each run retrieves three Pro Football Mania pages, the full Scouting Grade board, and two nflverse files: current depth charts and contracts.
+It validates the draft year, seven complete rounds with unique native picks, sequential overall slots, agreement with the first-round order, every team's three priorities, unique prospect identities and ranks, supported position codes, and source freshness before one atomic upsert.
 Failures preserve the previous publication and fail the workflow.
 The database's statement trigger invalidates the site's CFB cache.
 
 ```sh
 # Validate current sources without publishing.
-poetry run python -m backend.draft.publish --season 2026 --dry-run
+poetry run python -m backend.draft.publish --season 2026 --dry-run --output /tmp/draft-publication.json
 
 # Publish deliberately; DATABASE_URL is production.
 MOMENTUMCFB_DB_WRITES=1 poetry run python -m backend.draft.publish --season 2026
@@ -36,9 +36,14 @@ These are depth-chart role mappings, not observed snap-by-snap alignments.
 Nickelback, fullback, and special-teams roles are separate package options, not extra simultaneous starters.
 Unknown codes or defensive packages fail publication for review.
 
-PFM supplies provisional order, current pick owners, editorial needs, and scouting ranks.
-Ranks 1-40 contain one duplicate identity: Notre Dame confirms Brauntae and Tae Johnson are the same player.
-The published board retains Tae Johnson once, plus Jayden Maiava as an unranked custom option.
+PFM supplies provisional order, all-round pick ownership, projected compensatory selections, and editorial needs.
+Scouting Grade supplies the complete prospect ranking; the October 5 board contains 323 unique prospects, including Jayden Maiava.
+Notre Dame confirms Brauntae and Tae Johnson are the same player, displayed as Tae Johnson.
+The October 2 ownership assessment contains 257 projected picks across seven rounds; compensatory picks remain explicitly provisional.
+The publisher emits schema version 2 with each pick's round and compensatory status.
+Deploy the frontend that accepts both versions 1 and 2, then apply `sql/20261007224645_draft_publication_seven_rounds.sql` before publishing version 2.
+The migration preserves version 1 rows and changes only the supported payload-version check.
+The dry-run output supports local review without changing the public edition.
 College source positions can be broader than projected NFL roles, such as OL versus OT or IOL.
 Priority numbers mean importance, not how many players are needed.
 The mock rules are transparent heuristics, not a validated selection forecast.

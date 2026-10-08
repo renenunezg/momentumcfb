@@ -1,6 +1,7 @@
 """Read the published scouting board, provisional pick ownership, and team priorities."""
 
 import copy
+import json
 import re
 from datetime import datetime
 
@@ -24,13 +25,17 @@ def reviewed_date(soup, prefix, now):
 def parse_board(pages, seed, now):
     board = copy.deepcopy(seed)
     soups = {key: BeautifulSoup(value, "html.parser") for key, value in pages.items()}
-    for soup in soups.values():
-        heading = soup.find("h1")
+    for source, soup in soups.items():
+        heading = soup.title if source == "rank" and soup.title else soup.find("h1")
         if not heading or str(board["season"]) not in heading.get_text():
             raise ValueError("Draft year changed; a reviewed new edition is required")
     names = {v["name"]: k for k, v in board["teams"].items()}
     board["order_date"] = reviewed_date(soups["order"], "Updated", now)
-    board["rank_date"] = reviewed_date(soups["rank"], "Big Board reviewed", now)
+    board["rank_date"] = reviewed_date(soups["rank"], "Board updated", now)
+    board["ownership_date"] = reviewed_date(
+        soups["capital"], "Pick ownership reviewed", now
+    )
+    board["rank_source"] = "Scouting Grade"
     board["needs_date"] = reviewed_date(soups["needs"], "Needs reviewed", now)
     picks = []
     for row in soups["order"].select(
@@ -43,6 +48,8 @@ def parse_board(pages, seed, now):
         picks.append(
             dict(
                 pick=pick,
+                round=1,
+                compensatory=False,
                 original=original,
                 owner=owner,
                 ownership_note="Own first-round pick."
@@ -72,42 +79,98 @@ def parse_board(pages, seed, now):
         seen.add(team)
     if seen != set(board["teams"]):
         raise ValueError("Missing team priorities")
+    projected_originals = {p["original"] for p in picks if p["playoff_projection"]}
+    full_picks = []
+    seen_teams = set()
+    aliases = {"LAR": "LA", "WSH": "WAS"}
+    for card in soups["capital"].select(".pfm-draft-capital-team-card"):
+        owner = names[
+            card.select_one(".pfm-draft-team-name-line > strong").get_text(strip=True)
+        ]
+        if owner in seen_teams:
+            raise ValueError("Duplicate pick ownership team")
+        seen_teams.add(owner)
+        for chip in card.select(".pfm-draft-pick-chip"):
+            match = re.fullmatch(
+                r"R([1-7]) · No\. (\d+)", chip.strong.get_text(strip=True)
+            )
+            if not match:
+                raise ValueError("Unrecognized pick number or round")
+            round_number, number = map(int, match.groups())
+            note = chip.small.get_text(strip=True)
+            compensatory = note == "Projected comp"
+            if note in ("Own pick", "Projected comp"):
+                original = owner
+            elif note.startswith("via "):
+                original = aliases.get(note[4:], note[4:])
+            else:
+                raise ValueError("Unrecognized pick ownership note")
+            if original not in board["teams"]:
+                raise ValueError("Unknown original pick owner")
+            full_picks.append(
+                dict(
+                    pick=number,
+                    round=round_number,
+                    owner=owner,
+                    original=original,
+                    compensatory=compensatory,
+                    ownership_note="Projected compensatory pick; not yet awarded."
+                    if compensatory
+                    else note,
+                    ownership_source=board["sources"]["capital"],
+                    playoff_projection=original in projected_originals
+                    and not compensatory,
+                )
+            )
+    full_picks.sort(key=lambda p: p["pick"])
+    if seen_teams != set(board["teams"]) or not 224 <= len(full_picks) <= 272:
+        raise ValueError("Incomplete seven-round pick ownership")
+    if [p["pick"] for p in full_picks] != list(range(1, len(full_picks) + 1)):
+        raise ValueError("Missing or duplicate overall pick numbers")
+    if [p["round"] for p in full_picks] != sorted(p["round"] for p in full_picks):
+        raise ValueError("Draft rounds are out of order")
+    for round_number in range(1, 8):
+        native = [
+            p["original"]
+            for p in full_picks
+            if p["round"] == round_number and not p["compensatory"]
+        ]
+        if len(native) != 32 or set(native) != set(board["teams"]):
+            raise ValueError("Expected 32 unique native picks in each round")
+    firsts = [p for p in full_picks if p["round"] == 1]
+    if [(p["pick"], p["original"], p["owner"]) for p in firsts] != [
+        (p["pick"], p["original"], p["owner"]) for p in picks
+    ]:
+        raise ValueError("First-round order and full pick ownership disagree")
+    board["picks"] = full_picks
+    data = soups["rank"].select_one("#boardData")
+    if data is None:
+        raise ValueError("Missing complete scouting board")
     prospects = []
-    seen = set()
-    ranks = set()
-    for row in soups["rank"].select("[data-pfm-big-board-row]"):
-        rank = int(row.select_one('[data-label="Rank"] strong').get_text(strip=True))
-        if rank > 40:
-            continue
-        name = row.select_one('[data-label="Prospect"] strong').get_text(strip=True)
-        school = row.select_one('[data-label="School"]').get_text(strip=True)
-        position = row["data-position"]
-        # Notre Dame confirms Brauntae and Tae Johnson are the same player.
+    for row in json.loads(data.get_text()):
+        if not isinstance(row, list) or len(row) < 6:
+            raise ValueError("Changed scouting board format")
+        identifier, name, position, school, _, rank = row[:6]
+        if position not in POSITIONS or not isinstance(rank, int) or rank < 1:
+            raise ValueError("Unreviewed position or invalid scouting rank")
         if school == "Notre Dame" and name == "Brauntae Johnson":
             name = "Tae Johnson"
-        key = (name.casefold(), school.casefold())
-        if key in seen:
-            continue
-        if position not in POSITIONS or rank in ranks:
-            raise ValueError("Unreviewed prospect position or duplicate scouting rank")
-        seen.add(key)
-        ranks.add(rank)
         prospects.append(
-            dict(
-                id=re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"),
-                name=name,
-                school=school,
-                position=position,
-                rank=rank,
-            )
+            dict(id=identifier, name=name, school=school, position=position, rank=rank)
         )
-    if len(prospects) < 39 or len({p["id"] for p in prospects}) != len(prospects):
+    prospects.sort(key=lambda p: p["rank"])
+    identities = {
+        (re.sub(r"[^a-z0-9]", "", p["name"].casefold()), p["school"]) for p in prospects
+    }
+    if (
+        len(prospects) < len(full_picks)
+        or len({p["id"] for p in prospects}) != len(prospects)
+        or len(identities) != len(prospects)
+        or [p["rank"] for p in prospects] != list(range(1, len(prospects) + 1))
+    ):
         raise ValueError("Incomplete or ambiguous scouting board")
-    for player in seed["prospects"]:
-        if player["rank"] is None and player["id"] not in {p["id"] for p in prospects}:
-            prospects.append(player)
     board["prospects"] = prospects
     board["edition"] = (
-        f"{board['season']}-{'-'.join(board[k] for k in ('order_date', 'rank_date', 'needs_date'))}"
+        f"{board['season']}-seven-round-{'-'.join(board[k] for k in ('order_date', 'rank_date', 'needs_date', 'ownership_date'))}"
     )
     return board
