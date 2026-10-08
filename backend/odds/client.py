@@ -175,3 +175,15 @@ class OddsAPIClient:
             requests_used=_header_int(response, "x-requests-used"),
             request_cost=_header_int(response, "x-requests-last"),
         )
+
+
+def pregame_odds_client():
+    """The Odds API, unless ODDS_SOURCE=espn selects the fallback feed."""
+    source = os.getenv("ODDS_SOURCE", "odds_api")
+    if source == "espn":
+        from backend.odds.espn import EspnOddsClient
+
+        return EspnOddsClient()
+    if source == "odds_api":
+        return OddsAPIClient()
+    raise ValueError(f"ODDS_SOURCE must be 'odds_api' or 'espn', got {source!r}")
