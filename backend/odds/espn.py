@@ -1,18 +1,26 @@
 """DraftKings pregame odds from ESPN's public scoreboard feed.
 
 Fallback for when The Odds API monthly quota is exhausted. Selected with
-ODDS_SOURCE=espn; unset that variable to return to The Odds API. Events are
-returned in The Odds API's shape, so offer flattening and grading are unchanged.
-ESPN carries one book and no quote timestamp, so each price is stamped with
-the fetch time. Kickoff capture stays on The Odds API: it needs that
-provider's event ids, scores feed, and quota provenance.
+ODDS_SOURCE=espn; unset that variable to return to The Odds API. Events,
+odds, and game states are returned in The Odds API's shapes, so offer
+flattening, kickoff capture, and grading are unchanged.
+
+ESPN differs from The Odds API in three ways callers rely on:
+- It carries one book, so the consensus is DraftKings alone.
+- It has no quote timestamp, so each price is stamped with the read time.
+- It is unmetered, so every quota field is None.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 
-from backend.odds.client import OddsAPIError, OddsSnapshot
+from backend.odds.client import (
+    EventsSnapshot,
+    OddsAPIError,
+    OddsSnapshot,
+    ScoreboardSnapshot,
+)
 
 ESPN_SCOREBOARD_URL = (
     "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard"
@@ -22,6 +30,8 @@ ESPN_GROUPS = (80, 81)
 # ESPN's provider id is stable while its display name is not ("DraftKings" and
 # "Draft Kings" both appear). Map the id to The Odds API's key and title.
 ESPN_BOOKMAKERS = {"100": ("draftkings", "DraftKings")}
+# Events, odds, and scores of one capture poll come from a single read.
+SCOREBOARD_REUSE_SECONDS = 30
 
 
 def _price(quote: dict) -> int | None:
@@ -76,7 +86,138 @@ def _markets(odds: dict, home_team: str, away_team: str, updated: str) -> list[d
     ]
 
 
+def _commence(event: dict) -> datetime:
+    return datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
+
+
+def _teams(event: dict) -> dict[str, str]:
+    return {
+        competitor["homeAway"]: competitor["team"]["displayName"]
+        for competitor in event["competitions"][0]["competitors"]
+    }
+
+
+def _started(event: dict, as_of: datetime) -> bool:
+    return event["status"]["type"]["state"] != "pre" or _commence(event) <= as_of
+
+
+def _bookmakers(event: dict, updated: str) -> list[dict]:
+    teams = _teams(event)
+    bookmakers = []
+    for odds in event["competitions"][0].get("odds") or []:
+        provider = str((odds.get("provider") or {}).get("id"))
+        if provider not in ESPN_BOOKMAKERS:
+            continue
+        key, title = ESPN_BOOKMAKERS[provider]
+        bookmakers.append(
+            {
+                "key": key,
+                "title": title,
+                "last_update": updated,
+                "markets": _markets(odds, teams["home"], teams["away"], updated),
+            }
+        )
+    return bookmakers
+
+
+def _identity(event: dict) -> dict:
+    teams = _teams(event)
+    return {
+        "id": f"espn-{event['id']}",
+        "commence_time": _commence(event).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "home_team": teams["home"],
+        "away_team": teams["away"],
+    }
+
+
 class EspnOddsClient:
+    def __init__(self):
+        self._reads: dict[date, tuple[datetime, list[dict]]] = {}
+
+    def _day(self, day: date) -> tuple[datetime, list[dict]]:
+        cached = self._reads.get(day)
+        if cached is not None:
+            age = (datetime.now(timezone.utc) - cached[0]).total_seconds()
+            if age < SCOREBOARD_REUSE_SECONDS:
+                return cached
+        events = []
+        for group in ESPN_GROUPS:
+            try:
+                response = requests.get(
+                    ESPN_SCOREBOARD_URL,
+                    params={
+                        "dates": day.strftime("%Y%m%d"),
+                        "groups": group,
+                        "limit": 300,
+                    },
+                    timeout=60,
+                )
+            except requests.RequestException as error:
+                raise OddsAPIError(
+                    f"The ESPN odds request failed: {type(error).__name__}"
+                ) from None
+            if response.status_code != 200:
+                raise OddsAPIError(f"ESPN returned {response.status_code}")
+            try:
+                events.extend(response.json()["events"])
+            except (ValueError, KeyError, TypeError):
+                raise OddsAPIError(
+                    "ESPN returned an unexpected scoreboard body"
+                ) from None
+        self._reads[day] = (datetime.now(timezone.utc), events)
+        return self._reads[day]
+
+    def _scoreboard(
+        self, first: datetime, last: datetime
+    ) -> tuple[datetime, list[dict]]:
+        """Every event from the days spanning a window, with the oldest read time.
+
+        ESPN serves one US date per request and rejects date ranges, so the
+        span starts a day early and callers filter to their exact window.
+        """
+        day = first.astimezone(timezone.utc).date() - timedelta(days=1)
+        fetched_at = None
+        events: dict[str, dict] = {}
+        while day <= last.astimezone(timezone.utc).date():
+            read_at, day_events = self._day(day)
+            fetched_at = read_at if fetched_at is None else min(fetched_at, read_at)
+            events.update({event["id"]: event for event in day_events})
+            day += timedelta(days=1)
+        return fetched_at, list(events.values())
+
+    def get_ncaaf_events(
+        self, commence_from: datetime, commence_to: datetime
+    ) -> EventsSnapshot:
+        """Games in the window that are priced or already started.
+
+        An unpriced future game is not a capture target. A started game stays
+        listed after ESPN stops pricing it so its game state is still recorded.
+        """
+        if commence_from.tzinfo is None or commence_to.tzinfo is None:
+            raise ValueError("odds query timestamps must be timezone-aware")
+        fetched_at, scoreboard = self._scoreboard(commence_from, commence_to)
+        updated = fetched_at.isoformat()
+        events = [
+            _identity(event)
+            for event in scoreboard
+            if commence_from <= _commence(event) <= commence_to
+            and (
+                _started(event, fetched_at)
+                or any(
+                    market["key"] == "spreads"
+                    for bookmaker in _bookmakers(event, updated)
+                    for market in bookmaker["markets"]
+                )
+            )
+        ]
+        return EventsSnapshot(
+            events=events,
+            fetched_at=fetched_at,
+            requests_remaining=None,
+            requests_used=None,
+            request_cost=None,
+        )
+
     def get_ncaaf_odds(
         self,
         commence_from: datetime,
@@ -89,85 +230,26 @@ class EspnOddsClient:
             raise ValueError("odds query timestamps must be timezone-aware")
         if not markets:
             raise ValueError("at least one odds market is required")
-        # ESPN serves one US date per request and rejects date ranges; widen a
-        # day and filter to the exact window below.
-        day = commence_from.astimezone(timezone.utc).date() - timedelta(days=1)
-        scoreboard = {}
-        while day <= commence_to.astimezone(timezone.utc).date():
-            for group in ESPN_GROUPS:
-                try:
-                    response = requests.get(
-                        ESPN_SCOREBOARD_URL,
-                        params={
-                            "dates": day.strftime("%Y%m%d"),
-                            "groups": group,
-                            "limit": 300,
-                        },
-                        timeout=60,
-                    )
-                except requests.RequestException as error:
-                    raise OddsAPIError(
-                        f"The ESPN odds request failed: {type(error).__name__}"
-                    ) from None
-                if response.status_code != 200:
-                    raise OddsAPIError(f"ESPN returned {response.status_code}")
-                try:
-                    scoreboard.update(
-                        {event["id"]: event for event in response.json()["events"]}
-                    )
-                except (ValueError, KeyError, TypeError):
-                    raise OddsAPIError(
-                        "ESPN returned an unexpected scoreboard body"
-                    ) from None
-            day += timedelta(days=1)
-
-        fetched_at = datetime.now(timezone.utc)
+        fetched_at, scoreboard = self._scoreboard(commence_from, commence_to)
         updated = fetched_at.isoformat()
         events = []
-        for event in scoreboard.values():
-            event_id = f"espn-{event['id']}"
-            if event_ids and event_id not in event_ids:
+        for event in scoreboard:
+            identity = _identity(event)
+            if event_ids and identity["id"] not in event_ids:
                 continue
-            # Started games carry live or closing lines, never a pregame offer.
-            if event["status"]["type"]["state"] != "pre":
+            # Once a game starts ESPN shows its closing line, never a live offer.
+            if _started(event, fetched_at):
                 continue
-            commence = datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
-            if not commence_from <= commence <= commence_to:
+            if not commence_from <= _commence(event) <= commence_to:
                 continue
-            competition = event["competitions"][0]
-            teams = {
-                competitor["homeAway"]: competitor["team"]["displayName"]
-                for competitor in competition["competitors"]
-            }
-            bookmakers = []
-            for odds in competition.get("odds") or []:
-                provider = str((odds.get("provider") or {}).get("id"))
-                if provider not in ESPN_BOOKMAKERS:
-                    continue
-                key, title = ESPN_BOOKMAKERS[provider]
-                bookmakers.append(
-                    {
-                        "key": key,
-                        "title": title,
-                        "last_update": updated,
-                        "markets": [
-                            market
-                            for market in _markets(
-                                odds, teams["home"], teams["away"], updated
-                            )
-                            if market["key"] in markets
-                        ],
-                    }
-                )
-            events.append(
-                {
-                    "id": event_id,
-                    "commence_time": commence.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "home_team": teams["home"],
-                    "away_team": teams["away"],
-                    "bookmakers": bookmakers,
-                }
-            )
+            bookmakers = _bookmakers(event, updated)
+            for bookmaker in bookmakers:
+                bookmaker["markets"] = [
+                    market
+                    for market in bookmaker["markets"]
+                    if market["key"] in markets
+                ]
+            events.append({**identity, "bookmakers": bookmakers})
         return OddsSnapshot(
             events=events,
             fetched_at=fetched_at,
@@ -175,4 +257,39 @@ class EspnOddsClient:
             requests_used=None,
             request_cost=None,
             configured_bookmakers=tuple(key for key, _ in ESPN_BOOKMAKERS.values()),
+        )
+
+    def get_ncaaf_scores(self, days_from: int | None = None) -> ScoreboardSnapshot:
+        """Game states (upcoming, in-play, completed) with scores."""
+        now = datetime.now(timezone.utc)
+        fetched_at, scoreboard = self._scoreboard(
+            now - timedelta(days=days_from or 0), now + timedelta(days=1)
+        )
+        events = []
+        for event in scoreboard:
+            status = event["status"]["type"]
+            competitors = event["competitions"][0]["competitors"]
+            events.append(
+                {
+                    **_identity(event),
+                    # A postponed game is "post" without being completed.
+                    "completed": bool(status.get("completed")),
+                    "scores": None
+                    if status["state"] == "pre"
+                    else [
+                        {
+                            "name": competitor["team"]["displayName"],
+                            "score": competitor.get("score"),
+                        }
+                        for competitor in competitors
+                    ],
+                    "last_update": fetched_at.isoformat(),
+                }
+            )
+        return ScoreboardSnapshot(
+            events=events,
+            fetched_at=fetched_at,
+            requests_remaining=None,
+            requests_used=None,
+            request_cost=None,
         )

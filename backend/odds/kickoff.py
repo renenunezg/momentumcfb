@@ -13,7 +13,7 @@ import pandas as pd
 
 from backend.etl import store
 from backend.model.ingame import SERVING_ANCHOR_COLUMNS
-from backend.odds.client import OddsAPIClient, OddsAPIError
+from backend.odds.client import OddsAPIClient, OddsAPIError, odds_source
 from backend.odds.forecast import (
     check_weekly_capture_readiness,
     load_weekly_capture_forecast,
@@ -585,6 +585,7 @@ def check_live_preflight(
     max_poll_age_minutes: float = 15.0,
     max_offer_staleness_seconds: float = 300.0,
     min_providers: int = 2,
+    metered: bool = True,
 ) -> tuple[list[str], list[str], list[str]]:
     now = _utc(as_of)
     problems: list[str] = []
@@ -607,9 +608,13 @@ def check_live_preflight(
         f"latest Odds API poll: {fetched_at.isoformat()} ({age_minutes:.1f}m old)"
     )
 
-    quota_problems, quota_details = _quota_problems(frames, planned_markets, min_quota)
-    problems.extend(quota_problems)
-    details.extend(quota_details)
+    # The unmetered fallback source has no quota to prove or protect.
+    if metered:
+        quota_problems, quota_details = _quota_problems(
+            frames, planned_markets, min_quota
+        )
+        problems.extend(quota_problems)
+        details.extend(quota_details)
 
     configured = latest.get("configured_bookmakers")
     try:
@@ -736,10 +741,12 @@ def check_kickoff_readiness(
     )
     if forecast_directory and problems:
         return KickoffReadiness(None, tuple(problems), tuple(warnings), tuple(details))
-    try:
-        OddsAPIClient().ensure_single_quota_region()
-    except OddsAPIError as exc:
-        problems.append(str(exc))
+    metered = odds_source() == "odds_api"
+    if metered:
+        try:
+            OddsAPIClient().ensure_single_quota_region()
+        except OddsAPIError as exc:
+            problems.append(str(exc))
     live_problems, frames = verify_live_snapshots(season)
     problems.extend(live_problems)
     target = None
@@ -776,6 +783,7 @@ def check_kickoff_readiness(
                 max_poll_age_minutes=max_poll_age_minutes,
                 max_offer_staleness_seconds=max_offer_staleness_seconds,
                 min_providers=min_providers,
+                metered=metered,
             )
         )
         problems.extend(preflight_problems)
@@ -1171,10 +1179,12 @@ def run_kickoff_window(
     sleep=time.sleep,
 ) -> KickoffRunResult:
     """Wait for one window, poll across kickoff, validate, and write anchors."""
-    try:
-        OddsAPIClient().ensure_single_quota_region()
-    except OddsAPIError as exc:
-        raise ValueError(str(exc)) from exc
+    metered = odds_source() == "odds_api"
+    if metered:
+        try:
+            OddsAPIClient().ensure_single_quota_region()
+        except OddsAPIError as exc:
+            raise ValueError(str(exc)) from exc
     current = _utc(now())
     problems, warnings, details = check_forecast_readiness(
         season,
@@ -1209,13 +1219,14 @@ def run_kickoff_window(
     if max_extension_minutes < 0:
         raise ValueError("--max-extension-minutes must be nonnegative")
     extension_polls = ceil(max_extension_minutes * 60 / interval_seconds)
-    quota_problems, quota_details = _quota_problems(
-        frames, market_plan, min_quota, extension_polls
-    )
-    if quota_problems:
-        raise ValueError("; ".join(quota_problems))
-    for detail in quota_details:
-        progress(f"OK: {detail}")
+    if metered:
+        quota_problems, quota_details = _quota_problems(
+            frames, market_plan, min_quota, extension_polls
+        )
+        if quota_problems:
+            raise ValueError("; ".join(quota_problems))
+        for detail in quota_details:
+            progress(f"OK: {detail}")
 
     wait_seconds = (plan.starts_at - current).total_seconds()
     if wait_seconds > max_wait_hours * 3600:
