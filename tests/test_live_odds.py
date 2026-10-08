@@ -568,6 +568,7 @@ def test_polling_passes_full_window_reserve_and_required_targets(monkeypatch):
         required_game_ids,
         markets,
         future_poll_markets,
+        metered,
     ):
         calls.append((markets, future_poll_markets, required_game_ids))
         clock[0] += 0.5
@@ -646,6 +647,7 @@ def test_polling_passes_full_window_reserve_and_required_targets(monkeypatch):
         required_game_ids,
         markets,
         future_poll_markets,
+        metered,
     ):
         index = len(observed)
         observed.append((wall[0], markets, len(future_poll_markets)))
@@ -1282,3 +1284,102 @@ def test_odds_team_alias_matches_the_canonical_cfbd_game():
         ]
         is None
     )
+
+
+def test_espn_fallback_captures_pregame_lines_then_live_state_without_quota(
+    monkeypatch,
+):
+    from unittest.mock import Mock
+
+    from backend.odds import espn
+
+    kickoff_at = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    kickoff_at += timedelta(minutes=10)
+    schedule = pd.DataFrame(
+        {
+            "game_id": [102],
+            "start_date": [kickoff_at.isoformat()],
+            "home_team": ["Montana"],
+            "away_team": ["Idaho"],
+        }
+    )
+
+    def quote(odds, line):
+        return {"close": {"odds": odds, "line": line}}
+
+    def serve(state, commence):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "events": [
+                {
+                    "id": "401",
+                    "date": commence.strftime("%Y-%m-%dT%H:%MZ"),
+                    "status": {"type": {"state": state, "completed": False}},
+                    "competitions": [
+                        {
+                            "competitors": [
+                                {
+                                    "homeAway": "home",
+                                    "score": "7",
+                                    "team": {"displayName": "Montana Grizzlies"},
+                                },
+                                {
+                                    "homeAway": "away",
+                                    "score": "3",
+                                    "team": {"displayName": "Idaho Vandals"},
+                                },
+                            ],
+                            "odds": [
+                                {
+                                    "provider": {"id": "100", "name": "Draft Kings"},
+                                    "pointSpread": {
+                                        "home": quote("-110", "-3.5"),
+                                        "away": quote("EVEN", "+3.5"),
+                                    },
+                                    "total": {
+                                        "over": quote("-105", "o51.5"),
+                                        "under": quote("-115", "u51.5"),
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        monkeypatch.setattr(espn.requests, "get", Mock(return_value=response))
+
+    monkeypatch.setattr(live, "write_live_snapshot", lambda season, snapshot: None)
+
+    def capture():
+        return live.capture_live_snapshot(
+            espn.EspnOddsClient(),
+            2026,
+            schedule,
+            lookback_hours=1,
+            lookahead_hours=2,
+            days_from=None,
+            min_quota=20,
+            required_game_ids=(102,),
+            markets=live.CLOSING_MARKETS,
+            metered=False,
+        )
+
+    serve("pre", kickoff_at)
+    pregame = capture()
+    assert set(pregame.offers["provider_key"]) == {"draftkings"}
+    assert set(pregame.offers["market"]) == {"spreads", "totals"}
+    assert pregame.offers["phase"].eq("pregame").all()
+    assert pregame.offers["staleness_seconds"].eq(0).all()
+    away_spread = pregame.offers[
+        pregame.offers["market"].eq("spreads") & pregame.offers["selection"].eq("away")
+    ].iloc[0]
+    assert (away_spread["point"], away_spread["price"]) == (3.5, 100)
+    assert pd.isna(pregame.poll.iloc[0]["odds_requests_remaining"])
+
+    # After kickoff ESPN shows the closing line; it must not be stored as live.
+    serve("in", kickoff_at - timedelta(minutes=11))
+    started = capture()
+    assert started.offers.empty
+    assert started.events["phase"].tolist() == ["live"]
+    assert started.events["home_score"].tolist() == [7.0]

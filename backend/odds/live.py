@@ -26,6 +26,7 @@ from backend.odds.client import (
     OddsAPIError,
     OddsSnapshot,
     ScoreboardSnapshot,
+    odds_source,
 )
 from backend.odds.markets import match_event, offer_selection
 
@@ -586,15 +587,16 @@ def _discover_target_events(
     schedule: pd.DataFrame,
     window: tuple[datetime, datetime],
     required_game_ids: tuple[int, ...] | None,
+    metered: bool = True,
 ) -> tuple[EventsSnapshot, tuple[int, ...], list[str], dict[str, str]]:
     """Free event discovery; returns the snapshot, the required game ids, the
     event ids to buy odds for, and each event's commence time."""
     discovery = client.get_ncaaf_events(*window)
-    if discovery.request_cost != 0:
+    if metered and discovery.request_cost != 0:
         raise OddsAPIError(
             "free event discovery returned missing or nonzero request cost"
         )
-    if discovery.requests_remaining is None:
+    if metered and discovery.requests_remaining is None:
         raise OddsAPIError("free event discovery lacked quota provenance")
 
     event_id_by_game: dict[int, str] = {}
@@ -648,20 +650,25 @@ def _fetch_target_odds(
     required: tuple[int, ...],
     commence_by_event_id: dict[str, str],
     now: datetime,
+    metered: bool = True,
 ) -> OddsSnapshot:
     """Buy odds for the discovered events and keep only those with a spread.
 
     A required event that is missing after kickoff is tolerated (the book has
-    pulled it); any other gap is a partial paid poll or a skip.
+    pulled it); any other gap is a partial paid poll or a skip. The unmetered
+    fallback never prices a started game, so there every started event may be
+    missing.
     """
     odds = client.get_ncaaf_odds(
         *window, markets=markets, event_ids=tuple(relevant_event_ids)
     )
-    if odds.request_cost is None or not 0 <= odds.request_cost <= len(markets):
+    if metered and (
+        odds.request_cost is None or not 0 <= odds.request_cost <= len(markets)
+    ):
         raise PartialPaidPollError(
             "odds response returned missing or unexpected request cost", odds
         )
-    if odds.requests_remaining is None:
+    if metered and odds.requests_remaining is None:
         raise PartialPaidPollError("odds response lacked quota provenance", odds)
 
     selected_ids = set(relevant_event_ids)
@@ -685,7 +692,7 @@ def _fetch_target_odds(
             <= pd.Timestamp(now)
             for event_id in missing
         )
-        if not required or not missing_have_started:
+        if (metered and not required) or not missing_have_started:
             if odds.request_cost:
                 raise PartialPaidPollError(reason, odds)
             raise LivePollSkipped(reason, odds.requests_remaining)
@@ -712,11 +719,23 @@ def _fetch_target_scores(
     odds: OddsSnapshot,
     future_cost: int,
     min_quota: int,
+    metered: bool = True,
 ) -> ScoreboardSnapshot:
     try:
         scoreboard = client.get_ncaaf_scores(days_from)
     except (OddsAPIError, requests.RequestException) as exc:
         raise PartialPaidPollError(str(exc), odds) from exc
+    relevant = set(relevant_event_ids)
+    if not metered:
+        return ScoreboardSnapshot(
+            events=[
+                event for event in scoreboard.events if event.get("id") in relevant
+            ],
+            fetched_at=scoreboard.fetched_at,
+            requests_remaining=None,
+            requests_used=None,
+            request_cost=None,
+        )
     if scoreboard.request_cost != scores_cost or scoreboard.requests_remaining is None:
         raise PartialPaidPollError(
             "scores response returned missing or unexpected quota provenance",
@@ -731,7 +750,6 @@ def _fetch_target_scores(
             odds,
             scoreboard,
         )
-    relevant = set(relevant_event_ids)
     return ScoreboardSnapshot(
         events=[event for event in scoreboard.events if event.get("id") in relevant],
         fetched_at=scoreboard.fetched_at,
@@ -752,10 +770,12 @@ def capture_live_snapshot(
     required_game_ids: tuple[int, ...] | None = None,
     markets: tuple[str, ...] = LIVE_MARKETS,
     future_poll_markets: tuple[tuple[str, ...], ...] = (),
+    metered: bool = True,
 ) -> LiveSnapshot:
     """One paid poll: discover, check the quota floor, buy odds, buy scores,
     and append the snapshot. Every failure after a paid call is reported with
-    the quota provenance of the calls that did complete."""
+    the quota provenance of the calls that did complete. ``metered=False`` is
+    the unmetered fallback source, which has no quota to prove or protect."""
     markets = normalize_live_markets(markets)
     future_poll_markets = tuple(
         normalize_live_markets(planned) for planned in future_poll_markets
@@ -766,7 +786,7 @@ def capture_live_snapshot(
         now + timedelta(hours=lookahead_hours),
     )
     discovery, required, relevant_event_ids, commence_by_event_id = (
-        _discover_target_events(client, schedule, window, required_game_ids)
+        _discover_target_events(client, schedule, window, required_game_ids, metered)
     )
 
     scores_cost = 2 if days_from is not None else SCORES_COST
@@ -774,7 +794,7 @@ def capture_live_snapshot(
         live_poll_quota_cost(planned, days_from) for planned in future_poll_markets
     )
     reserved_cost = len(markets) + scores_cost + future_cost
-    if discovery.requests_remaining - reserved_cost < min_quota:
+    if metered and discovery.requests_remaining - reserved_cost < min_quota:
         raise QuotaFloorReached(
             f"{discovery.requests_remaining} credits remain; "
             f"{1 + len(future_poll_markets)} remaining live cycles reserve "
@@ -789,9 +809,10 @@ def capture_live_snapshot(
         required,
         commence_by_event_id,
         now,
+        metered,
     )
     future_reserved_cost = scores_cost + future_cost
-    if odds.requests_remaining - future_reserved_cost < min_quota:
+    if metered and odds.requests_remaining - future_reserved_cost < min_quota:
         raise QuotaFloorReached(
             f"{odds.requests_remaining} credits remain after odds; a "
             f"{future_reserved_cost}-credit reserve for scores and future "
@@ -806,6 +827,7 @@ def capture_live_snapshot(
         odds,
         future_cost,
         min_quota,
+        metered,
     )
     snapshot = build_live_snapshot(
         season,
@@ -882,8 +904,14 @@ def run_live_polling(
         def planner(poll_index: int, latest: LiveSnapshot | None):
             return market_plan[poll_index:]
 
-    client = OddsAPIClient()
-    client.ensure_single_quota_region()
+    metered = odds_source() == "odds_api"
+    if metered:
+        client = OddsAPIClient()
+        client.ensure_single_quota_region()
+    else:
+        from backend.odds.espn import EspnOddsClient
+
+        client = EspnOddsClient()
     consecutive_failures = 0
     completed = 0
     latest: LiveSnapshot | None = None
@@ -913,6 +941,7 @@ def run_live_polling(
                 required_game_ids=required_game_ids,
                 markets=markets,
                 future_poll_markets=plan[1:],
+                metered=metered,
             )
         except QuotaFloorReached as exc:
             if exc.odds is None:

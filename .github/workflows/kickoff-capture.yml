@@ -49,6 +49,7 @@ jobs:
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       ODDS_API_BOOKMAKERS: ${{ secrets.ODDS_API_BOOKMAKERS }}
       ODDS_API_REGIONS: ${{ secrets.ODDS_API_REGIONS }}
+      ODDS_SOURCE: ${{ vars.ODDS_SOURCE || 'odds_api' }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
     steps:
@@ -213,6 +214,11 @@ jobs:
           arguments=(--season "$SEASON" --max-wait-hours 3 --min-quota 20 --max-forecast-age-hours 240 --max-source-age-hours 240)
           if [[ -n "${FORECAST_DIRECTORY:-}" ]]; then
             arguments+=(--forecast-directory "$FORECAST_DIRECTORY")
+          fi
+          # Temporary: the ESPN fallback carries DraftKings only, so one
+          # provider is the closing line while ODDS_SOURCE=espn.
+          if [[ "$ODDS_SOURCE" == "espn" ]]; then
+            arguments+=(--min-providers 1)
           fi
           poetry run python -m backend kickoff-run "${arguments[@]}"
 
