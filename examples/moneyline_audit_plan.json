@@ -1,0 +1,14 @@
+{
+  "scope": "Historical FBS moneyline probability and selection audit",
+  "development": [2021, 2022],
+  "evaluation": [2023, 2024, 2025],
+  "evaluation_status": "Reused historical validation; these seasons influenced earlier research and are not pristine holdouts.",
+  "excluded_from_fitting": [2026],
+  "sources": ["existing joint_scoring_v9 chronological carryover replay", "current core plus frozen v14 process correction under historical carryover priors", "CFBD same-provider paired historical moneylines"],
+  "probability_baselines": ["same-book normalized no-vig consensus", "power-method no-vig sensitivity", "spread-only fixed dispersion", "production 0.20 model weight", "old 0.50 model weight"],
+  "development_only_fits": ["bounded continuous spread/model weight", "spread probit location scale and weight", "logistic calibration of market moneyline probabilities", "market moneyline plus pure-model residual"],
+  "selection": "Frozen production 2-point gate and positive EV, one side per game; separately report best quoted provider and fixed Bovada provider; no synthetic spread or total odds; volume-floor sensitivity is moneyline-only and is not the full cross-market production floor.",
+  "uncertainty": "Paired season-week block bootstrap, 5000 deterministic draws; report each evaluation season separately.",
+  "promotion": "No production changes. Closing-price proxy profitability cannot establish executable betting returns without timestamped quotes. Probability improvement must beat direct moneyline market, not merely a weaker spread-to-probability baseline.",
+  "robustness": ["provider coverage and overround", "matched game cohorts", "underdog/favorite selection", "price and probability buckets", "remove largest winner", "early versus later weeks", "forecast and training timestamp ordering"]
+}

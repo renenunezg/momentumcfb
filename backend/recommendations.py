@@ -6,40 +6,39 @@ from math import ceil, floor
 import numpy as np
 import pandas as pd
 from scipy.optimize import brentq
+from scipy.stats import t
 
-from backend.model.distributions import marginal_cdf
+from backend.model.distributions import marginal_cdf, marginal_scale
 from backend.model.market_blend import consensus_total
+from backend.model.spread_pricing import (
+    SPREAD_CALIBRATION_VERSION,
+    SPREAD_METHOD,
+    SPREAD_MODEL_WEIGHT,
+    spread_margin,
+    spread_win_loss,
+)
 from backend.odds.markets import _american_profit, priced_candidates
 
-POLICY_VERSION = "cfb-picks-v8"
+POLICY_VERSION = "cfb-picks-v11"
 # Minimum points the priced line must sit beyond the offered price's
 # break-even line. Measured in margin or total points, the same yardstick for
 # favourites and underdogs, so a mispriced tail cannot clear the gate on one
 # side only. A versioned starting policy, not a fit to live-season outcomes.
 MIN_EDGE_POINTS = 2.0
-# Dispersion of actual results around the priced (market-informed) line, from
-# the chronological calibration replay of 2021 through 2025 (3,208 games with
-# a closing spread and total). The pure model's predictive spread includes
-# rating uncertainty the market blend has already removed, and its 17 to 18
-# point width overstated every underdog's win probability. The market
-# residual is the honest width for a line that is half market.
+# Retain the pricing scales from the 2021-2025 chronological replay (3,208
+# games), separately from pure-model predictive uncertainty. The frozen
+# spread key calibration uses this fixed margin scale and 500 degrees of
+# freedom; neither scale is retuned on current-season outcomes.
 PRICING_MARGIN_SD = 15.35
 PRICING_TOTAL_SD = 15.93
-# Weight of the pure model in the margin that prices a moneyline. The
-# half-market blend that prices spreads is a product line that keeps model
-# opinion; for winning outright it is not calibrated. On the 2021 through
-# 2025 chronological replay (3,481 games with a closing spread) the probit fit
-# of the outcome on close + w * (model - close) gives w = 0.04 with se 0.05,
-# and the held-out 2024 to 2025 log loss is lowest near 0.2 (0.5317 against
-# 0.5338 at 0.5). No curve shape beat the fixed-sd normal out of sample, so
-# only the location changes. 0.2 is the most model opinion the held-out
-# seasons support; 0.5 priced moneyline picks 8 to 9 points above their
-# realised win rate.
-H2H_MODEL_WEIGHT = 0.2
-# Minimum recommended picks per decision batch (one model week). When the
-# edge gate leaves fewer, the highest-edge positive-EV offers are promoted
-# and recorded with FLOOR_REASON so the ledger separates gate picks from
-# floor picks. A product volume choice, not a calibration result.
+# Preserve the chosen research policy's model contribution in margin space.
+# Paired moneylines replace the spread as the market reference; the weight
+# remains a research choice, not a claim of independently validated profit.
+H2H_MODEL_WEIGHT = 0.20
+MONEYLINE_METHOD = "paired_moneyline_margin_blend_v1"
+# Research target per decision batch, not a mandatory minimum. Shortlist the
+# highest-edge eligible spreads/totals first, then cap each market at half
+# the shortfall (rounded up). Never replace capped picks with other offers.
 VOLUME_FLOOR = 15
 FLOOR_REASON = "volume_floor"
 EDGE_SEARCH_POINTS = 200.0
@@ -57,6 +56,7 @@ RECOMMENDATION_COLUMNS = [
     "model_version",
     "forecast_as_of",
     "decision_forecast",
+    "pricing_context",
     "home_missing_input_count",
     "away_missing_input_count",
     "policy_version",
@@ -118,17 +118,15 @@ def _win_loss(mean, sd, df, offer):
     """Win and loss probabilities for the bettor's side of an offer.
 
     ``mean`` is the priced home margin for sides or the priced total for
-    totals. Half-point lines keep the original CDF. Integer lines reserve the
-    mass between the adjacent half points for a returned stake.
+    totals. Integer lines reserve push mass; spread masses include the frozen
+    football key-number correction.
     """
     home_side = offer["side"] in ("home", "over")
-    if offer["market"] == "h2h":
-        win = float(marginal_cdf(mean if home_side else -mean, sd, df))
-        return win, 1.0 - win
     point = offer["point"]
     if offer["market"] == "spreads":
         mean = mean if home_side else -mean
         threshold = -point
+        return spread_win_loss(mean, sd, df, threshold)
     else:
         threshold = point
     win = float(marginal_cdf(mean - floor(threshold) - 0.5, sd, df))
@@ -139,44 +137,22 @@ def _win_loss(mean, sd, df, offer):
 def _priced_mean_sd(projection, offer):
     if offer["market"] == "totals":
         return projection.model_total, projection.total_sd
-    if offer["market"] == "h2h":
-        return projection.h2h_home_margin, projection.margin_sd
     return projection.market_informed_home_margin, projection.margin_sd
-
-
-def _h2h_home_margins(projections):
-    """Consensus market margin moved H2H_MODEL_WEIGHT of the way to the pure
-    model, or NaN without a posted spread so a moneyline is never priced from
-    the pure model alone."""
-    if "market_home_spread" not in projections:
-        return np.full(len(projections), np.nan)
-    spread = pd.to_numeric(projections["market_home_spread"], errors="coerce")
-    pure = pd.to_numeric(
-        projections["pure_home_margin"]
-        if "pure_home_margin" in projections
-        else projections["home_margin"],
-        errors="coerce",
-    )
-    market = -spread
-    return np.where(
-        spread.notna() & pure.notna(),
-        market + H2H_MODEL_WEIGHT * (pure - market),
-        np.nan,
-    )
 
 
 def _probabilities(projection, offer):
     """Round the frozen continuous marginal to integer scores, retaining pushes.
 
-    Sides use the market-informed margin (pure model shrunk toward the
-    pre-decision consensus spread). Totals use the model total shrunk toward
-    the median posted total across the decision-time offers, supplied on the
-    projection. Both are priced with the dispersion stored on the projection.
+    Spreads use the 20% model/history pricing margin with frozen key weights;
+    totals retain the published total. Moneylines blend the model
+    margin with the paired market's equivalent margin and have no push mass.
     """
+    if offer["market"] == "h2h":
+        home = projection.h2h_home_probability
+        win = home if offer["side"] == "home" else 1.0 - home
+        return win, 0.0, 1.0 - win
     mean, sd = _priced_mean_sd(projection, offer)
     win, loss = _win_loss(mean, sd, projection.degrees_of_freedom, offer)
-    if offer["market"] == "h2h":
-        return win, 0.0, loss
     return win, max(0.0, 1.0 - win - loss), loss
 
 
@@ -188,6 +164,14 @@ def _edge_points(projection, offer, implied):
     an underdog, unlike a probability gap, which is largest where the density
     is highest and is then multiplied by the payout in expected value.
     """
+    if offer["market"] == "h2h":
+        # Preserve the two-point selection yardstick without deriving the
+        # probability from a spread. These are probability-equivalent points.
+        win, _, _ = _probabilities(projection, offer)
+        df = projection.degrees_of_freedom
+        scale = marginal_scale(projection.margin_sd, df)
+        df = np.inf if pd.isna(df) else df
+        return float(scale * (t.ppf(win, df) - t.ppf(implied, df)))
     mean, sd = _priced_mean_sd(projection, offer)
     direction = 1.0 if offer["side"] in ("home", "over") else -1.0
 
@@ -222,6 +206,7 @@ def _offer_reason(offer, paired, now, start):
         pd.isna(offer["match_score"])
         or not np.isfinite(offer["match_score"])
         or offer["match_score"] < 0.95
+        or offer["match_score"] > 1
     ):
         return "uncertain_game_match"
     if pd.isna(fetched) or pd.isna(updated):
@@ -248,30 +233,106 @@ def _offer_reason(offer, paired, now, start):
     return None
 
 
-def build_recommendations(projections, offers, *, decision_at=None):
+def _moneyline_reference(candidates, latest, now, start):
+    """Pair prices before removing vig; give each bookmaker one vote.
+
+    Only the latest capture is eligible for either reference or execution.
+    Duplicate conflicting prices, mixed events, stale and unpaired offers
+    cannot manufacture a reference or resurrect an older executable price.
+    """
+    offers = [c for c in candidates if c["market"] == "h2h"]
+    offers = [c for c in offers if _timestamp(c["market_fetched_at"]) == latest]
+    groups = {}
+    for offer in offers:
+        key = (offer["provider_key"], offer["odds_api_event_id"])
+        groups.setdefault(key, []).append(offer)
+    pairs, eligible = [], []
+    for (provider_key, event_id), group in sorted(groups.items(), key=str):
+        updated = max(
+            (_timestamp(c["provider_last_update"]) for c in group), default=pd.NaT
+        )
+        group = [c for c in group if _timestamp(c["provider_last_update"]) == updated]
+        sides = {
+            side: [c for c in group if c["side"] == side] for side in ("home", "away")
+        }
+        if any(len({c["price"] for c in side}) != 1 for side in sides.values()):
+            continue
+        if any(_offer_reason(c, group, now, start) is not None for c in group):
+            continue
+        home, away = sides["home"][0], sides["away"][0]
+        h = 1.0 / (1.0 + _american_profit(home["price"]))
+        a = 1.0 / (1.0 + _american_profit(away["price"]))
+        if not 1.0 <= h + a <= 1.20:
+            continue
+        pairs.append(
+            dict(
+                provider_key=provider_key,
+                provider=home["provider"],
+                odds_api_event_id=event_id,
+                provider_start_date=start.isoformat(),
+                provider_last_update=updated.isoformat(),
+                market_fetched_at=latest.isoformat(),
+                home_price=home["price"],
+                away_price=away["price"],
+                home_match_score=float(home["match_score"]),
+                away_match_score=float(away["match_score"]),
+                overround=h + a,
+                home_probability=h / (h + a),
+            )
+        )
+        eligible.extend(group)
+    if len({p["odds_api_event_id"] for p in pairs}) > 1:
+        pairs, eligible = [], []
+    probability = (
+        float(np.median([p["home_probability"] for p in pairs])) if pairs else None
+    )
+    return probability, pairs, eligible
+
+
+def build_recommendations(projections, offers, *, decision_at=None, games=None):
     """One best eligible side per game and market, or an explicit No Play.
 
-    Sides use the published market-informed margin and totals the published
-    market-informed total. A late QB report creates a separately recorded
+    Spreads use a separate 20% model/history pricing margin; totals retain the
+    published market-informed total. A late QB report creates a separately recorded
     decision forecast without rewriting the published original. Each
     pick records the median posted total at decision time.
-    Moneylines are priced from the consensus market margin moved
-    H2H_MODEL_WEIGHT toward the pure model. Everything is priced with the
+    Moneylines move the paired market's equivalent margin H2H_MODEL_WEIGHT
+    toward the pure model margin before converting back to win probability.
+    Spreads and totals are priced with the
     empirical dispersion around the priced line, not the pure model's wider
     predictive spread. An offer qualifies when the priced line sits at least
     MIN_EDGE_POINTS beyond the price's break-even line and expected value is
     positive; the best offer per market is the one with the most points of
     edge, never the largest payout. If fewer than VOLUME_FLOOR picks qualify
-    in the batch, the highest-edge positive-EV offers are promoted with
-    FLOOR_REASON. Historical calibration is diagnostic and never gates
-    forward recommendations or replaces their probabilities. Stakes are
+    in the batch, shortlist the highest-edge positive-EV spreads/totals, then
+    cap each market at ceil(shortfall / 2), with no backfilling. Promotions use
+    FLOOR_REASON. Frozen development calibration prices spreads but never
+    gates forward recommendations on realized results. Stakes are
     always one unit, with no compounding.
     """
     now = _timestamp(decision_at or datetime.now(timezone.utc))
-    projections = projections.assign(h2h_home_margin=_h2h_home_margins(projections))
+    game_types = (
+        games.set_index("id", verify_integrity=True)["season_type"].to_dict()
+        if games is not None and "season_type" in games
+        else {}
+    )
+    projections = projections.assign(h2h_home_probability=np.nan)
     groups = {game_id: group for game_id, group in offers.groupby("game_id")}
     rows = []
     for projection in projections.itertuples():
+        season_type = getattr(projection, "season_type", None)
+        season_type_source = "forecast"
+        if not isinstance(season_type, str) or season_type not in (
+            "regular",
+            "postseason",
+        ):
+            season_type = game_types.get(projection.game_id)
+            season_type_source = "schedule"
+        if not isinstance(season_type, str) or season_type not in (
+            "regular",
+            "postseason",
+        ):
+            season_type, season_type_source = None, "unavailable"
         start, forecast = (
             _timestamp(projection.start_date),
             _timestamp(projection.as_of),
@@ -290,21 +351,62 @@ def build_recommendations(projections, offers, *, decision_at=None):
             for side in ("home", "away")
         ):
             reason = "missing_model_inputs"
-        game_offers = groups.get(projection.game_id, offers.iloc[:0]).dropna(
-            subset=["price"]
-        )
+        game_offers = groups.get(projection.game_id, offers.iloc[:0])
+        # Read the latest capture before dropping invalid prices: a broken new
+        # snapshot must not resurrect a previously available moneyline.
+        latest_moneyline_capture = pd.to_datetime(
+            game_offers.loc[game_offers.market.eq("h2h"), "market_fetched_at"],
+            utc=True,
+            errors="coerce",
+        ).max()
+        game_offers = game_offers.dropna(subset=["price"])
         candidates = priced_candidates(projection, game_offers)
+        market_probability, reference_pairs, moneyline_offers = _moneyline_reference(
+            candidates, latest_moneyline_capture, now, start
+        )
+        pure_margin = getattr(projection, "pure_home_margin", projection.home_margin)
+        pure_margin = (
+            float(pure_margin)
+            if pd.notna(pure_margin) and np.isfinite(pure_margin)
+            else None
+        )
+        market_margin = pricing_margin = home_probability = None
+        if (
+            market_probability is not None
+            and 0 < market_probability < 1
+            and pure_margin is not None
+        ):
+            df = projection.degrees_of_freedom
+            scale = marginal_scale(PRICING_MARGIN_SD, df)
+            market_margin = float(
+                scale * t.ppf(market_probability, np.inf if pd.isna(df) else df)
+            )
+            pricing_margin = market_margin + H2H_MODEL_WEIGHT * (
+                pure_margin - market_margin
+            )
+            home_probability = float(
+                marginal_cdf(pricing_margin, PRICING_MARGIN_SD, df)
+            )
         # The supplied forecast is either the published original or the
         # recorded availability-adjusted decision forecast. The
         # median posted total at decision time is recorded for reference.
         market_total = consensus_total(game_offers)
         priced_projection = projection._replace(
-            margin_sd=PRICING_MARGIN_SD, total_sd=PRICING_TOTAL_SD
+            margin_sd=PRICING_MARGIN_SD,
+            total_sd=PRICING_TOTAL_SD,
+            h2h_home_probability=home_probability,
         )
         published_total = getattr(projection, "market_informed_total", np.nan)
         if pd.notna(published_total) and np.isfinite(published_total):
             priced_projection = priced_projection._replace(model_total=published_total)
+        spread_inputs = spread_margin(projection)
         for market in MARKETS:
+            market_projection = priced_projection
+            if market == "spreads" and spread_inputs is not None:
+                market_projection = priced_projection._replace(
+                    market_informed_home_margin=spread_inputs[0],
+                    degrees_of_freedom=500.0,
+                )
             row = {
                 key: getattr(projection, key, None)
                 for key in (
@@ -325,41 +427,97 @@ def build_recommendations(projections, offers, *, decision_at=None):
                 market=market,
                 forecast_as_of=forecast,
                 decision_forecast=getattr(projection, "decision_forecast", None),
+                pricing_context=dict(
+                    version=1,
+                    purpose="research",
+                    validation_status="unvalidated",
+                    season_type=season_type,
+                    season_type_source=season_type_source,
+                    is_postseason=season_type == "postseason" if season_type else None,
+                    research_flags=(
+                        ["postseason"]
+                        if season_type == "postseason"
+                        else ["season_type_unknown"]
+                        if season_type is None
+                        else []
+                    ),
+                    probability_source=(
+                        MONEYLINE_METHOD
+                        if market == "h2h"
+                        else SPREAD_METHOD
+                        if market == "spreads"
+                        else "market_informed_forecast"
+                    ),
+                    **(
+                        dict(
+                            model_weight=H2H_MODEL_WEIGHT,
+                            blend_space="margin",
+                            model_home_margin=pure_margin,
+                            market_home_probability=market_probability,
+                            market_equivalent_home_margin=market_margin,
+                            pricing_home_margin=pricing_margin,
+                            home_probability=home_probability,
+                            reference_pairs=reference_pairs,
+                            edge_units="probability_equivalent_points",
+                        )
+                        if market == "h2h"
+                        else {}
+                    ),
+                ),
                 decision_at=now,
                 policy_version=POLICY_VERSION,
                 status="no_play",
                 reason=reason,
                 stake_units=0.0,
-                # The margin this market was actually priced from.
-                model_home_margin=(
-                    priced_projection.h2h_home_margin
-                    if market == "h2h"
-                    else projection.market_informed_home_margin
-                ),
+                # Forecast context only for H2H; its pricing source is explicit above.
+                model_home_margin=projection.market_informed_home_margin,
                 model_total=priced_projection.model_total,
                 market_total=market_total if np.isfinite(market_total) else None,
                 margin_sd=priced_projection.margin_sd,
                 total_sd=priced_projection.total_sd,
             )
+            if market == "spreads" and spread_inputs is not None:
+                row["model_home_margin"] = spread_inputs[0]
+                row["degrees_of_freedom"] = 500.0
+                row["pricing_context"].update(
+                    model_weight=SPREAD_MODEL_WEIGHT,
+                    model_side_home_margin=spread_inputs[1],
+                    market_home_margin=spread_inputs[2],
+                    pricing_home_margin=spread_inputs[0],
+                    published_home_margin=projection.market_informed_home_margin,
+                    reference_as_of=forecast.isoformat(),
+                    calibration_version=SPREAD_CALIBRATION_VERSION,
+                    blend_space="margin",
+                )
             priced = [c for c in candidates if c["market"] == market]
             empty_reason = reason or "no_valid_price"
-            if market == "h2h" and not np.isfinite(priced_projection.h2h_home_margin):
+            if market == "spreads" and spread_inputs is None:
                 priced = []
-                empty_reason = reason or "missing_market_spread"
-                row["model_home_margin"] = projection.market_informed_home_margin
+                empty_reason = reason or "missing_spread_reference"
+            if market == "h2h" and home_probability is None:
+                priced = []
+                empty_reason = reason or (
+                    "missing_moneyline_reference"
+                    if market_probability is None
+                    else "invalid_probability"
+                )
             evaluated = []
             for candidate in priced:
                 if candidate["market"] != "h2h" and candidate["point"] * 2 != round(
                     candidate["point"] * 2
                 ):
                     continue
-                win, push, loss = _probabilities(priced_projection, candidate)
+                win, push, loss = _probabilities(market_projection, candidate)
                 profit = _american_profit(candidate["price"])
                 implied = 1 / (profit + 1)
                 edge = win / (win + loss) - implied
                 ev = win * profit - loss
-                points = _edge_points(priced_projection, candidate, implied)
+                points = _edge_points(market_projection, candidate, implied)
                 block = reason or _offer_reason(candidate, priced, now, start)
+                if market == "h2h" and not any(
+                    candidate is c for c in moneyline_offers
+                ):
+                    block = reason or "invalid_moneyline_pair"
                 if (
                     not np.isfinite([win, push, loss, edge, ev, points]).all()
                     or not 0 < win < 1
@@ -403,23 +561,71 @@ def build_recommendations(projections, offers, *, decision_at=None):
                     reason=block or "qualifying_edge",
                     stake_units=1.0 if block is None else 0.0,
                 )
+                if market == "spreads" and spread_inputs is not None:
+                    direction = 1.0 if best["side"] == "home" else -1.0
+                    model_shift = direction * (spread_inputs[0] - spread_inputs[2])
+                    quote_gap = direction * spread_inputs[2] + best["point"]
+                    raw_edge = model_shift + quote_gap
+                    row["pricing_context"]["spread_edge_breakdown"] = dict(
+                        perspective="selected_side",
+                        model_disagreement_points=direction
+                        * (spread_inputs[1] - spread_inputs[2]),
+                        model_contribution_points=model_shift,
+                        quote_difference_points=quote_gap,
+                        raw_line_edge_points=raw_edge,
+                        price_distribution_adjustment_points=points - raw_edge,
+                        edge_points=points,
+                    )
+                    if abs(quote_gap) > 1e-9:
+                        row["pricing_context"]["research_flags"].append(
+                            "spread_quote_differs_from_reference"
+                        )
             else:
                 row["reason"] = empty_reason
             rows.append(row)
     decisions = pd.DataFrame(rows, columns=RECOMMENDATION_COLUMNS)
-    shortfall = VOLUME_FLOOR - int(decisions["status"].eq("recommended").sum())
+    shortfall = max(0, VOLUME_FLOOR - int(decisions["status"].eq("recommended").sum()))
+    market_cap = (shortfall + 1) // 2
+    shortlisted, capped = set(), set()
     if shortfall > 0:
         eligible = decisions[
             decisions["reason"].eq("below_edge_threshold")
+            & decisions["market"].ne("h2h")
             & decisions["edge_points"].gt(0)
             & decisions["expected_value_per_unit"].gt(0)
         ]
-        promote = eligible.sort_values("edge_points", ascending=False).index[:shortfall]
+        shortlist = eligible.sort_values(
+            ["edge_points", "game_id", "market"], ascending=[False, True, True]
+        ).head(shortfall)
+        promote = shortlist.groupby("market", sort=False).head(market_cap).index
+        shortlisted = set(shortlist.index)
+        capped = shortlisted - set(promote)
         decisions.loc[promote, ["status", "reason", "stake_units"]] = [
             "recommended",
             FLOOR_REASON,
             1.0,
         ]
+    exposure = decisions.groupby("game_id").stake_units.sum()
+    for row in decisions.itertuples():
+        row.pricing_context.update(
+            floor_policy="shortlist_market_soft_cap_v1",
+            floor_target=VOLUME_FLOOR,
+            floor_shortfall=shortfall,
+            floor_market_cap=market_cap,
+            floor_shortlisted=row.Index in shortlisted,
+            floor_capped=row.Index in capped,
+            floor_backfill=False,
+            recommendation_tier=(
+                "exploratory"
+                if row.reason == FLOOR_REASON
+                else "edge_qualified"
+                if row.status == "recommended"
+                else "no_play"
+            ),
+            exposure_group=str(row.game_id),
+            decision_batch_game_stake_units=float(exposure.loc[row.game_id]),
+            stake_method="flat_one_unit_per_pick",
+        )
     return decisions
 
 
