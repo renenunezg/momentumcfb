@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from backend.model import spread_pricing
 from backend.model.pick_calibration import (
     CONTRACT,
     ProbabilityCalibration,
@@ -13,7 +14,9 @@ from backend.model.pick_calibration import (
 from backend.recommendations import _probabilities
 
 
-def test_pick_calibration_preserves_price_math_and_withholds_evaluation_outcomes():
+def test_pick_calibration_preserves_price_math_and_withholds_evaluation_outcomes(
+    monkeypatch,
+):
     rng = np.random.default_rng(51)
     frames = []
     for season in range(2020, 2026):
@@ -69,23 +72,28 @@ def test_pick_calibration_preserves_price_math_and_withholds_evaluation_outcomes
     sample = predictions.iloc[[0]].assign(
         market_informed_home_margin=lambda f: f.home_margin
     )
-    for market, side, line in [
-        ("spreads", "home", -3.0),
-        ("spreads", "away", 3.5),
-        ("totals", "over", 43.0),
-        ("totals", "under", 43.5),
-    ]:
-        canonical_line = -line if side == "away" else line
-        result = outcome_probabilities(sample, market, [canonical_line])[0]
-        if side in ("away", "under"):
-            result = result[[2, 1, 0]]
-        np.testing.assert_allclose(
-            result,
-            _probabilities(
-                next(sample.itertuples()), dict(market=market, side=side, point=line)
-            ),
-            atol=1e-12,
-        )
+    # The raw research baseline has neutral key weights. Frozen production
+    # weights have their own audited probability fixture in test_grading.
+    with monkeypatch.context() as raw_baseline:
+        raw_baseline.setattr(spread_pricing, "_key_weights", lambda: np.ones(81))
+        for market, side, line in [
+            ("spreads", "home", -3.0),
+            ("spreads", "away", 3.5),
+            ("totals", "over", 43.0),
+            ("totals", "under", 43.5),
+        ]:
+            canonical_line = -line if side == "away" else line
+            result = outcome_probabilities(sample, market, [canonical_line])[0]
+            if side in ("away", "under"):
+                result = result[[2, 1, 0]]
+            np.testing.assert_allclose(
+                result,
+                _probabilities(
+                    next(sample.itertuples()),
+                    dict(market=market, side=side, point=line),
+                ),
+                atol=1e-12,
+            )
 
     # Key-score weighting must preserve coherent probabilities at every line,
     # including outside the weighted grid and at integer push boundaries.
