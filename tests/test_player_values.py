@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from backend.model.unit_ratings import fit_unit_ratings
 from backend.players import value
 from backend.players.credit import assign_play_credit
 
@@ -215,8 +216,9 @@ def test_opponent_effect_for_a_week_never_sees_that_weeks_games(monkeypatch, tmp
     effects_seen = value.season_unit_effects(with_week_four, units, prior)
     effects_unseen = value.season_unit_effects(without_week_four, units, prior)
     opening = effects_seen[effects_seen.model_week.eq(1)].set_index("team")
-    assert opening.loc["B", "pass_defense"] == -0.3
-    assert opening.loc["A", "pass_defense"] == 0.3
+    regressed = 0.3 * value.OPPONENT_PRIOR_REGRESSION
+    assert opening.loc["B", "pass_defense"] == pytest.approx(-regressed)
+    assert opening.loc["A", "pass_defense"] == pytest.approx(regressed)
     # Identical opening-week production must lose credit against the weak unit.
     schedule = with_week_four.iloc[[0]].copy()
     credit = pd.DataFrame(
@@ -340,3 +342,71 @@ def test_weekly_snapshots_are_cumulative():
     assert np.allclose(out["adjusted_epa"], [5.0, 10.0, 15.0])
     assert np.isclose(out["fcs_play_share"].iloc[-1], 1 / 3)
     assert out["games"].tolist() == [1, 2, 3]
+
+
+def test_opponent_effect_is_the_ridge_fit_around_the_regressed_prior():
+    # v3 blended the ridge fit a second time toward last season by games
+    # played; v4 lets the ridge alone weigh the season's evidence. The effect
+    # for a week must therefore equal the per-play ridge rating fitted on
+    # earlier games around the regressed previous-season anchor.
+    games = pd.concat(
+        [
+            _games({1, 2, 3, 4}),
+            _games({1, 2, 3, 4}).assign(
+                model_week=lambda f: f["model_week"] + 4,
+                week=lambda f: f["week"] + 4,
+                game_id=lambda f: f["game_id"] + 100,
+                start_date=lambda f: f["start_date"].str.replace("2025-09", "2025-10"),
+            ),
+        ],
+        ignore_index=True,
+    )
+    units = _unit_games(games)
+    prior = pd.DataFrame(
+        {
+            "season": 2025,
+            "source_season": 2024,
+            "model_version": "cfb_player_value_v3",
+            "source_last_game_start": "2025-01-20T00:00:00Z",
+            "team_id": range(1, 7),
+            "team": list("ABCDEF"),
+            "classification": "fbs",
+            "rush_offense": [0.2, -0.2, 0.0, 0.0, 0.0, 0.0],
+            "pass_offense": [0.3, -0.3, 0.0, 0.0, 0.0, 0.0],
+            "rush_defense": [0.2, -0.2, 0.0, 0.0, 0.0, 0.0],
+            "pass_defense": [0.3, -0.3, 0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    columns = [c for channels in value.CHANNEL_UNITS.values() for c in channels[:2]]
+    effects = value.season_unit_effects(games, units, prior)
+    week = 8
+    anchor = prior[["team", *columns]].copy()
+    anchor[columns] = anchor[columns] * value.OPPONENT_PRIOR_REGRESSION
+    earlier = games[games["model_week"].lt(week)]
+    as_of = (
+        pd.to_datetime(earlier["start_date"], utc=True).max() + pd.Timedelta(days=1)
+    ).to_pydatetime()
+    fitted = fit_unit_ratings(
+        units,
+        games,
+        week,
+        as_of,
+        channel_priors=anchor,
+        per_play=True,
+        prior_share=value.OPPONENT_PRIOR_SHARE,
+    ).frame.set_index("team")
+    window = units[units["game_id"].isin(earlier["game_id"])]
+    late = effects[effects["model_week"].eq(week)].set_index("team")
+    for offense, defense, plays in value.CHANNEL_UNITS.values():
+        per_game = window[plays].mean()
+        for column in (offense, defense):
+            assert np.allclose(
+                late[column], fitted[column].reindex(late.index) / per_game
+            )
+    # With the blend gone, a full season of evidence against the prior wins:
+    # the extreme teams must sit nearer zero than their anchors by week eight.
+    for column in columns:
+        for team in ("A", "B"):
+            assert abs(late.loc[team, column]) < abs(
+                anchor.set_index("team").loc[team, column]
+            )

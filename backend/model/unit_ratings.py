@@ -45,6 +45,7 @@ def _two_sided_ridge(
     teams: list[str],
     classifications: np.ndarray,
     prior_units: np.ndarray | None = None,
+    prior_share: float = CHANNEL_PRIOR_SHARE,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fit value = unit(team) - counter(opponent) with class-aware priors."""
     if observations.empty:
@@ -75,7 +76,7 @@ def _two_sided_ridge(
     if variance <= 0:
         # Every observation already equals its prior expectation.
         return _centered_units(prior_mean, n_teams, classifications == "fbs")
-    prior_sd = np.full(2 * n_teams, CHANNEL_PRIOR_SHARE * np.sqrt(variance))
+    prior_sd = np.full(2 * n_teams, prior_share * np.sqrt(variance))
 
     def solve(noise: float) -> np.ndarray:
         parameters, _ = _solve_ridge(
@@ -235,8 +236,12 @@ def fit_unit_ratings(
     recency_by_game: Mapping[int | str, float] | None = None,
     channel_priors: pd.DataFrame | None = None,
     per_play: bool = False,
+    prior_share: float = CHANNEL_PRIOR_SHARE,
 ) -> UnitRatings:
-    """Fit pregame units; per-play mode returns only rush/pass player channels."""
+    """Fit pregame units; per-play mode returns only rush/pass player channels.
+
+    ``prior_share`` is each unit's prior sd as a share of the channel's game sd.
+    """
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
     if games["season"].nunique() != 1:
@@ -311,6 +316,7 @@ def fit_unit_ratings(
             teams,
             classifications,
             prior_units,
+            prior_share,
         )
         if name == "rush":
             ratings["rush_offense"] = unit

@@ -31,7 +31,10 @@ from backend.players.ingest import read_season_source, read_weekly
 
 log = logging.getLogger(__name__)
 
-MODEL_VERSION = "cfb_player_value_v3"
+MODEL_VERSION = "cfb_player_value_v4"
+# The opponent prior is built the same way under v3 and v4, so a frozen v3
+# artifact stays valid; only the in-season use of it changed in v4.
+PRIOR_COMPATIBLE_VERSIONS = frozenset({"cfb_player_value_v3", MODEL_VERSION})
 # Games are the opportunity unit for replacement and shrinkage: a defender's
 # credited plays are disruption events, not snaps, so plays cannot be the
 # denominator on one side of the ball and the opportunity count on the other.
@@ -40,7 +43,14 @@ REPLACEMENT_PERCENTILE = 0.30
 QUALIFYING_GAMES = 6
 MIN_QUALIFIED_PLAYERS = 10
 FCS_OPPONENT_WEIGHT = 0.5
-OPPONENT_EFFECT_PRIOR_GAMES = 3.0
+# The previous season's per-play unit rating is regressed toward its
+# subdivision mean before it anchors the ridge, and the ridge alone decides
+# how far observed games move each unit off that anchor. Both numbers were
+# chosen by walk-forward next-game error on 2020 through 2024 and checked on
+# 2025 (see docs/player_value_v4.md); the surface is flat within about 0.05
+# of each, so neither carries more precision than the first decimal implies.
+OPPONENT_PRIOR_REGRESSION = 0.7
+OPPONENT_PRIOR_SHARE = 0.3
 
 POSITION_GROUPS = {
     "QB": "QB",
@@ -144,7 +154,7 @@ def validate_opponent_prior(prior: pd.DataFrame, season: int) -> None:
         or not prior["source_season"].eq(season - 1).all()
     ):
         raise ValueError("player opponent prior must use only the previous season")
-    if not prior["model_version"].eq(MODEL_VERSION).all():
+    if not prior["model_version"].isin(PRIOR_COMPATIBLE_VERSIONS).all():
         raise ValueError("player opponent prior has an incompatible model version")
     if prior["team_id"].isna().any() or prior["team_id"].duplicated().any():
         raise ValueError("player opponent prior must have unique team IDs")
@@ -210,10 +220,12 @@ def load_opponent_prior(season: int) -> pd.DataFrame:
 def season_unit_effects(
     games: pd.DataFrame, unit_games: pd.DataFrame, prior: pd.DataFrame
 ) -> pd.DataFrame:
-    """Blend pregame channel evidence toward previous-season opponent strength.
+    """Per-play unit effects for each week from games played before it.
 
-    The opener retains the prior; later weeks replace it in proportion to
-    observed games. No play from the week being adjusted enters its fit.
+    The previous season's rating, regressed toward its subdivision mean, is
+    the ridge anchor; every completed earlier game is evidence against it,
+    and the ridge's own noise estimate sets how far that evidence moves each
+    unit. No play from the week being adjusted enters its fit.
     """
     seasons = games["season"].unique()
     if len(seasons) != 1:
@@ -235,12 +247,12 @@ def season_unit_effects(
             "player opponent prior cannot cover the schedule classifications"
         )
     baseline = baseline[["team", *columns]].set_index("team")
-    previous = baseline.copy()
+    baseline[columns] = baseline[columns] * OPPONENT_PRIOR_REGRESSION
     frames = []
     for week in sorted(int(w) for w in games["model_week"].dropna().unique()):
         window = games[games["model_week"].lt(week)]
         completed = window[window["completed"].fillna(False).astype(bool)]
-        current = previous.copy()
+        current = baseline.copy()
         window_units = unit_games[unit_games["game_id"].isin(completed["game_id"])]
         # A completed game without play data adds no evidence; keep the prior.
         if not window_units.empty:
@@ -253,6 +265,7 @@ def season_unit_effects(
                 as_of,
                 channel_priors=baseline.reset_index(),
                 per_play=True,
+                prior_share=OPPONENT_PRIOR_SHARE,
             ).frame.set_index("team")
             for offense, defense, plays_column in CHANNEL_UNITS.values():
                 per_game = float(window_units[plays_column].mean())
@@ -260,18 +273,10 @@ def season_unit_effects(
                     raise ValueError(
                         f"player opponent adjustment has no {plays_column} exposure"
                     )
-                eligible = window_units[window_units[plays_column].gt(0)]
-                for column, side in ((offense, "team"), (defense, "opponent")):
-                    played = eligible.groupby(side)["game_id"].nunique()
-                    count = baseline.index.to_series().map(played).fillna(0.0)
-                    confidence = count / (count + OPPONENT_EFFECT_PRIOR_GAMES)
-                    current[column] = (
-                        confidence * fitted[column].reindex(baseline.index) / per_game
-                        + (1.0 - confidence) * baseline[column]
-                    )
+                for column in (offense, defense):
+                    current[column] = fitted[column].reindex(baseline.index) / per_game
         if not np.isfinite(current[columns].to_numpy(float)).all():
             raise ValueError("player opponent adjustment contains nonfinite effects")
-        previous = current.copy()
         frames.append(current.reset_index().assign(model_week=week))
     return pd.concat(frames, ignore_index=True)
 

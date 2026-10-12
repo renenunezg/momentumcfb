@@ -155,7 +155,8 @@ The commands fall into six groups.
 Publishing is a separate, explicit boundary.
 Local model and evaluation commands do not require database write access.
 
-Player-value v3 uses exposure-weighted rush/pass efficiency and a frozen previous-season opponent prior instead of resetting opening opponents to average; opponent effects are shrunk with noise estimated from each channel.
+Player-value v4 uses exposure-weighted rush/pass efficiency and a frozen previous-season opponent prior instead of resetting opening opponents to average; the prior is regressed 0.7 of the way from zero toward last season's rating and the ridge alone, with noise estimated from each channel, decides how far observed games move each unit.
+v3 blended the ridge fit a second time toward last season by games played, which left midseason opponent effects about 90 percent previous-season rating; the v4 settings were chosen on 2020 through 2024 walk-forward next-game error and checked on 2025 (`docs/player_value_v4.md`).
 Before activating a new player-value version, run `python -m backend player-prior --season 2026 --runtime-bundle /path/to/player-runtime-2026.zip` where the previous season's raw plays and existing Heisman runtime artifacts are cached.
 The weekly runner requires that reviewed bundle, validates the prior before paid ingestion, and never downloads historical inputs or silently substitutes zero opponent effects.
 
@@ -171,7 +172,7 @@ The weekly runner requires that reviewed bundle, validates the prior before paid
 ## Database recovery and release contract
 
 The secret-free schema snapshot in `sql/baseline/2026_10_05.sql` restores the deployed schema as inspected on October 5, 2026, without production rows.
-On an empty Supabase project, install `momentumweb/sql/001_site_revalidate.sql` first, restore this baseline with `psql -X -v ON_ERROR_STOP=1`, then apply `020_decision_forecast.sql`, `021_site_revalidate.sql`, and `20261012190441_moneyline_pricing_context.sql` from `sql`.
+On an empty Supabase project, install `momentumweb/sql/001_site_revalidate.sql` first, restore this baseline with `psql -X -v ON_ERROR_STOP=1`, then apply `020_decision_forecast.sql`, `021_site_revalidate.sql`, `20261012190441_moneyline_pricing_context.sql`, and `20261012224346_player_opponent_prior_meta.sql` from `sql`.
 The baseline includes the earlier migrations; do not replay those on top of it.
 The shared function requires pg_net and Vault, with `site_revalidate_secret` provisioned separately and matched to the site's `REVALIDATE_SECRET`.
 A plain PostgreSQL test database needs the `anon`, `authenticated`, and `service_role` roles and a local callback substitute.
