@@ -285,6 +285,16 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
             )
         ]
     ).reindex(columns=OFFER_COLUMNS)
+    # Two independent paired books anchor the reference; Book A offers the
+    # better execution price. Repeat rows must never increase a book's vote.
+    references = []
+    for key in ("book_b", "book_c"):
+        ref = offers[offers.market.eq("h2h")].copy()
+        ref["provider_key"], ref["provider"] = key, key
+        favoured = ref.selection.eq("home").eq(ref.game_id.lt(4))
+        ref["price"] = np.where(favoured, -350, 280)
+        references.append(ref)
+    offers = pd.concat([offers, *references], ignore_index=True)
     projections.loc[projections.game_id.eq(4), "model_total"] = 36.0
     projections.loc[projections.game_id.eq(4), "market_informed_total"] = 39.5
     # Production includes the universal unavailable-injury flag on both teams.
@@ -302,31 +312,188 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
     decisions = build_recommendations(projections, offers, decision_at=now)
     assert decisions[decisions.game_id.le(5)].status.eq("recommended").all()
     assert decisions[decisions.game_id.le(5)].reason.eq("qualifying_edge").all()
-    # Moneylines price from the market moved 0.2 toward the pure model.
     h2h = decisions[decisions.market.eq("h2h") & decisions.game_id.eq(1)].iloc[0]
-    assert h2h.model_home_margin == pytest.approx(12.0 + 0.2 * (14.0 - 12.0))
+    market_home = (350 / 450) / (350 / 450 + 100 / 380)
+    scale = PRICING_MARGIN_SD * np.sqrt(1 - 2 / 500)
+    market_margin = scale * stats.t.ppf(market_home, 500)
+    blended_margin = 0.8 * market_margin + 0.2 * 14
+    expected_home = stats.t.cdf(blended_margin / scale, 500)
+    assert h2h.win_probability == pytest.approx(expected_home)
+    assert h2h.pricing_context["model_weight"] == 0.2
+    assert h2h.pricing_context["blend_space"] == "margin"
+    assert h2h.pricing_context["market_home_probability"] == pytest.approx(market_home)
+    assert h2h.pricing_context["pricing_home_margin"] == pytest.approx(blended_margin)
+    # Holding quotes fixed, changing model opinion must change the priced
+    # probability and selection. This protects the research model's role.
+    opposite_model = build_recommendations(
+        projections.iloc[:1].assign(pure_home_margin=-40), offers, decision_at=now
+    )
+    contrary = opposite_model.query("market == 'h2h'").iloc[0]
+    assert contrary.side == "away"
+    assert contrary.pricing_context["home_probability"] == pytest.approx(
+        stats.t.cdf((0.8 * market_margin - 0.2 * 40) / scale, 500)
+    )
+    assert len(h2h.pricing_context["reference_pairs"]) == 3
+    assert h2h.pricing_context["decision_batch_game_stake_units"] == 3
+    # No posted spread is needed to price a paired moneyline.
+    without_spread = build_recommendations(
+        projections.assign(market_home_spread=None), offers, decision_at=now
+    )
+    pd.testing.assert_series_equal(
+        decisions.query("market == 'h2h'").win_probability,
+        without_spread.query("market == 'h2h'").win_probability,
+    )
     assert (
-        build_recommendations(
-            projections.assign(market_home_spread=None), offers, decision_at=now
-        )
-        .query("market == 'h2h' and game_id <= 5")
-        .reason.eq("missing_market_spread")
+        without_spread.query("market == 'spreads' and game_id <= 5")
+        .reason.eq("missing_spread_reference")
         .all()
     )
-    # A gate no offer clears still yields the volume floor, labelled as such.
+    # With the model matching the reference margin, a single book's own vig
+    # cannot produce an edge. Model disagreement may legitimately create one.
+    single_market_home = (180 / 280) / (180 / 280 + 100 / 260)
+    single_market_margin = scale * stats.t.ppf(single_market_home, 500)
+    single_book = build_recommendations(
+        projections.iloc[:1].assign(pure_home_margin=single_market_margin),
+        offers[offers.provider_key.eq("book_a")],
+        decision_at=now,
+    )
+    assert single_book.query("market == 'h2h'").status.eq("no_play").all()
+    duplicate = build_recommendations(
+        projections.iloc[:1],
+        pd.concat([offers, offers[offers.provider_key.eq("book_a")]]),
+        decision_at=now,
+    )
+    pd.testing.assert_series_equal(
+        decisions.iloc[:3].win_probability, duplicate.win_probability
+    )
+    # A newer capture missing the opposite side cannot resurrect an old pair.
+    incomplete = offers[
+        offers.game_id.eq(1) & offers.market.eq("h2h") & offers.selection.eq("home")
+    ].assign(market_fetched_at=now + pd.Timedelta(seconds=1))
+    newer = build_recommendations(
+        projections.iloc[:1],
+        pd.concat([offers, incomplete]),
+        decision_at=now + pd.Timedelta(seconds=1),
+    )
+    assert newer.query("market == 'h2h'").reason.eq("missing_moneyline_reference").all()
+    for invalid_price in (None, 50):
+        invalid_capture = build_recommendations(
+            projections.iloc[:1],
+            pd.concat([offers, incomplete.assign(price=invalid_price)]),
+            decision_at=now + pd.Timedelta(seconds=1),
+        )
+        assert (
+            invalid_capture.query("market == 'h2h'")
+            .reason.eq("missing_moneyline_reference")
+            .all()
+        )
+    # Conflicting prices from one capture are ambiguous, not extra votes.
+    conflict = offers[
+        offers.game_id.eq(1) & offers.market.eq("h2h") & offers.selection.eq("home")
+    ].assign(price=-400)
+    ambiguous = build_recommendations(
+        projections.iloc[:1], pd.concat([offers, conflict]), decision_at=now
+    )
+    assert (
+        ambiguous.query("market == 'h2h'")
+        .reason.eq("missing_moneyline_reference")
+        .all()
+    )
+    # A gate no offer clears still yields exploratory picks, labelled as such.
     monkeypatch.setattr(recommendations_module, "MIN_EDGE_POINTS", 100.0)
     floored = build_recommendations(projections, offers, decision_at=now)
     monkeypatch.setattr(recommendations_module, "MIN_EDGE_POINTS", 2.0)
     assert floored.status.eq("recommended").sum() == min(
-        recommendations_module.VOLUME_FLOOR, 15
+        recommendations_module.VOLUME_FLOOR, 10
     )
     assert floored[floored.status.eq("recommended")].reason.eq("volume_floor").all()
     assert floored[floored.game_id.ge(6)].status.eq("no_play").all()
+    # Cap the original shortlist, never refill from the other market. Three
+    # available slots and three same-market leaders yield two promotions,
+    # even though eligible offers in the other market remain available.
+    with monkeypatch.context() as patch:
+        patch.setattr(recommendations_module, "MIN_EDGE_POINTS", 100.0)
+        patch.setattr(recommendations_module, "VOLUME_FLOOR", 3)
+        capped = build_recommendations(projections, offers, decision_at=now)
+    eligible = floored[floored.status.eq("recommended")].sort_values(
+        ["edge_points", "game_id", "market"], ascending=[False, True, True]
+    )
+    shortlist = eligible.head(3)
+    assert shortlist.market.nunique() == 1
+    assert eligible.market.nunique() == 2
+    selected = capped[capped.status.eq("recommended")]
+    assert len(selected) == 2
+    assert set(selected.index) == set(shortlist.head(2).index)
+    assert sum(c["floor_capped"] for c in capped.pricing_context) == 1
+    assert all(c["floor_backfill"] is False for c in capped.pricing_context)
     assert decisions[decisions.game_id.ge(6)].status.eq("no_play").all()
-    # Spreads are priced from the market-informed margin, not the pure margin.
-    blended = projections.set_index("game_id").market_informed_home_margin
-    spreads = decisions[decisions.market.ne("h2h")]
-    assert spreads.model_home_margin.eq(spreads.game_id.map(blended)).all()
+    assert all(
+        r["recommendation_tier"] == "exploratory"
+        for r in floored.loc[floored.status.eq("recommended"), "pricing_context"]
+    )
+    assert all(
+        r["recommendation_tier"] == "edge_qualified"
+        for r in decisions.loc[decisions.status.eq("recommended"), "pricing_context"]
+    )
+    # Spread pricing preserves 20% of model opinion and a frozen market reference.
+    indexed = projections.set_index("game_id")
+    expected = -0.8 * indexed.market_home_spread + 0.2 * indexed.pure_home_margin
+    spreads = decisions[decisions.market.eq("spreads")]
+    assert np.allclose(spreads.model_home_margin, spreads.game_id.map(expected))
+    # An archived history rating contributes within the 20% model component.
+    history = (
+        build_recommendations(
+            projections.iloc[:1].assign(
+                market_history_home_margin=4, market_history_weight=0.35
+            ),
+            offers,
+            decision_at=now,
+        )
+        .query("market == 'spreads'")
+        .iloc[0]
+    )
+    assert history.model_home_margin == pytest.approx(
+        0.8 * 12 + 0.2 * (0.65 * 14 + 0.35 * 4)
+    )
+    assert history.pricing_context["published_home_margin"] == 13
+    assert history.pricing_context["calibration_version"] == "spread_keys_020_v1"
+    # Missing season type remains unknown; a schedule provides the flag
+    # without changing selection or inferring the stage from a week number.
+    assert history.pricing_context["is_postseason"] is None
+    staged = build_recommendations(
+        projections,
+        offers,
+        decision_at=now,
+        games=pd.DataFrame({"id": range(1, 10), "season_type": ["postseason"] * 9}),
+    )
+    assert staged.status.equals(decisions.status)
+    for row in staged.itertuples():
+        assert row.pricing_context["is_postseason"] is True
+        assert "postseason" in row.pricing_context["research_flags"]
+        if row.market == "spreads":
+            edge = row.pricing_context["spread_edge_breakdown"]
+            assert edge["model_contribution_points"] == pytest.approx(
+                0.2 * edge["model_disagreement_points"]
+            )
+            assert sum(
+                edge[k]
+                for k in (
+                    "model_contribution_points",
+                    "quote_difference_points",
+                    "price_distribution_adjustment_points",
+                )
+            ) == pytest.approx(row.edge_points)
+    # Audited key-number probability fixture and complementary side contracts.
+    from backend.model.spread_pricing import spread_win_loss
+
+    win, loss = spread_win_loss(7, 15.35, 500, 7)
+    assert [win, loss] == pytest.approx([0.44512897515057426, 0.5073914035183481])
+    assert 1 - win - loss > 0.04
+    for threshold in (-7.5, -7, 0, 3, 3.5, 7, 80, 100):
+        home = spread_win_loss(7, 15.35, 500, threshold)
+        away = spread_win_loss(-7, 15.35, 500, -threshold)
+        assert home == pytest.approx(away[::-1])
+        assert 0 <= sum(home) <= 1 + 1e-12
     # Totals price from the published total; the posted total is recorded.
     totals = decisions[decisions.market.eq("totals")]
     assert totals.market_total.eq(43.0).all()
@@ -339,7 +506,17 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         home.win_probability * 100 / 110
         - (1 - home.win_probability - home.push_probability)
     )
-    assert decisions[decisions.game_id.eq(9)].reason.eq("unpaired_market").all()
+    assert (
+        decisions[decisions.game_id.eq(9) & decisions.market.ne("h2h")]
+        .reason.eq("unpaired_market")
+        .all()
+    )
+    assert (
+        decisions[decisions.game_id.eq(9) & decisions.market.eq("h2h")]
+        .reason.eq("missing_moneyline_reference")
+        .all()
+    )
+    assert floored.query("market == 'h2h'").status.eq("no_play").all()
     assert (
         build_recommendations(
             projections, offers, decision_at=now + pd.Timedelta(days=1)
@@ -423,7 +600,14 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
     assert moneyline.loc[4, "profit_units"] == pytest.approx(1.6)
     assert moneyline.loc[5, "outcome"] == "void"
     assert decisions.loc[decisions.market.eq("h2h"), "point"].isna().all()
-    assert decisions.loc[decisions.market.eq("h2h"), "push_probability"].eq(0).all()
+    assert (
+        decisions.loc[
+            decisions.market.eq("h2h") & decisions.win_probability.notna(),
+            "push_probability",
+        ]
+        .eq(0)
+        .all()
+    )
     tied = grade_recommendations(
         frozen,
         games.assign(home_points=20, away_points=20),
@@ -445,7 +629,7 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
     )
     assert (
         build_recommendations(projections.iloc[:1], mismatch, decision_at=now)
-        .reason.eq("kickoff_mismatch")
+        .reason.isin(["kickoff_mismatch", "missing_moneyline_reference"])
         .all()
     )
     # Regional-feed quotes can qualify without a user-specified bookmaker list.

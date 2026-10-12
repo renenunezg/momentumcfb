@@ -129,7 +129,9 @@ def handle_refresh_picks(args: Namespace) -> None:
         "market_offers",
         f"{args.season}_{args.week:02d}_refresh_{stamp}.parquet",
     )
-    decisions = build_recommendations(projections, offers, decision_at=decided_at)
+    decisions = build_recommendations(
+        projections, offers, decision_at=decided_at, games=games
+    )
     with engine.begin() as conn:
         replaced = _publish_recommendations(conn, decisions)
     picks = decisions[decisions["status"].eq("recommended")]

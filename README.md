@@ -171,7 +171,7 @@ The weekly runner requires that reviewed bundle, validates the prior before paid
 ## Database recovery and release contract
 
 The secret-free schema snapshot in `sql/baseline/2026_10_05.sql` restores the deployed schema as inspected on October 5, 2026, without production rows.
-On an empty Supabase project, install `momentumweb/sql/001_site_revalidate.sql` first, restore this baseline with `psql -X -v ON_ERROR_STOP=1`, then apply 020_decision_forecast.sql and 021_site_revalidate.sql from `sql`.
+On an empty Supabase project, install `momentumweb/sql/001_site_revalidate.sql` first, restore this baseline with `psql -X -v ON_ERROR_STOP=1`, then apply `020_decision_forecast.sql`, `021_site_revalidate.sql`, and `20261012190441_moneyline_pricing_context.sql` from `sql`.
 The baseline includes the earlier migrations; do not replay those on top of it.
 The shared function requires pg_net and Vault, with `site_revalidate_secret` provisioned separately and matched to the site's `REVALIDATE_SECRET`.
 A plain PostgreSQL test database needs the `anon`, `authenticated`, and `service_role` roles and a local callback substitute.
@@ -181,3 +181,41 @@ New forecast publication reads only a completed, hash-verified run directory.
 Late quarterback reports produce a separately recorded `decision_forecast` containing published inputs, adjusted inputs, and the reports available at decision time.
 Existing recommended picks remain frozen.
 Older forecasts without `market_total_weight` cannot be safely reconstructed from totals alone and must be republished from source artifacts before adjusting late totals.
+
+## Research recommendation policy
+
+CFB picks v11 keeps recommendations enabled and grades each recorded pick at one flat research unit.
+The moneyline market reference is the median of fresh same-book home/away implied probabilities after proportional vig removal.
+Each book contributes once, both sides must share the event, kickoff, capture, and update timestamp, and only the latest capture can supply the reference and selected price.
+Conflicting duplicates, missing pairs, and pairs with implied probability sums outside 1.00 to 1.20 are excluded.
+The moneyline pricing margin is 20 percent pure model and 80 percent market-equivalent margin, preserving the previous policy's model weight and margin-space blend.
+The market-equivalent margin is the inverse CDF of the paired market probability under the existing pricing dispersion and degrees of freedom; the blended margin is then converted back to win probability.
+The 20 percent weight is an explicit research policy, not a claim that historical results validated it.
+A moneyline needs positive estimated EV and at least two probability-equivalent points of edge, using the existing margin dispersion and distribution to convert probability gaps into the previous policy's point scale.
+These points are a selection yardstick, not a forecast margin.
+Moneylines cannot be promoted to meet the volume floor.
+Spreads price a separate margin with 20 percent model/history and 80 percent frozen market reference; the published point forecast is unchanged.
+Frozen symmetric integer-margin weights in `backend/model/spread_pricing.json` increase football key-number and push mass, fitted on 2020-2022 development data and checked on 2023-2025 historical proxy data.
+This improves historical probability scores but does not establish profitable executable edges.
+Spread pricing fixes dispersion at 15.35 and Student-t degrees of freedom at 500, matching the calibration contract.
+Totals retain the published 50/50 market blend and 15.93-point pricing dispersion.
+The 15-pick research target remains enabled for positive-EV spreads and totals, with one unit per pick.
+Policy v11 first shortlists up to the remaining target, then caps each market's exploratory additions at half that shortfall, rounded up.
+Capped picks are not replaced, so a batch can finish below 15 recommendations; qualified picks are never capped.
+Every recommendation records `edge_qualified` or `exploratory` in its pricing context; performance summaries separate these groups using the frozen reason, with unknown older reasons labeled `legacy`.
+Spreads additionally record the pricing margin, model/history component, frozen market margin and timestamp, published margin, and calibration version.
+The selected-side spread edge breaks into the 20 percent model contribution, the offered-line difference from the frozen market reference, and the price/distribution adjustment; these sum to the recorded edge.
+Quote differences do not prove line movement because the reference and offer can come from different books or times.
+Decision context records regular season, postseason, or unknown, along with postseason and differing-spread-quote research flags.
+These flags describe the forecast context and do not disable recommendations or imply known player absences.
+
+Every new decision stores its probability source, research status, and shared-game exposure in `pricing_context`.
+Moneylines additionally store the exact reference pairs, timestamps, normalized probabilities, component margins, blend space, and model weight, separately from the selected execution price and any quarterback adjustment in `decision_forecast`.
+Several picks on one game remain several one-unit picks, with correlated outcomes; `decision_batch_game_stake_units` records that batch's exposure, not the eventual full ledger exposure.
+Recommendations and estimated edges are research hypotheses, not evidence of profitability.
+Existing published picks and settlements remain frozen under their recorded policy.
+
+Run `poetry run python -m examples.audit_moneyline_probabilities` to reproduce the frozen v8 historical audit from local CFBD caches.
+The `current_020` scenario name in that audit means the policy at the October 12 audit cutoff, not the latest recommendation policy.
+Historical closing quotes lack executable decision timestamps, and the later seasons have been inspected in earlier research, so this replay is a proxy evaluation rather than a pristine validation sample.
+No 2026 outcomes are used to fit the replacement moneyline policy.

@@ -229,6 +229,7 @@ def test_adjusted_decision_forecast_survives_database_publication():
                 game_id=99000001,
                 season=2026,
                 week=6,
+                season_type="postseason",
                 start_date=now + pd.Timedelta(days=1),
                 as_of=now - pd.Timedelta(hours=1),
                 model_version="decision-acceptance",
@@ -261,9 +262,46 @@ def test_adjusted_decision_forecast_survives_database_publication():
         "adjusted": {"model_total": float(adjusted.model_total.iloc[0])},
     }
     adjusted["decision_forecast"] = [evidence]
-    decisions = build_recommendations(
-        adjusted, pd.DataFrame(columns=OFFER_COLUMNS), decision_at=now
-    )
+    offers = pd.DataFrame(
+        [
+            dict(
+                game_id=99000001,
+                market="h2h",
+                selection=side,
+                point=None,
+                price=price,
+                provider=book,
+                provider_key=book,
+                provider_last_update=now,
+                market_fetched_at=now,
+                execution_eligibility_verified=True,
+                match_score=1.0,
+                odds_api_event_id="acceptance-event",
+                commence_time=original.start_date.iloc[0],
+            )
+            for book, prices in [
+                ("a", [-180, 160]),
+                ("b", [-350, 280]),
+                ("c", [-350, 280]),
+            ]
+            for side, price in zip(["home", "away"], prices)
+        ]
+    ).reindex(columns=OFFER_COLUMNS)
+    offers["point"] = pd.to_numeric(offers.point).astype(float)
+    spread_offers = offers[offers.provider_key.eq("a")].copy()
+    spread_offers["market"] = "spreads"
+    spread_offers["point"] = spread_offers.selection.map({"home": -3.0, "away": 3.0})
+    spread_offers["price"] = -110
+    offers = pd.concat([offers, spread_offers], ignore_index=True)
+    decisions = build_recommendations(adjusted, offers, decision_at=now)
+    assert decisions.query("market == 'h2h'").status.eq("recommended").all()
+    # Parquet is the real handoff between decision generation and publication.
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "decisions.parquet"
+        decisions.to_parquet(path)
+        decisions = pd.read_parquet(path)
     engine = create_engine(value)
     try:
         with engine.connect() as conn:
@@ -271,7 +309,7 @@ def test_adjusted_decision_forecast_survives_database_publication():
             _publish_recommendations(conn, decisions)
             saved = conn.execute(
                 text(
-                    "SELECT decision_forecast, model_total FROM cfb.recommendations WHERE game_id=99000001"
+                    "SELECT market, decision_forecast, pricing_context, model_total FROM cfb.recommendations WHERE game_id=99000001"
                 )
             ).all()
             assert len(saved) == 3
@@ -281,6 +319,113 @@ def test_adjusted_decision_forecast_survives_database_publication():
                 for row in saved
             )
             assert original.model_total.iloc[0] == 50.0
+            h2h = next(row for row in saved if row.market == "h2h")
+            assert (
+                h2h.pricing_context["probability_source"]
+                == "paired_moneyline_margin_blend_v1"
+            )
+            assert h2h.pricing_context["model_weight"] == 0.2
+            assert h2h.pricing_context["blend_space"] == "margin"
+            assert h2h.pricing_context["pricing_home_margin"] == pytest.approx(
+                0.8 * h2h.pricing_context["market_equivalent_home_margin"]
+                + 0.2 * h2h.pricing_context["model_home_margin"]
+            )
+            assert len(h2h.pricing_context["reference_pairs"]) == 3
+            assert h2h.pricing_context["decision_batch_game_stake_units"] == 2
+            spread = next(row for row in saved if row.market == "spreads")
+            assert spread.pricing_context["calibration_version"] == "spread_keys_020_v1"
+            assert spread.pricing_context["recommendation_tier"] == "edge_qualified"
+            assert spread.pricing_context["is_postseason"] is True
+            assert spread.pricing_context["floor_backfill"] is False
+            assert spread.pricing_context["spread_edge_breakdown"][
+                "model_contribution_points"
+            ] == pytest.approx(0.2 * (adjusted.pure_home_margin.iloc[0] - 6.0))
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT picks FROM cfb.recommendation_summary(2026, 'all', null) WHERE segment_kind='qualification' AND segment='edge_qualified'"
+                    )
+                ).scalar_one()
+                == 2
+            )
+            # Publication must preserve the original pick and its full pricing evidence.
+            refreshed = build_recommendations(
+                adjusted,
+                offers.assign(price=-110),
+                decision_at=now + pd.Timedelta(milliseconds=1),
+            )
+            _publish_recommendations(conn, refreshed)
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT pricing_context FROM cfb.recommendations WHERE game_id=99000001 AND market='h2h'"
+                    )
+                ).scalar_one()
+                == h2h.pricing_context
+            )
+            from sqlalchemy.exc import IntegrityError
+
+            # Database eligibility enforces the no-moneyline-floor rule too.
+            invalid = decisions.copy()
+            invalid["game_id"] = 99000002
+            invalid.loc[invalid.market.eq("h2h"), "reason"] = "volume_floor"
+            with pytest.raises(IntegrityError), conn.begin_nested():
+                _publish_recommendations(conn, invalid)
+            # Malformed spread evidence cannot silently bypass the DB contract.
+            invalid = decisions.copy()
+            invalid["game_id"] = 99000003
+            mask = invalid.market.eq("spreads")
+            invalid.loc[mask, "pricing_context"] = invalid.loc[
+                mask, "pricing_context"
+            ].map(lambda context: {**context, "model_weight": 0.0})
+            with pytest.raises(IntegrityError), conn.begin_nested():
+                _publish_recommendations(conn, invalid)
+            invalid = decisions.copy()
+            invalid["game_id"] = 99000005
+            invalid["pricing_context"] = invalid.pricing_context.map(
+                lambda context: {**context, "floor_backfill": True}
+            )
+            with pytest.raises(IntegrityError), conn.begin_nested():
+                _publish_recommendations(conn, invalid)
+            exploratory = build_recommendations(
+                original.assign(
+                    game_id=99000004,
+                    home_margin=7.0,
+                    pure_home_margin=7.0,
+                    market_informed_home_margin=6.0,
+                    market_home_spread=-5.0,
+                ),
+                spread_offers.assign(
+                    game_id=99000004,
+                    point=spread_offers.selection.map({"home": -6.0, "away": 6.0}),
+                ),
+                decision_at=now,
+            )
+            assert (
+                exploratory.query("market == 'spreads'").reason.eq("volume_floor").all()
+            )
+            _publish_recommendations(conn, exploratory)
+            # The total population stays intact and the filtered RPC/view agree.
+            for source in (
+                "cfb.recommendation_summary(2026, 'all', null)",
+                "cfb.recommendation_performance",
+            ):
+                tiers = dict(
+                    conn.execute(
+                        text(
+                            f"SELECT segment, picks FROM {source} WHERE segment_kind='qualification'"
+                        )
+                    ).all()
+                )
+                assert tiers == {"edge_qualified": 2, "exploratory": 1}
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT picks FROM cfb.recommendation_summary(2026, 'spreads', null) WHERE segment_kind='qualification' AND segment='exploratory'"
+                    )
+                ).scalar_one()
+                == 1
+            )
             transaction.rollback()
     finally:
         engine.dispose()

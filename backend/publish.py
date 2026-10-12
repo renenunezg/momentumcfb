@@ -134,8 +134,10 @@ GAME_PROJECTIONS_OPTIONAL_COLUMNS = [
 ]
 
 # The newest migration that replaces the recommendations eligibility check.
-RECOMMENDATION_ELIGIBILITY_CONSTRAINT = "recommendation_eligibility_v8"
-RECOMMENDATION_ELIGIBILITY_MIGRATION = "sql/020_decision_forecast.sql"
+RECOMMENDATION_ELIGIBILITY_CONSTRAINT = "recommendation_eligibility_v11"
+RECOMMENDATION_ELIGIBILITY_MIGRATION = (
+    "sql/20261012190441_moneyline_pricing_context.sql"
+)
 
 MARKET_COMPARISONS_COLUMNS = [
     "game_id",
@@ -594,7 +596,17 @@ def publish(
         if offers_path.exists()
         else pd.DataFrame(columns=OFFER_COLUMNS)
     )
-    decisions = build_recommendations(projections, offers)
+    schedule_path = run_directory / "forecast_schedule.parquet"
+    if not schedule_path.exists():
+        schedule_path = (
+            RAW_DIR / "preseason" / str(season) / "games.parquet"
+            if source == "preseason"
+            else RAW_DIR / "games" / f"{season}.parquet"
+        )
+    schedule = pd.read_parquet(schedule_path) if schedule_path.exists() else None
+    if schedule is not None and "id" not in schedule:
+        schedule = schedule.rename(columns={"game_id": "id"})
+    decisions = build_recommendations(projections, offers, games=schedule)
 
     with engine.begin() as conn:
         if not _table_exists(conn, "recommendations"):
@@ -869,9 +881,22 @@ def _publish_recommendations(conn, decisions):
     rows = _serving_frame(decisions, RECOMMENDATION_COLUMNS)
     import json
 
-    rows["decision_forecast"] = rows["decision_forecast"].map(
-        lambda value: json.dumps(value, allow_nan=False) if value is not None else None
-    )
+    import numpy as np
+
+    def parquet_json(value):
+        # Arrow restores nested JSON lists as ndarrays at the artifact boundary.
+        if isinstance(value, (np.ndarray, np.generic)):
+            return value.tolist()
+        raise TypeError(f"Unsupported decision JSON type: {type(value).__name__}")
+
+    for column in ("decision_forecast", "pricing_context"):
+        rows[column] = rows[column].map(
+            lambda value: (
+                json.dumps(value, allow_nan=False, default=parquet_json)
+                if value is not None
+                else None
+            )
+        )
     existing = pd.read_sql_query(
         text(
             "SELECT game_id, market, start_date, status, outcome, side, "
@@ -900,7 +925,9 @@ def _publish_recommendations(conn, decisions):
     )
     columns = ", ".join(RECOMMENDATION_COLUMNS)
     values = ", ".join(
-        "CAST(:decision_forecast AS jsonb)" if c == "decision_forecast" else f":{c}"
+        f"CAST(:{c} AS jsonb)"
+        if c in {"decision_forecast", "pricing_context"}
+        else f":{c}"
         for c in RECOMMENDATION_COLUMNS
     )
     updates = ", ".join(
