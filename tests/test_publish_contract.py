@@ -284,3 +284,23 @@ def test_adjusted_decision_forecast_survives_database_publication():
             transaction.rollback()
     finally:
         engine.dispose()
+
+
+def test_recommendation_schema_guard_follows_the_latest_eligibility_migration():
+    import re
+
+    from backend import publish
+
+    version, migration = max(
+        (int(match.group(1)), path.name)
+        for path in (Path(__file__).parents[1] / "sql").glob("[0-9]*.sql")
+        for match in re.finditer(
+            r"add constraint recommendation_eligibility_v(\d+)", path.read_text()
+        )
+    )
+    # A migration that renames the constraint must move the pre-run guard too.
+    assert (
+        publish.RECOMMENDATION_ELIGIBILITY_CONSTRAINT
+        == f"recommendation_eligibility_v{version}"
+    )
+    assert publish.RECOMMENDATION_ELIGIBILITY_MIGRATION == f"sql/{migration}"

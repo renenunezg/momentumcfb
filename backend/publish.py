@@ -133,6 +133,10 @@ GAME_PROJECTIONS_OPTIONAL_COLUMNS = [
     "market_informed_away_points",
 ]
 
+# The newest migration that replaces the recommendations eligibility check.
+RECOMMENDATION_ELIGIBILITY_CONSTRAINT = "recommendation_eligibility_v8"
+RECOMMENDATION_ELIGIBILITY_MIGRATION = "sql/020_decision_forecast.sql"
+
 MARKET_COMPARISONS_COLUMNS = [
     "game_id",
     "start_date",
@@ -1031,10 +1035,11 @@ def ensure_recommendation_schema():
             text(
                 "SELECT EXISTS (SELECT 1 FROM pg_constraint "
                 "WHERE conrelid = 'cfb.recommendations'::regclass "
-                "AND conname = 'recommendation_eligibility_v7')"
-            )
+                "AND conname = :constraint)"
+            ),
+            {"constraint": RECOMMENDATION_ELIGIBILITY_CONSTRAINT},
         ).scalar_one():
             raise ValueError(
-                "Apply sql/019_recommendation_published_total.sql "
+                f"Apply {RECOMMENDATION_ELIGIBILITY_MIGRATION} "
                 "before refreshing CFB recommendations"
             )
