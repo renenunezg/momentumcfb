@@ -5,10 +5,12 @@ ODDS_SOURCE=espn; unset that variable to return to The Odds API. Events,
 odds, and game states are returned in The Odds API's shapes, so offer
 flattening, kickoff capture, and grading are unchanged.
 
-ESPN differs from The Odds API in three ways callers rely on:
+ESPN differs from The Odds API in four ways callers rely on:
 - It carries one book, so the consensus is DraftKings alone.
 - It has no quote timestamp, so each price is stamped with the read time.
 - It is unmetered, so every quota field is None.
+- It reports each game's state, so a game is pregame until ESPN says it has
+  started rather than until its scheduled start.
 """
 
 from datetime import date, datetime, timedelta, timezone
@@ -97,8 +99,10 @@ def _teams(event: dict) -> dict[str, str]:
     }
 
 
-def _started(event: dict, as_of: datetime) -> bool:
-    return event["status"]["type"]["state"] != "pre" or _commence(event) <= as_of
+def _started(event: dict) -> bool:
+    # Kickoff trails the scheduled start by minutes, and ESPN keeps the line
+    # posted until then, so the state decides rather than the clock.
+    return event["status"]["type"]["state"] != "pre"
 
 
 def _bookmakers(event: dict, updated: str) -> list[dict]:
@@ -202,7 +206,7 @@ class EspnOddsClient:
             for event in scoreboard
             if commence_from <= _commence(event) <= commence_to
             and (
-                _started(event, fetched_at)
+                _started(event)
                 or any(
                     market["key"] == "spreads"
                     for bookmaker in _bookmakers(event, updated)
@@ -238,7 +242,7 @@ class EspnOddsClient:
             if event_ids and identity["id"] not in event_ids:
                 continue
             # Once a game starts ESPN shows its closing line, never a live offer.
-            if _started(event, fetched_at):
+            if _started(event):
                 continue
             if not commence_from <= _commence(event) <= commence_to:
                 continue
@@ -274,6 +278,7 @@ class EspnOddsClient:
                     **_identity(event),
                     # A postponed game is "post" without being completed.
                     "completed": bool(status.get("completed")),
+                    "started": _started(event),
                     "scores": None
                     if status["state"] == "pre"
                     else [

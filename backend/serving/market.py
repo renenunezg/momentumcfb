@@ -87,13 +87,17 @@ def flatten_closing_moneylines(lines: pd.DataFrame) -> pd.DataFrame:
     return home.merge(away, on="game_id", how="outer")
 
 
-def flatten_live_closing_lines(offers: pd.DataFrame) -> pd.DataFrame:
+def flatten_live_closing_lines(
+    offers: pd.DataFrame, events: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Resolve one pregame Odds API spread per game without live leakage.
 
     Each game uses the latest stored snapshot that the capture classified as
     pregame. The closing spread is the median home-team spread across the
     providers in that snapshot. Quotes first observed after kickoff are never
-    eligible, even if no pregame quote was captured for the game.
+    eligible, even if no pregame quote was captured for the game. A pregame
+    quote read after its commence time is eligible only when ``events`` shows
+    the feed reported the game's own state in that snapshot.
     """
     required = {
         "game_id",
@@ -138,7 +142,13 @@ def flatten_live_closing_lines(offers: pd.DataFrame) -> pd.DataFrame:
         ]
     )
     finite = np.isfinite(spreads["point"].to_numpy(float))
-    spreads = spreads[finite & spreads["fetched_at"].le(spreads["commence_time"])]
+    before_commence = spreads["fetched_at"].le(spreads["commence_time"])
+    if events is not None and "status_source" in events:
+        reported = events[events["status_source"].eq("game_state")]
+        before_commence |= pd.MultiIndex.from_frame(
+            spreads[["snapshot_id", "game_id"]]
+        ).isin(pd.MultiIndex.from_frame(reported[["snapshot_id", "game_id"]]))
+    spreads = spreads[finite & before_commence]
     if spreads.empty:
         raise ValueError("live odds captures carry no eligible pregame home spreads")
 
@@ -294,7 +304,7 @@ def build_live_market_anchors(
     problems, frames = verify_live_snapshots(season)
     if problems:
         raise ValueError("invalid live odds captures: " + "; ".join(problems))
-    closing = flatten_live_closing_lines(frames["offers"])
+    closing = flatten_live_closing_lines(frames["offers"], frames["events"])
     return _build_market_anchors(closing, season, "odds_api_live_capture", schedule)
 
 

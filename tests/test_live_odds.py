@@ -1384,9 +1384,118 @@ def test_espn_fallback_captures_pregame_lines_then_live_state_without_quota(
     assert (away_spread["point"], away_spread["price"]) == (3.5, 100)
     assert pd.isna(pregame.poll.iloc[0]["odds_requests_remaining"])
 
+    # ESPN keeps a game upcoming, with its line posted, for minutes after the
+    # scheduled start. Until its state leaves "pre" that line is still pregame.
+    serve("pre", kickoff_at - timedelta(minutes=12))
+    delayed = capture()
+    assert delayed.events["phase"].tolist() == ["pregame"]
+    assert delayed.events["status_source"].tolist() == ["game_state"]
+    assert delayed.offers["phase"].eq("pregame").all()
+    assert set(delayed.offers["market"]) == {"spreads", "totals"}
+
     # After kickoff ESPN shows the closing line; it must not be stored as live.
     serve("in", kickoff_at - timedelta(minutes=11))
     started = capture()
     assert started.offers.empty
     assert started.events["phase"].tolist() == ["live"]
     assert started.events["home_score"].tolist() == [7.0]
+
+
+def test_unmetered_polling_requests_closing_markets_on_every_poll(monkeypatch):
+    # With a free source any poll can turn out to be the last pregame one for
+    # a game whose kickoff slips, so each poll carries the closing markets.
+    monkeypatch.setenv("ODDS_SOURCE", "espn")
+    requested = []
+
+    def capture(*args, markets, metered, **kwargs):
+        requested.append((markets, metered))
+        return _snapshot()
+
+    monkeypatch.setattr(live, "capture_live_snapshot", capture)
+    completed = live.run_live_polling(
+        2026,
+        _schedule(),
+        polls=2,
+        interval_seconds=0,
+        lookback_hours=1,
+        lookahead_hours=2,
+        days_from=None,
+        min_quota=20,
+        max_failures=1,
+        poll_markets=(live.LIVE_MARKETS, live.LIVE_MARKETS),
+        progress=lambda message: None,
+        sleep=lambda seconds: None,
+    )
+    assert completed == 2
+    assert requested == [(live.CLOSING_MARKETS, False)] * 2
+
+
+def test_kickoff_window_follows_reported_game_state_past_the_scheduled_start():
+    # Replay of 2026-10-14: ESPN still listed FIU at Jacksonville State as
+    # upcoming, with its line posted, almost three minutes after the scheduled
+    # start. The closing line is the last one read before ESPN said it began.
+    scheduled = pd.Timestamp("2026-10-14T00:00:00Z")
+    early = scheduled - pd.Timedelta(minutes=2)
+    closing = scheduled + pd.Timedelta(minutes=2)
+    live_at = scheduled + pd.Timedelta(minutes=4)
+    target = kickoff.KickoffTarget(
+        game_ids=(101,),
+        first_kickoff=scheduled,
+        last_kickoff=scheduled,
+        labels=("Florida International at Jacksonville State (101)",),
+    )
+    schedule = pd.DataFrame(
+        {
+            "game_id": [101],
+            "start_date": [scheduled],
+            "home_team": ["Jacksonville State"],
+            "away_team": ["Florida International"],
+        }
+    )
+    events = pd.DataFrame(
+        {
+            "game_id": [101, 101, 101],
+            "fetched_at": [early, closing, live_at],
+            "phase": ["pregame", "pregame", "live"],
+            "commence_time": [scheduled.isoformat()] * 3,
+            "status_source": ["game_state"] * 3,
+        }
+    )
+    offers = pd.DataFrame(
+        {
+            "game_id": [101] * 3,
+            "snapshot_id": ["close"] * 3,
+            "fetched_at": [closing] * 3,
+            "phase": ["pregame"] * 3,
+            "market": ["spreads", "totals", "totals"],
+            "selection": ["home", "over", "under"],
+            "provider_key": ["draftkings"] * 3,
+            "provider_last_update": [closing] * 3,
+            "point": [-3.0, 44.5, 44.5],
+            "price": [-110, -110, -110],
+        }
+    )
+    anchors = pd.DataFrame(
+        {
+            "game_id": [101],
+            "season": [2026],
+            "closing_snapshot_id": ["close"],
+            "closing_fetched_at": [closing],
+            "latest_provider_update": [closing],
+        }
+    )
+    frames = {"events": events, "offers": offers}
+
+    problems, details = kickoff.validate_completed_window(
+        target, frames, anchors, min_providers=1, schedule=schedule
+    )
+    assert problems == []
+    assert "+240s from the frozen schedule" in details[0]
+
+    # A feed that only reports a commence time gives no such proof, so a
+    # snapshot read after that time is still rejected.
+    timed = {**frames, "events": events.assign(status_source="scores")}
+    problems, _ = kickoff.validate_completed_window(
+        target, timed, anchors, min_providers=1, schedule=schedule
+    )
+    assert any("post-kickoff snapshot" in problem for problem in problems)
