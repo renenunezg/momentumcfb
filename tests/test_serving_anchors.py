@@ -150,3 +150,48 @@ def test_live_market_anchor_freezes_latest_pregame_snapshot():
     assert closing["closing_spread"].tolist() == [-4.5]
     assert closing["n_spread_offers"].tolist() == [2]
     assert closing["closing_fetched_at"].tolist() == [kickoff - pd.Timedelta(minutes=1)]
+
+
+def test_live_market_anchor_trusts_reported_game_state_past_the_scheduled_start():
+    # A feed that reports game state can prove a line was still pregame after
+    # the scheduled start. A feed that only reports a commence time cannot, so
+    # its offers read after that time stay ineligible.
+    kickoff = pd.Timestamp("2026-10-14T00:00:00Z")
+    rows = []
+    for snapshot_id, fetched_at, point in (
+        ("early", kickoff - pd.Timedelta(minutes=2), -2.5),
+        ("delayed", kickoff + pd.Timedelta(minutes=2), -3.0),
+    ):
+        rows.append(
+            {
+                "game_id": 10,
+                "snapshot_id": snapshot_id,
+                "fetched_at": fetched_at,
+                "commence_time": kickoff,
+                "phase": "pregame",
+                "provider_key": "draftkings",
+                "provider_last_update": fetched_at,
+                "market": "spreads",
+                "selection": "home",
+                "point": point,
+            }
+        )
+    offers = pd.DataFrame(rows)
+    events = pd.DataFrame(
+        {
+            "game_id": [10, 10],
+            "snapshot_id": ["early", "delayed"],
+            "status_source": ["game_state", "game_state"],
+        }
+    )
+
+    assert flatten_live_closing_lines(offers)["closing_snapshot_id"].tolist() == [
+        "early"
+    ]
+    timed = events.assign(status_source="scores")
+    assert flatten_live_closing_lines(offers, timed)[
+        "closing_snapshot_id"
+    ].tolist() == ["early"]
+    closing = flatten_live_closing_lines(offers, events)
+    assert closing["closing_snapshot_id"].tolist() == ["delayed"]
+    assert closing["closing_spread"].tolist() == [-3.0]

@@ -1075,26 +1075,39 @@ def _provider_kickoffs(
     """Kickoff per game as the provider reported it when the game went live.
 
     The frozen schedule is only a fallback: the closing line is the last
-    pregame quote before the kickoff the provider actually committed to.
+    pregame quote before the kickoff the provider actually committed to. A
+    feed that reports game state can show a game still pregame at or after
+    that time; its kickoff is then the first read that found it under way.
     """
     if events.empty or "commence_time" not in events:
         return {}
-    started = events[
-        events["game_id"].isin(game_ids) & events["phase"].isin(["live", "final"])
-    ].copy()
-    if started.empty:
-        return {}
-    started["commence_time"] = pd.to_datetime(
-        started["commence_time"], utc=True, errors="coerce"
+    events = events[events["game_id"].isin(game_ids)].copy()
+    events["commence_time"] = pd.to_datetime(
+        events["commence_time"], utc=True, errors="coerce"
     )
-    started = started.dropna(subset=["commence_time", "fetched_at"])
-    started = started.sort_values("fetched_at", kind="stable").drop_duplicates(
-        "game_id"
+    events = events.dropna(subset=["commence_time", "fetched_at"])
+    started = (
+        events[events["phase"].isin(["live", "final"])]
+        .sort_values("fetched_at", kind="stable")
+        .drop_duplicates("game_id")
     )
-    return {
+    kickoffs = {
         int(game_id): commence
         for game_id, commence in zip(started["game_id"], started["commence_time"])
     }
+    if "status_source" not in events:
+        return kickoffs
+    reported_pregame = events[
+        events["phase"].eq("pregame") & events["status_source"].eq("game_state")
+    ]
+    for row in started.itertuples(index=False):
+        earlier = reported_pregame[
+            reported_pregame["game_id"].eq(row.game_id)
+            & reported_pregame["fetched_at"].lt(row.fetched_at)
+        ]
+        if earlier["fetched_at"].ge(row.commence_time).any():
+            kickoffs[int(row.game_id)] = row.fetched_at
+    return kickoffs
 
 
 def _write_market_anchors(season: int, built: pd.DataFrame) -> None:

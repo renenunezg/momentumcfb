@@ -255,15 +255,19 @@ def live_poll_quota_cost(markets: tuple[str, ...], days_from: int | None = None)
     return len(normalize_live_markets(markets)) + scores_cost
 
 
-def resolve_phase(commence_time, completed, as_of: datetime) -> str:
-    """Provider-backed phase; events absent from the scores feed stay unknown."""
+def resolve_phase(commence_time, completed, as_of: datetime, started=None) -> str:
+    """Provider-backed phase; events absent from the scores feed stay unknown.
+
+    A feed that reports whether the game is under way decides the phase. One
+    that does not falls back to the provider's commence time.
+    """
     if completed is None:
         return "unknown"
     if bool(completed):
         return "final"
-    if pd.to_datetime(commence_time, utc=True) <= pd.Timestamp(as_of):
-        return "live"
-    return "pregame"
+    if started is None:
+        started = pd.to_datetime(commence_time, utc=True) <= pd.Timestamp(as_of)
+    return "live" if started else "pregame"
 
 
 def load_division_one_schedule(season: int) -> pd.DataFrame:
@@ -339,6 +343,11 @@ def _event_rows(
     for event_id, event in merged_events.items():
         status = scoreboard_by_id.get(event_id)
         completed = None if status is None else bool(status.get("completed"))
+        started = None if status is None else status.get("started")
+        if status is None:
+            status_source = "missing"
+        else:
+            status_source = "scores" if started is None else "game_state"
         scoreboard_last_update = None if status is None else status.get("last_update")
         game_id, match_score = match_event(
             event.get("commence_time"),
@@ -355,9 +364,9 @@ def _event_rows(
                 "odds_home_team": event.get("home_team"),
                 "odds_away_team": event.get("away_team"),
                 "phase": resolve_phase(
-                    event.get("commence_time"), completed, fetched_at
+                    event.get("commence_time"), completed, fetched_at, started
                 ),
-                "status_source": "scores" if status is not None else "missing",
+                "status_source": status_source,
                 "status_completed": completed,
                 "scoreboard_last_update": scoreboard_last_update,
                 "scoreboard_staleness_seconds": _staleness_seconds(
@@ -928,7 +937,9 @@ def run_live_polling(
         )
         if not plan:
             break
-        markets = plan[0]
+        # The unmetered source prices every market in one free read, and any
+        # poll can be the last pregame one for a game whose kickoff slips.
+        markets = plan[0] if metered else CLOSING_MARKETS
         try:
             snapshot = capture_live_snapshot(
                 client,
