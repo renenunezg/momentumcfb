@@ -17,6 +17,13 @@ from backend.odds.client import (
 NOW = datetime(2026, 9, 5, 20, 0, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _default_odds_source(monkeypatch):
+    # The capture workflows run this file as a gate with ODDS_SOURCE exported
+    # for the job; the stubbed paid client must still be the one under test.
+    monkeypatch.delenv("ODDS_SOURCE", raising=False)
+
+
 def _odds_event(event_id, home, away, commence, last_update):
     return {
         "id": event_id,
