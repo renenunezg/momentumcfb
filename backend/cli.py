@@ -400,6 +400,13 @@ def _add_publish_commands(sub) -> None:
     )
     _cfbd_budget_arguments(ingest_players)
 
+    ingest_portal = sub.add_parser(
+        "ingest-portal",
+        help="snapshot CFBD transfer portal entries, one call per season",
+    )
+    _seasons_argument(ingest_portal, SEASONS)
+    _cfbd_budget_arguments(ingest_portal)
+
     qb_starters = sub.add_parser(
         "qb-starters",
         help="list teams whose last box-score starting quarterback changed",

@@ -420,6 +420,37 @@ def ingest_player_sources(
     return pd.DataFrame(manifest)
 
 
+def ingest_portal(client: CFBDClient, season: int) -> pd.DataFrame:
+    """Snapshot one season of transfer portal entries with a single CFBD call."""
+    client.ensure_budget(1)
+    params = {"year": season}
+    frame = to_snake(pd.DataFrame(client.get("/player/portal", params)))
+    if "season" not in frame.columns:
+        frame.insert(0, "season", season)
+    destination = players_dir(season)
+    write_parquet(frame, destination / "portal.parquet")
+    manifest_path = destination / "manifest.parquet"
+    manifest = (
+        pd.read_parquet(manifest_path).to_dict("records")
+        if manifest_path.exists()
+        else []
+    )
+    manifest = [entry for entry in manifest if entry["source"] != "portal"]
+    manifest.append(
+        {
+            "source": "portal",
+            "endpoint": "/player/portal",
+            "params": json.dumps(params, sort_keys=True),
+            "source_fetched_at": datetime.now(timezone.utc).isoformat(),
+            "row_count": len(frame),
+            "is_empty": frame.empty,
+        }
+    )
+    write_parquet(pd.DataFrame(manifest), manifest_path)
+    log.info("players %s portal: %s rows", season, len(frame))
+    return frame
+
+
 def read_weekly(season: int, kind: str) -> pd.DataFrame:
     """Concatenate every stored weekly frame of one kind for a season."""
     files = sorted(players_dir(season).glob(f"{kind}_*.parquet"))
