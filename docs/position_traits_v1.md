@@ -34,7 +34,7 @@ evaluation is
 `backend/data/processed/players/position_traits/evaluation_2024.parquet`,
 and every table below is copied from those two files and from the run log of
 `position-traits-fit --dev-seasons 2020 2021 2022 2023 2024 --validate 2025`
-on 2026-10-16 (`output/position-grade-fit-202610162151.log`). Player values
+on 2026-10-16 (`output/position-grade-fit-202610162156.log`). Player values
 for 2020 through 2025 are all `cfb_player_value_v4`, so the EPA baseline is
 one model.
 
@@ -173,7 +173,13 @@ For one week, among qualified FBS players at the position:
   on the few traits it has;
 - a player is graded only if he has a value for his position's primary
   exposure trait and the traits he has values for carry at least 0.6 of
-  the position's weight (`PRIMARY_TRAITS` and `MIN_WEIGHT_COVERAGE` in
+  the weight of the traits available at the position that week. A trait is
+  available when at least half of the week's qualified FBS players at the
+  position have a value for it, so structural gaps (`qb.floor` before a
+  fourth game, prior-week baselines in week one, receiver independence
+  before any receiver has targets from another passer) leave the
+  denominator for everyone, while one unusually thin profile still fails
+  (`PRIMARY_TRAITS`, `MIN_WEIGHT_COVERAGE` and `MIN_TRAIT_AVAILABILITY` in
   `backend/players/traits/grade.py`);
 - `grade = 50 + 10 x (composite - mean) / sd` over the graded players,
   clipped to [20, 80];
@@ -200,7 +206,7 @@ evaluation file's `grade_coverage` table (every season is there):
 
 | Group | Qualified FBS | Graded | No primary trait | Coverage under 0.6 |
 | --- | --- | --- | --- | --- |
-| QB | 172 | 165 | 2 | 5 |
+| QB | 172 | 170 | 2 | 0 |
 | RB | 403 | 403 | 0 | 0 |
 | WR | 660 | 659 | 1 | 0 |
 | TE | 248 | 248 | 0 | 0 |
@@ -210,9 +216,10 @@ evaluation file's `grade_coverage` table (every season is there):
 | OL | 136 | 136 | 0 | 0 |
 | P | 136 | 136 | 0 | 0 |
 
-At the end of a season the rule removes a handful of QBs and almost no one
-else (1 to 7 QBs per development season). Early in a season it removes far
-more, because `qb.floor` needs four games: see Scoring 2026.
+At the end of a season the rule removes almost no one: in the development
+seasons 0 or 1 QB, 0 to 4 backs, 1 or 2 receivers and 0 to 3 tight ends a
+season, all for lacking the primary trait. Early in a season it removes
+more: see Scoring 2026.
 
 ## Composite reliability
 
@@ -223,7 +230,7 @@ the two composites are correlated. This curve sets the uncertainty band.
 
 | Group | 4 games | 6 games | 8 games | 12 games | Players at 4 | Players at 6 | Players at 8 | Players at 12 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| QB | 0.164 | 0.232 | 0.293 | 0.381 | 207 | 187 | 494 | 253 |
+| QB | 0.173 | 0.245 | 0.275 | 0.380 | 934 | 751 | 598 | 260 |
 | RB | 0.075 | 0.084 | 0.119 | 0.097 | 2101 | 1771 | 1430 | 592 |
 | WR | 0.165 | 0.222 | 0.234 | 0.267 | 3310 | 2698 | 2101 | 717 |
 | TE | 0.130 | 0.166 | 0.207 | 0.151 | 1153 | 838 | 585 | 115 |
@@ -233,10 +240,9 @@ the two composites are correlated. This curve sets the uncertainty band.
 | OL | 0.202 | 0.315 | 0.349 | 0.413 | 653 | 640 | 612 | 496 |
 | P | 0.258 | 0.336 | 0.440 | 0.502 | 655 | 607 | 557 | 386 |
 
-Each half is graded under the same coverage rule. At 4 and 6 games a half
-has two or three games, too few for `qb.floor`, so only QBs with receiver
-independence clear 0.6 of the weight: the QB rows at 4 and 6 games rest on
-207 and 187 players against 494 at 8.
+Each half is graded under the same coverage rule, with availability
+judged within the half, so a half too short for `qb.floor` drops it from
+every QB's denominator.
 
 The RB composite is barely reliable: 0.119 at 8 games, lower than three of
 its five weighted traits alone. The band for a back stays near the full
@@ -332,11 +338,11 @@ empty.
 
 | Group | Seasons | Players | Grade to next grade | Grade to next EPA | EPA to next EPA | Holdout |
 | --- | --- | --- | --- | --- | --- | --- |
-| QB | 2020-2021 | 58 | 0.207 | 0.226 | 0.364 |  |
-| QB | 2021-2022 | 87 | 0.123 | 0.251 | 0.521 |  |
-| QB | 2022-2023 | 81 | 0.326 | 0.234 | 0.426 |  |
-| QB | 2023-2024 | 79 | 0.389 | 0.372 | 0.374 |  |
-| QB | 2024-2025 | 80 | 0.252 | 0.357 | 0.514 | yes |
+| QB | 2020-2021 | 62 | 0.267 | 0.299 | 0.374 |  |
+| QB | 2021-2022 | 89 | 0.127 | 0.279 | 0.518 |  |
+| QB | 2022-2023 | 83 | 0.324 | 0.232 | 0.408 |  |
+| QB | 2023-2024 | 82 | 0.373 | 0.396 | 0.390 |  |
+| QB | 2024-2025 | 82 | 0.226 | 0.330 | 0.546 | yes |
 | RB | 2020-2021 | 166 | 0.304 | 0.348 | 0.328 |  |
 | RB | 2021-2022 | 197 | 0.201 | 0.220 | 0.340 |  |
 | RB | 2022-2023 | 224 | 0.283 | 0.278 | 0.373 |  |
@@ -385,7 +391,7 @@ Holdout, grade to next EPA against EPA to next EPA:
 
 | Group | Grade to next EPA | EPA to next EPA | Better |
 | --- | --- | --- | --- |
-| QB | 0.357 | 0.514 | EPA |
+| QB | 0.330 | 0.546 | EPA |
 | RB | 0.244 | 0.256 | EPA |
 | WR | 0.215 | 0.397 | EPA |
 | TE | 0.286 | 0.294 | EPA |
@@ -406,7 +412,7 @@ reported for the draft board and were never used to set a weight.
 
 | Group | Players | Pick, v4 | Pick, grade | NFL snaps, v4 | NFL snaps, grade |
 | --- | --- | --- | --- | --- | --- |
-| QB | 61 | 0.418 | 0.344 | 0.032 | -0.063 |
+| QB | 61 | 0.418 | 0.333 | 0.032 | -0.085 |
 | RB | 109 | 0.417 | 0.344 | 0.386 | 0.302 |
 | WR | 179 | 0.433 | 0.218 | 0.268 | 0.059 |
 | TE | 82 | 0.388 | 0.361 | 0.148 | 0.175 |
@@ -462,19 +468,19 @@ are matched and counted here but feed no weight.
 ## Scoring 2026 and serving
 
 `position-traits --seasons 2026` scores with the frozen model (log
-`output/position-grade-2026-202610162151.log`). Local raw data for 2026 ends
+`output/position-grade-2026-202610162156.log`). Local raw data for 2026 ends
 at week 1, so the artifact holds weeks 0 and 1: 67,812 rows, with 4,552
 qualified FBS players graded and 2,914 war rows. It ran in receptions mode
 and used the frozen expectation tables, reading no earlier play-by-play
 season. There is no calibration replay for 2026, so the WAR leverage came
 from the stored weekly serving anchors for weeks 0 and 1.
 
-The coverage rule bites hard in week 1:
+The coverage rule in week 1:
 
 | Group | Qualified FBS | Graded | No primary trait | Coverage under 0.6 |
 | --- | --- | --- | --- | --- |
-| QB | 179 | 0 | 17 | 162 |
-| RB | 391 | 350 | 10 | 31 |
+| QB | 179 | 160 | 17 | 2 |
+| RB | 391 | 316 | 10 | 65 |
 | WR | 613 | 512 | 101 | 0 |
 | TE | 239 | 199 | 40 | 0 |
 | DL | 1100 | 1100 | 0 | 0 |
@@ -483,12 +489,20 @@ The coverage rule bites hard in week 1:
 | OL | 137 | 137 | 0 | 0 |
 | P | 126 | 126 | 0 | 0 |
 
-No QB is graded after one game. `qb.floor` needs four games and
-`qb.receiver_independence` exists for few QBs; without both, a QB's other
-traits carry at most 0.562 of the weight, under the 0.6 bar. The QB grade
-therefore appears only from a QB's fourth game, unless he has receiver
-independence. In receptions mode many receivers have no value per target
+After one game `qb.floor` and receiver independence are unavailable for
+everyone, so they leave the QB denominator and 160 of 179 QBs are graded.
+The 65 backs under 0.6 have values for too few of the traits most backs
+already have. In receptions mode many receivers have no value per target
 yet, which is why 101 WRs and 40 TEs lack the primary trait.
+
+`backtest.score_cached_season(season)` scores an already-built season from
+its cached snapshot, coverage and credit with the latest model before that
+season, without rebuilding anything or reading the expectation tables, and
+writes `processed/players/position_traits/scored_<season>.parquet` with the
+runner's columns. For 2025 it wrote 1,112,719 rows, 81,386 of them grade
+rows and 66,626 war rows (log
+`output/position-grade-scored-2025-202610162156.log`), for a local preview
+of the validation season.
 
 Each artifact row carries the trait snapshot columns plus `uncertainty`
 (empty on trait rows), `in_grade` (true on a trait row whose trait has
@@ -579,8 +593,7 @@ games with an FCS side.
 
 The grade has no volume term beyond the coverage rule: a missing trait
 counts as average, and a player needs his primary trait and 0.6 of the
-weight. That rule leaves QBs ungraded until their fourth game unless they
-have receiver independence (see Scoring 2026). The uncertainty band reads
+available weight. The uncertainty band reads
 only games, not how many traits a player has. Two of the development seasons are in receptions mode. The
 weights are as precise as split-half correlations on hundreds to thousands
 of players allow, which is about two decimals; the QB receiver independence
@@ -599,8 +612,9 @@ Plainly, against EPA credit alone on the 2024 to 2025 holdout:
   box score traits do. The grade also persists far better than defensive
   EPA (DL 0.384, LB 0.409, DB 0.272 grade to grade), and at DL it ranks the
   draft better than v4.
-- **QB and WR: EPA credit wins clearly.** QB 0.357 against 0.514, WR 0.215
-  against 0.397, and EPA wins in every development pair at both. At WR the
+- **QB and WR: EPA credit wins clearly.** QB 0.330 against 0.546, WR 0.215
+  against 0.397. EPA wins every development pair at WR and three of four at
+  QB (the grade edges 2023 to 2024, 0.396 against 0.390). At WR the
   grade is also far behind v4 on the draft. For passers and receivers the
   traits do not yet add up to what the credited plays already say.
 - **RB and TE: EPA credit wins narrowly** (RB 0.244 against 0.256, TE 0.286
