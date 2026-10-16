@@ -1,7 +1,8 @@
 import pandas as pd
+import pytest
 
 from backend.players import ingest
-from backend.players.traits import context
+from backend.players.traits import TraitSpec, context, register
 
 
 def test_ingest_portal_writes_one_call_per_season(tmp_path, monkeypatch):
@@ -46,3 +47,16 @@ def test_player_presence_counts_zero_stat_box_rows_as_present():
     out = context.player_presence(box, credit, games)
     de1 = out[out["athlete_id"].eq("de1")].set_index("game_id")["present"]
     assert de1.to_dict() == {1: True, 2: True, 3: False}
+
+
+def test_register_keys_by_name_and_rejects_duplicates_and_bad_aggregates(monkeypatch):
+    monkeypatch.setattr("backend.players.traits.TRAITS", {})
+    from backend.players import traits
+
+    spec = TraitSpec("def.havoc", ("DL", "LB", "DB"), "counted")
+    assert register(spec) is spec
+    assert traits.TRAITS == {"def.havoc": spec}
+    with pytest.raises(ValueError, match="already registered"):
+        register(TraitSpec("def.havoc", ("DL",), "counted"))
+    with pytest.raises(ValueError, match="unknown aggregate"):
+        TraitSpec("x", ("QB",), "counted", aggregate="rates")
