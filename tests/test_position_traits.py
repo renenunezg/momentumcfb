@@ -1403,7 +1403,12 @@ def test_run_position_traits_scores_with_a_frozen_fit_and_never_refits(monkeypat
     assert (out["model_version"] == "cfb_position_traits_v1").all()
     assert set(out.loc[out["trait"].eq("headline"), "kind"]) == {"fitted"}
     assert out["uncertainty"].notna().where(out["trait"].eq("headline"), True).all()
-    assert list(out.columns) == [*snapshots.TRAIT_SNAPSHOT_COLUMNS, "uncertainty", "replaces_value", "in_headline"]
+    assert list(out.columns) == [
+        *snapshots.TRAIT_SNAPSHOT_COLUMNS, "exposure", "uncertainty", "replaces_value", "in_headline"
+    ]
+    on_traits = out["trait"].ne("headline")
+    assert out.loc[on_traits, "exposure"].tolist() == FAKE_SEASON_2026["snapshots"]["exposure"].tolist()
+    assert out.loc[~on_traits, "exposure"].isna().all()
     assert (out["as_of"] == AS_OF.isoformat()).all()
     assert pd.read_parquet(tmp_path / "players" / "position_traits" / "2026.parquet").shape == out.shape
 

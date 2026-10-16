@@ -59,6 +59,7 @@ def heisman_board_artifact(season: int, week: int) -> tuple[str, ...]:
 
 POSITION_TRAIT_COLUMNS = [
     *TRAIT_SNAPSHOT_COLUMNS,
+    "exposure",
     "uncertainty",
     "replaces_value",
     "in_headline",
@@ -138,7 +139,7 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     snapshot = backtest.build_season_traits(season)["snapshots"].astype({"athlete_id": str})
     values = backtest.player_values(season)
     scored = headline_rows(snapshot, values, fit)
-    traits = snapshot[TRAIT_SNAPSHOT_COLUMNS].assign(uncertainty=np.nan)
+    traits = snapshot[[*TRAIT_SNAPSHOT_COLUMNS, "exposure"]].assign(uncertainty=np.nan)
     feature = traits["position_group"] + ":" + traits["trait"]
     traits["in_headline"] = feature.isin(fit.weights.index) & ~feature.isin(fit.dropped)
     scored = scored.assign(in_headline=True, as_of=None, model_version=None)
