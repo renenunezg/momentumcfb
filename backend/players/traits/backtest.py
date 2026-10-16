@@ -375,9 +375,9 @@ def epa_columns(matrix: pd.DataFrame) -> list[str]:
 def fit_on(
     matrix: pd.DataFrame, features: list[str], dev_seasons: list[int]
 ) -> headline.HeadlineFit:
-    return headline.fit_headline(
-        matrix[[*headline.META_COLUMNS, *features]], dev_seasons
-    )
+    fixed = [name for name in headline.fixed_columns(matrix) if name in matrix.columns]
+    columns = list(dict.fromkeys([*headline.META_COLUMNS, *fixed, *features]))
+    return headline.fit_headline(matrix[columns], dev_seasons)
 
 
 def predict_margin(fit: headline.HeadlineFit, rows: pd.DataFrame) -> np.ndarray:
@@ -385,11 +385,12 @@ def predict_margin(fit: headline.HeadlineFit, rows: pd.DataFrame) -> np.ndarray:
     scale = fit.feature_scale.set_index("feature")
     kept = list(scale.index)
     z = ((rows[kept] - scale["mean"]) / scale["sd"]).to_numpy(float)
-    return (
-        fit.weights["intercept"]
-        + fit.weights["home_field"] * rows["home_field"].to_numpy(float)
-        + z @ fit.weights.reindex(kept).to_numpy(float)
+    fixed = sum(
+        fit.weights[name] * rows[name].to_numpy(float)
+        for name in headline.FIXED[1:]
+        if name in fit.weights.index
     )
+    return fit.weights["intercept"] + fixed + z @ fit.weights.reindex(kept).to_numpy(float)
 
 
 def _mae(fit: headline.HeadlineFit, rows: pd.DataFrame) -> float:
