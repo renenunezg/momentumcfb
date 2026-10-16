@@ -109,7 +109,7 @@ TABLES = (
     "portal",
     "anchors",
 )
-ANCHOR_COLUMNS = ["season", "games", "with_projection", "dropped"]
+ANCHOR_COLUMNS = ["season", "games", "with_projection", "without_projection"]
 PORTAL_COLUMNS = [
     "season",
     "portal_rows",
@@ -909,7 +909,7 @@ def run_backtest(
             }
             for season, matrix in matrices.items()
         ]
-    ).assign(dropped=lambda f: f["games"] - f["with_projection"])[ANCHOR_COLUMNS]
+    ).assign(without_projection=lambda f: f["games"] - f["with_projection"])[ANCHOR_COLUMNS]
     dev_matrix = pd.concat(
         [matrices[season] for season in dev_seasons], ignore_index=True
     )
