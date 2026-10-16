@@ -136,6 +136,12 @@ def is_late_down(rows: pd.DataFrame) -> pd.Series:
     return rows["down"].isin(LATE_DOWNS)
 
 
+def is_short_yardage(rows: pd.DataFrame) -> pd.Series:
+    """Third or fourth and two or less, or inside the three."""
+    short = rows["distance"].le(SHORT_YARDAGE_DISTANCE) & is_late_down(rows)
+    return short | rows["yards_to_goal"].le(GOAL_LINE_YARDS)
+
+
 def is_two_minute(rows: pd.DataFrame) -> pd.Series:
     return rows["period"].isin(TWO_MINUTE_PERIODS) & rows["clock_seconds_remaining"].le(
         TWO_MINUTE_SECONDS
@@ -423,9 +429,7 @@ def _rb_short_yardage(
     carries: pd.DataFrame, tables: ExpectationTables, games: pd.DataFrame
 ) -> pd.DataFrame:
     """Conversions over expected on third or fourth and two or less, or inside the three."""
-    short = carries["distance"].le(SHORT_YARDAGE_DISTANCE) & is_late_down(carries)
-    goal_line = carries["yards_to_goal"].le(GOAL_LINE_YARDS)
-    plays = carries[short | goal_line]
+    plays = carries[is_short_yardage(carries)]
     events = per_game(plays, conversion_over_expected(plays, tables), plays["weight"])
     return trait_rows(opponent_adjusted(events, games), RB_TRAITS["rb.short_yardage"])
 
