@@ -1,6 +1,6 @@
 # Position trait ratings: design
 
-Date: 2026-10-16. Status: approved; amended the same day (see Amendment) after the first backtest.
+Date: 2026-10-16. Status: approved; amended the same day (see Amendment) after the first backtest. The amendment is implemented: the grade replaced the margin fit on 2026-10-16 (`docs/position_traits_v1.md`).
 
 ## Intent
 
