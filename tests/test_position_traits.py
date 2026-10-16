@@ -1,3 +1,6 @@
+import dataclasses
+from datetime import datetime, timezone
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -14,6 +17,7 @@ from backend.players.traits import (
     line,
     offense,
     register,
+    snapshots,
     targets,
     teammate,
 )
@@ -796,3 +800,147 @@ def test_kicking_traits_score_field_goals_and_punts_against_expectation(caplog):
     assert not any(trait == "p.punt_average" and game == 1 for trait, _, game in out.index)
     assert _pair(out, "p.punt_average", "p1", 2) == pytest.approx([120 - 3 * 230 / 6, 3.0])
     assert _pair(out, "p.punt_average", "p2", 2) == pytest.approx([105 - 3 * 230 / 6, 3.0])
+
+
+AS_OF = datetime(2024, 10, 1, tzinfo=timezone.utc)
+
+
+def _trait_row(athlete_id, model_week, game_id, trait, numerator, denominator=10.0):
+    return {"athlete_id": athlete_id, "model_week": model_week, "game_id": game_id, "trait": trait,
+            "numerator": numerator, "denominator": denominator, "kind": TRAITS[trait].kind}
+
+
+def _trait_frame(rows):
+    return pd.DataFrame(rows).astype({"game_id": "Int64"})
+
+
+def snapshot_context():
+    """Weeks 1, 2 and 4 have completed games; week 3's game was not played and
+    week 5 is still ahead. qb1 (A) throws 2/10 explosive in week 1, 4/10 in week 2
+    and 1/10 in week 4; qb2 (B) 1/10 in weeks 1 and 2; qb3 (C) appears only in
+    week 4; qb4 plays for FCS D. Nobody is on the roster but qb1."""
+    games = pd.DataFrame({
+        "game_id": [1, 2, 3, 4, 5, 6, 7],
+        "model_week": [1, 1, 2, 2, 3, 4, 5],
+        "completed": [True, True, True, True, False, True, False],
+        "home_team": ["A", "C", "A", "C", "A", "A", "B"],
+        "away_team": ["B", "D", "B", "D", "C", "C", "D"],
+        "home_classification": ["fbs", "fbs", "fbs", "fbs", "fbs", "fbs", "fbs"],
+        "away_classification": ["fbs", "fcs", "fbs", "fcs", "fbs", "fbs", "fcs"],
+        "start_date": pd.date_range("2024-08-31", periods=7, freq="7D"),
+    })
+    frames = _trait_frame([
+        _trait_row("qb1", 1, 1, "qb.explosive", 2.0),
+        _trait_row("qb1", 2, 3, "qb.explosive", 4.0),
+        _trait_row("qb1", 4, 6, "qb.explosive", 1.0),
+        _trait_row("qb2", 1, 1, "qb.explosive", 1.0),
+        _trait_row("qb2", 2, 3, "qb.explosive", 1.0),
+        _trait_row("qb3", 4, 6, "qb.explosive", 5.0),
+        _trait_row("qb4", 1, 2, "qb.explosive", 3.0),
+        _trait_row("qb4", 2, 4, "qb.explosive", 3.0),
+    ])
+    positions = pd.DataFrame({"athlete_id": ["qb1"], "position": ["QB"], "position_group": ["QB"]})
+    teams = pd.DataFrame({"school": ["A", "B", "C", "D"], "id": [11, 12, 13, 14],
+                          "classification": ["fbs", "fbs", "fbs", "fcs"]})
+    identity = pd.DataFrame({"athlete_id": ["qb1", "qb2", "qb3", "qb4"],
+                             "athlete_name": ["One", "Two", "Three", "Four"], "team": ["A", "B", "C", "D"]})
+    return frames, positions, games, teams, identity
+
+
+def test_snapshots_are_cumulative_and_carry_a_dead_week_forward():
+    frames, positions, games, teams, identity = snapshot_context()
+    out = snapshots.weekly_trait_snapshots(frames, positions, games, teams, identity, 2024, AS_OF)
+    assert list(out.columns) == snapshots.TRAIT_SNAPSHOT_COLUMNS
+    assert sorted(out["week"].unique()) == [1, 2, 3, 4]  # week 5 has no completed game yet
+    qb = out[out["athlete_id"].eq("qb1") & out["trait"].eq("qb.explosive")].set_index("week")
+    assert qb.loc[1, "value"] == pytest.approx(0.2)
+    assert qb.loc[2, "value"] == pytest.approx(0.3)
+    assert qb.loc[3, "value"] == pytest.approx(0.3)
+    assert qb.loc[4, "value"] == pytest.approx(7 / 30)
+    assert qb["games"].tolist() == [1, 2, 2, 3]
+    assert (qb["team_id"] == 11).all() and (qb["athlete_name"] == "One").all()
+    assert (out["model_version"] == snapshots.MODEL_VERSION).all() and (out["as_of"] == AS_OF.isoformat()).all()
+
+
+def test_snapshot_percentiles_only_rank_qualified_players_and_keep_unrostered_players():
+    frames, positions, games, teams, identity = snapshot_context()
+    out = snapshots.weekly_trait_snapshots(frames, positions.iloc[:0], games, teams, identity, 2024, AS_OF)
+    assert set(out["position_group"]) == {"QB"}  # group from the trait registry
+    week2 = out[out["week"].eq(2) & out["trait"].eq("qb.explosive")]
+    assert week2.loc[~week2["qualified"], "percentile"].isna().all()
+    # week 4 needs two games: qb3 has one and is not ranked
+    week4 = out[out["week"].eq(4) & out["trait"].eq("qb.explosive")].set_index("athlete_id")
+    assert not week4.loc["qb3", "qualified"] and np.isnan(week4.loc["qb3", "percentile"])
+    assert week4.loc["qb1", "percentile"] == pytest.approx(100.0)
+    assert week4.loc["qb2", "percentile"] == pytest.approx(0.0)
+
+
+def test_split_half_reliability_reports_each_game_count():
+    frames, positions, games, teams, identity = snapshot_context()
+    out = snapshots.split_half_reliability(frames, positions, games_at=(1,))
+    assert set(out.columns) == {"position_group", "trait", "games", "players", "correlation"}
+    assert out.empty  # three players with two games is under the minimum
+
+    # Twelve QBs with four games each and a rate that differs by player only:
+    # the odd and even halves agree exactly; six games are too few for three per half.
+    rows = [
+        _trait_row(f"q{i}", week, 100 * i + week, "qb.explosive", float(i % 3))
+        for i in range(12) for week in range(1, 5)
+    ]
+    out = snapshots.split_half_reliability(_trait_frame(rows), positions.iloc[:0], games_at=(1, 2, 3))
+    assert out[["position_group", "trait", "games", "players"]].values.tolist() == [
+        ["QB", "qb.explosive", 1, 12],
+        ["QB", "qb.explosive", 2, 12],
+    ]
+    assert out["correlation"].tolist() == pytest.approx([1.0, 1.0])
+
+
+def test_snapshot_latest_and_quantile_aggregates_and_fbs_only_percentiles(monkeypatch):
+    frames, positions, games, teams, identity = snapshot_context()
+    extra = _trait_frame([
+        # qb5 (A): floor games 0.4, -0.1, NaN, 0.2, 0.0
+        _trait_row("qb5", 1, 1, "qb.floor", 0.4, 1.0),
+        _trait_row("qb5", 1, 2, "qb.floor", -0.1, 1.0),
+        _trait_row("qb5", 2, 3, "qb.floor", np.nan, 1.0),
+        _trait_row("qb5", 2, 4, "qb.floor", 0.2, 1.0),
+        _trait_row("qb5", 4, 6, "qb.floor", 0.0, 1.0),
+        # dl1 (B): one game of havoc, weekly impact in weeks 1 and 2 only
+        _trait_row("dl1", 1, 1, "def.havoc", 1.0),
+        _trait_row("dl1", 1, pd.NA, "def.impact", 0.5, 1.0),
+        _trait_row("dl1", 2, pd.NA, "def.impact", 0.8, 1.0),
+        # the D (FCS) and A lines
+        _trait_row("unit:D", 1, 2, "ol.stuff_rate", 1.0),
+        _trait_row("unit:A", 1, 1, "ol.stuff_rate", 2.0),
+    ])
+    identity = pd.concat([identity, pd.DataFrame({"athlete_id": ["qb5", "dl1"], "athlete_name": ["Five", "Dee"],
+                                                  "team": ["A", "B"]})], ignore_index=True)
+    positions = pd.concat([positions, pd.DataFrame({"athlete_id": ["dl1"], "position": ["DE"],
+                                                    "position_group": ["DL"]})], ignore_index=True)
+    out = snapshots.weekly_trait_snapshots(pd.concat([frames, extra], ignore_index=True), positions, games,
+                                           teams, identity, 2024, AS_OF)
+    by = out.set_index(["athlete_id", "trait", "week"])
+    # quantile20 needs four games with a value: three through week 2, four through week 4
+    assert np.isnan(by.loc[("qb5", "qb.floor", 2), "value"])
+    assert by.loc[("qb5", "qb.floor", 4), "value"] == pytest.approx(np.quantile([0.4, -0.1, 0.2, 0.0], 0.2))
+    assert by.loc[("qb5", "qb.floor", 2), "games"] == 4  # the NaN game still counts as played
+    # latest keeps the last weekly value and adds no games
+    assert [by.loc[("dl1", "def.impact", week), "value"] for week in (1, 2, 3, 4)] == pytest.approx([0.5, 0.8, 0.8, 0.8])
+    assert by.loc[("dl1", "def.impact", 4), "games"] == 1
+    assert by.loc[("dl1", "def.impact", 1), "percentile"] == pytest.approx(100.0)  # alone in the group
+    assert by.loc[("dl1", "def.impact", 1), "position_group"] == "DL"
+    # FCS players and units are qualified but never ranked
+    assert by.loc[("qb4", "qb.explosive", 2), "qualified"]
+    assert np.isnan(by.loc[("qb4", "qb.explosive", 2), "percentile"])
+    assert by.loc[("unit:D", "ol.stuff_rate", 1), "position_group"] == "OL"
+    assert by.loc[("unit:D", "ol.stuff_rate", 1), "team"] == "D"
+    assert np.isnan(by.loc[("unit:D", "ol.stuff_rate", 1), "percentile"])
+    assert by.loc[("unit:A", "ol.stuff_rate", 1), "percentile"] == pytest.approx(100.0)
+    week2 = out[out["week"].eq(2) & out["trait"].eq("qb.explosive")].set_index("athlete_id")["percentile"]
+    assert week2.loc["qb1"] == pytest.approx(100.0) and week2.loc["qb2"] == pytest.approx(0.0)
+
+    spec = TRAITS["qb.explosive"]
+    for higher_is_better, expected in ((False, [0.0, 100.0]), (None, [np.nan, np.nan])):
+        monkeypatch.setitem(TRAITS, "qb.explosive", dataclasses.replace(spec, higher_is_better=higher_is_better))
+        out = snapshots.weekly_trait_snapshots(frames, positions, games, teams, identity, 2024, AS_OF)
+        week2 = out[out["week"].eq(2) & out["trait"].eq("qb.explosive")].set_index("athlete_id")["percentile"]
+        assert week2.loc[["qb1", "qb2"]].tolist() == pytest.approx(expected, nan_ok=True)
