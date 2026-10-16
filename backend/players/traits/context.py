@@ -7,7 +7,7 @@ are built from.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -61,6 +61,8 @@ class SeasonContext:
     teams: pd.DataFrame
     positions: pd.DataFrame
     presence: pd.DataFrame
+    # v4's credited frame (play credit plus box disruptions), the source of its per-game value.
+    credited: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=CREDITED_COLUMNS))
 
 
 def player_presence(
@@ -181,4 +183,5 @@ def load_season_context(season: int) -> SeasonContext:
         teams=teams,
         positions=positions,
         presence=presence,
+        credited=credited,
     )

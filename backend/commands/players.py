@@ -127,3 +127,11 @@ def handle_player_prior(args: Namespace) -> None:
     log.info("player opponent prior %s: %s teams", args.season, len(prior))
     if args.runtime_bundle:
         export_runtime_bundle(args.season, Path(args.runtime_bundle))
+
+
+def handle_position_traits_fit(args: Namespace) -> None:
+    from backend.players.traits.backtest import run_backtest, write_backtest
+
+    result = run_backtest(args.dev_seasons, args.validate, rebuild=args.rebuild)
+    path = write_backtest(result, result.fit, max(args.dev_seasons))
+    log.info("position trait headline fit written to %s", path)
