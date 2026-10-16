@@ -205,6 +205,17 @@ def with_exposure(
     return out
 
 
+def with_fbs(snapshot: pd.DataFrame, season: int) -> pd.DataFrame:
+    """``snapshot`` plus ``fbs``: whether the row's team is FBS in the season's teams file.
+
+    The headline pool is qualified FBS players, so every scoring path adds the flag
+    the same way the weekly runner does.
+    """
+    teams = read_season_source(season, "teams")
+    schools = set(teams.loc[teams["classification"].eq("fbs"), "school"])
+    return snapshot.assign(fbs=snapshot["team"].isin(schools))
+
+
 def credited_games(credited: pd.DataFrame) -> pd.DataFrame:
     """Adjusted EPA per player and game from v4's credited frame: its per-game increments."""
     return (
@@ -502,7 +513,7 @@ def paired_games(frames: pd.DataFrame, credited: pd.DataFrame, n: int) -> pd.Dat
 def _half_scores(
     frames: pd.DataFrame,
     credited: pd.DataFrame,
-    groups: pd.Series,
+    people: pd.DataFrame,
     chosen: pd.DataFrame,
     n: int,
     fit: headline.HeadlineFit,
@@ -513,8 +524,13 @@ def _half_scores(
     adjusted EPA per game (0 for a chosen game without credit) for half ``h``. Each
     half is scored as its own snapshot week: trait values by the registered aggregate
     over the half's games and ``epa`` from the same per-game value. ``latest`` traits
-    have no games and score 0.
+    have no games and score 0. ``people`` (indexed by athlete) gives each athlete's
+    ``position_group``, ``team`` and ``fbs``; scoring keeps the headline's own rule, so
+    a non-FBS athlete has no headline and drops out of both sides. A group with no
+    headline (``headline.headline_groups``) scores its FBS athletes 0, a constant whose
+    correlation is NaN, so its v4 side is still reported.
     """
+    groups = people["position_group"]
     rows = frames.merge(chosen, on=["athlete_id", "game_id"])
     rows = rows.assign(
         aggregate=rows["trait"].map(
@@ -525,9 +541,15 @@ def _half_scores(
     half_snapshot = values.assign(
         week=values["half"],
         position_group=values["athlete_id"].map(groups),
+        team=values["athlete_id"].map(people["team"]),
+        fbs=values["athlete_id"].map(people["fbs"]).eq(True),
+        exposure=1.0,  # raw_score does not depend on the share
         games=n // 2,
         qualified=True,
     ).dropna(subset=["position_group"])
+    idle = people.index[
+        ~people["position_group"].isin(headline.headline_groups(fit)) & people["fbs"].eq(True)
+    ]
 
     players = chosen.drop_duplicates(["athlete_id", "half"])[["athlete_id", "half"]]
     epa = chosen.merge(credited, on=["athlete_id", "game_id"], how="left")
@@ -550,9 +572,10 @@ def _half_scores(
             half_values[half_values["week"].eq(half)],
             fit,
         )
-        columns[("headline", half)] = scored.drop_duplicates("athlete_id").set_index(
-            "athlete_id"
-        )["raw_score"]
+        raw = scored.drop_duplicates("athlete_id").set_index("athlete_id")["raw_score"]
+        present = half_values.loc[half_values["week"].eq(half), "athlete_id"]
+        constant = pd.Series(0.0, index=present[present.isin(idle)].to_numpy())
+        columns[("headline", half)] = pd.concat([raw, constant])
         columns[("v4", half)] = half_values[half_values["week"].eq(half)].set_index(
             "athlete_id"
         )["shrunk_per_game"]
@@ -571,19 +594,22 @@ def paired_split_half(
     under ``fit``, the v4 side the halves' adjusted EPA per game. Dev seasons are
     pooled with season-prefixed ids, a group needs ``MIN_QUALIFIED_PLAYERS`` athletes
     with both sides in both halves, and each group takes its athletes' snapshot
-    group. Returns ``(headline_rows, v4_rows)`` with equal ``players``.
+    group. The snapshots carry ``team`` and ``fbs`` (``with_fbs``), so only FBS athletes
+    have a headline side, as in serving. Returns ``(headline_rows, v4_rows)`` with
+    equal ``players``.
     """
     by_games: dict[int, list[pd.DataFrame]] = {n: [] for n in games_at}
     groups_pooled = []
     for season, data in seasons.items():
         frames = data["frames"].astype({"athlete_id": str})
         credited = data["credited"].astype({"athlete_id": str})
-        groups = (
+        people = (
             data["snapshots"]
             .astype({"athlete_id": str})
             .drop_duplicates("athlete_id")
-            .set_index("athlete_id")["position_group"]
+            .set_index("athlete_id")[["position_group", "team", "fbs"]]
         )
+        groups = people["position_group"]
         groups_pooled.append(
             groups.set_axis(_season_keys(groups.index.to_series(), season))
         )
@@ -591,7 +617,7 @@ def paired_split_half(
             chosen = paired_games(frames, credited, n)
             if n < 2 or chosen.empty:
                 continue
-            halves = _half_scores(frames, credited, groups, chosen, n, fit)
+            halves = _half_scores(frames, credited, people, chosen, n, fit)
             by_games[n].append(
                 halves.set_axis(_season_keys(halves.index.to_series(), season))
             )
@@ -835,8 +861,10 @@ def run_backtest(
         )
     seasons = {}
     for season in [*dev_seasons, validation_season]:
+        data = load_season(season, rebuild)
         seasons[season] = {
-            **load_season(season, rebuild),
+            **data,
+            "snapshots": with_fbs(data["snapshots"], season),
             "values": player_values(season),
         }
     matrices = {
@@ -874,6 +902,10 @@ def run_backtest(
         how="left",
     )
     swap = replacement_flags(swap)[SWAP_COLUMNS]
+    # A group whose every feature the main fit dropped has no headline to replace v4 with.
+    swap["replaces_value"] = swap["replaces_value"] & swap["position_group"].isin(
+        headline.headline_groups(fit)
+    )
 
     fit.reliability = headline_rows.dropna(subset=["correlation"])[
         headline.RELIABILITY_COLUMNS

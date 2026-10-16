@@ -132,38 +132,52 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
 
     The fit and its expectation tables are frozen: they are only loaded, never refit,
     and a fit whose development seasons include ``season`` is refused. Each row
-    carries ``fbs`` from the team's classification; only FBS rows are published.
+    carries ``fbs`` from the team's classification; headline rows exist for qualified
+    FBS players only, and only FBS rows are published.
     """
     fit_path = latest_headline_fit_path(season)
     fit = headline.load_headline_fit(fit_path)
     headline.validate_headline_fit(fit, season)
     tables = frozen_expectation_tables(fit_path)
+    teams = read_season_source(season, "teams")
+    fbs_schools = set(teams.loc[teams["classification"].eq("fbs"), "school"])
     snapshot = backtest.build_season_traits(season, tables=tables)["snapshots"].astype(
         {"athlete_id": str}
     )
+    # The headline pool is qualified FBS players, so the flag precedes scoring.
+    snapshot = snapshot.assign(fbs=snapshot["team"].isin(fbs_schools))
     values = backtest.player_values(season)
     scored = headline_rows(snapshot, values, fit)
+    with_headline = headline.headline_groups(fit)
     traits = snapshot[[*TRAIT_SNAPSHOT_COLUMNS, "exposure"]].assign(uncertainty=np.nan)
     feature = traits["position_group"] + ":" + traits["trait"]
-    traits["in_headline"] = feature.isin(fit.weights.index) & ~feature.isin(fit.dropped)
+    traits["in_headline"] = (
+        feature.isin(fit.weights.index)
+        & ~feature.isin(fit.dropped)
+        & traits["position_group"].isin(with_headline)
+    )
     scored = scored.assign(in_headline=True, as_of=None, model_version=None)
     out = pd.concat(
         [traits, scored[[*TRAIT_SNAPSHOT_COLUMNS, "uncertainty", "in_headline"]]],
         ignore_index=True,
     )
-    teams = read_season_source(season, "teams")
-    fbs_schools = set(teams.loc[teams["classification"].eq("fbs"), "school"])
+    replaces = {
+        group: bool(flag) and group in with_headline
+        for group, flag in fit.replaces_value.items()
+    }
     out = out.assign(
-        replaces_value=out["position_group"].map(fit.replaces_value).eq(True),
+        replaces_value=out["position_group"].map(replaces).eq(True),
         as_of=as_of.isoformat(),
         model_version=MODEL_VERSION,
         fbs=out["team"].isin(fbs_schools),
     )[POSITION_TRAIT_COLUMNS]
     store.write_processed(out, *position_traits_artifact(season))
+    without = [group for group in headline.GROUPS if group not in with_headline]
     log.info(
-        f"position traits {season}: {scored['athlete_id'].nunique()} players scored over "
-        f"{scored['week'].nunique()} weeks with the fit through "
-        f"{max(fit.dev_seasons)}; {sum(fit.replaces_value.values())} groups replace v4"
+        f"position traits {season}: {scored['athlete_id'].nunique()} qualified FBS players "
+        f"scored over {scored['week'].nunique()} weeks with the fit through "
+        f"{max(fit.dev_seasons)}; {sum(replaces.values())} groups replace v4; "
+        f"no headline (every feature dropped) at {', '.join(without) or 'no group'}"
     )
     return out
 
