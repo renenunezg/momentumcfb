@@ -1001,30 +1001,106 @@ def test_match_transfers_counts_each_dropped_reason_and_handles_an_empty_portal(
         assert sum(out.attrs["dropped"].values()) == 0
 
 
-def test_portability_regresses_each_season_on_the_last_for_stayers_and_movers():
-    def season_frame(season, values, group="WR"):
-        return pd.DataFrame([
-            {"season": season, "week": week, "athlete_id": athlete, "trait": "wr.test", "position_group": group,
-             "value": value if week == 15 else -99.0, "qualified": ok}
-            for athlete, value, ok in values for week in (3, 15)
-        ])
+def _snapshot(season, rows, group="WR"):
+    """Snapshot rows from (athlete, week, value[, qualified[, group]]) tuples."""
+    return pd.DataFrame([
+        {"season": season, "week": week, "athlete_id": athlete, "trait": "wr.test",
+         "value": value, "qualified": rest[0] if rest else True,
+         "position_group": rest[1] if len(rest) > 1 else group}
+        for athlete, week, value, *rest in rows
+    ])
 
-    stayers = [(f"s{i}", float(i), True) for i in range(30)]
-    movers = [(f"m{i}", float(i), True) for i in range(25)]
-    noise = [("q", 1000.0, False)]  # unqualified in the prior season, so excluded
-    before = season_frame(2022, stayers + movers + noise)
-    after = season_frame(2023, [(a, v, ok) for a, v, ok in stayers] + [(a, 0.5 * v, ok) for a, v, ok in movers] + [("q", 0.0, True)])
-    moved = pd.DataFrame({"athlete_id": [a for a, _, _ in movers] + ["s0"], "season": [2023] * 25 + [2022],
-                          "origin": "X", "destination": "Y"})
 
-    out = transfers.portability({2022: before, 2023: after}, moved)
+def _portability_case():
+    """Two season pairs; final-week values at week 15, week 3 holds poison.
+
+    Pair 2021 -> 2022: stayers a0..a3 on y = x (x = 0..3); movers m0..m9 on y = 0.5x + 1 + e.
+    Pair 2022 -> 2023: stayers b0..b3 on y = x + 2 (x = 4..7); movers n0..n9 on y = 0.5x + 3 - e.
+    e = (1, -1, -1, 1, 1, -1, -1, 1, 1, -1) over x = 0..9. Player a3 is TE in 2021 and WR in 2022.
+    """
+    noise = [1, -1, -1, 1, 1, -1, -1, 1, 1, -1]
+    y21, y22, y23 = [], [], []
+    for x in range(4):
+        y21 += [(f"a{x}", 15, float(x), True, "TE" if x == 3 else "WR"), (f"a{x}", 3, -99.0)]
+        y22 += [(f"a{x}", 15, float(x)), (f"a{x}", 3, -99.0)]
+        y22 += [(f"b{x}", 15, float(x + 4)), (f"b{x}", 3, -99.0)]
+        y23 += [(f"b{x}", 15, float(x + 6)), (f"b{x}", 3, -99.0)]
+    for x in range(10):
+        y21 += [(f"m{x}", 15, float(x)), (f"m{x}", 3, -99.0)]
+        y22 += [(f"m{x}", 15, 0.5 * x + 1 + noise[x]), (f"m{x}", 3, -99.0)]
+        y22 += [(f"n{x}", 15, float(x)), (f"n{x}", 3, -99.0)]
+        y23 += [(f"n{x}", 15, 0.5 * x + 3 - noise[x]), (f"n{x}", 3, -99.0)]
+    moved = pd.DataFrame({"athlete_id": [f"m{x}" for x in range(10)] + [f"n{x}" for x in range(10)] + ["a0"],
+                          "season": [2022] * 10 + [2023] * 10 + [2021], "origin": "X", "destination": "Y"})
+    return {2021: _snapshot(2021, y21), 2022: _snapshot(2022, y22), 2023: _snapshot(2023, y23)}, moved
+
+
+def test_portability_fits_an_intercept_pools_season_pairs_and_uses_the_later_group():
+    snaps, moved = _portability_case()
+    out = transfers.portability(snaps, moved)
     assert list(out.columns) == ["position_group", "trait", "stayers", "movers", "stay_slope", "move_slope", "move_slope_se", "portable_share"]
+    assert out[["position_group", "trait", "stayers", "movers"]].values.tolist() == [["WR", "wr.test", 8, 20]]  # a3 counts as WR, not TE
     row = out.iloc[0]
-    assert (row["position_group"], row["trait"], row["stayers"], row["movers"]) == ("WR", "wr.test", 30, 25)
-    assert row["stay_slope"] == pytest.approx(1.0)
+    # Stayers pooled, x = 0..3 and 4..7: mean x 3.5, Sxx = 42, Sxy = 58, so slope 58/42
+    # (pair 1 alone gives 1, so pooling and the intercept both matter; a through-origin fit differs).
+    assert row["stay_slope"] == pytest.approx(58 / 42)
+    # Movers pooled, x = 0..9 twice: Sxx = 2 * 82.5 = 165. The noise is mirrored between pairs and
+    # sums to zero against centred x, so the slope is exactly 0.5. Residuals about the pooled fit
+    # are e - 1 (pair 1) and -(e - 1) (pair 2): SSE = 2 * sum((e - 1)^2) = 2 * (10 + 10) = 40.
     assert row["move_slope"] == pytest.approx(0.5)
-    assert row["move_slope_se"] == pytest.approx(0.0, abs=1e-9)
-    assert row["portable_share"] == pytest.approx(0.5)
+    assert row["move_slope_se"] == pytest.approx(np.sqrt(40 / 18 / 165))
+    assert row["portable_share"] == pytest.approx(0.5 / (58 / 42))
 
-    few = moved[moved["athlete_id"].isin([f"m{i}" for i in range(19)])]
-    assert np.isnan(transfers.portability({2022: before, 2023: after}, few).iloc[0]["portable_share"])
+
+def test_portability_needs_twenty_movers_and_a_positive_stayer_slope():
+    snaps, moved = _portability_case()
+    few = transfers.portability(snaps, moved[~moved["athlete_id"].isin(["m0", "n0"])])
+    assert few.iloc[0]["movers"] == 18 and np.isnan(few.iloc[0]["portable_share"])
+    assert not np.isnan(few.iloc[0]["move_slope"])  # the slope is still reported
+    # negate the stayers' later values (and, in 2023, the movers'): the pooled stayer slope is -58/42
+    snaps[2022] = snaps[2022].assign(value=np.where(snaps[2022]["athlete_id"].str.startswith("a"), -snaps[2022]["value"], snaps[2022]["value"]))
+    snaps[2023] = snaps[2023].assign(value=-snaps[2023]["value"])
+    falling = transfers.portability(snaps, moved).iloc[0]
+    assert falling["stay_slope"] == pytest.approx(-58 / 42) and np.isnan(falling["portable_share"])
+
+
+def test_portability_drops_nan_values_instead_of_poisoning_the_cell():
+    snaps, moved = _portability_case()
+    snaps[2022] = pd.concat([snaps[2022], _snapshot(2022, [("nan1", 15, np.nan), ("nan2", 15, 5.0)])])
+    snaps[2021] = pd.concat([snaps[2021], _snapshot(2021, [("nan1", 15, 1.0), ("nan2", 15, np.nan)])])
+    out = transfers.portability(snaps, moved)
+    assert out.iloc[0]["stayers"] == 8
+    assert out.iloc[0]["stay_slope"] == pytest.approx(58 / 42)
+    assert out.iloc[0]["move_slope_se"] == pytest.approx(np.sqrt(40 / 18 / 165))
+
+
+def test_portability_without_final_week_only_pairs_the_same_week_across_seasons():
+    def two_weeks(season, offset):
+        rows = []
+        for x in range(4):
+            rows += [(f"s{x}", 1, x + offset), (f"s{x}", 2, (x if season == 1 else 2 * x) + offset)]
+        for x in range(10):
+            rows += [(f"m{x}", 1, x + offset), (f"m{x}", 2, x + offset)]
+        return rows
+
+    before = _snapshot(2021, [(a, w, float(x)) for a, w, x in two_weeks(1, 0)])
+    # stayers: week 1 y = x, week 2 y = 2x; movers: y = 0.5x + 1 in both weeks
+    after_rows = []
+    for x in range(4):
+        after_rows += [(f"s{x}", 1, float(x)), (f"s{x}", 2, 2.0 * x)]
+    for x in range(10):
+        after_rows += [(f"m{x}", 1, 0.5 * x + 1), (f"m{x}", 2, 0.5 * x + 1)]
+    after = _snapshot(2022, after_rows)
+    moved = pd.DataFrame({"athlete_id": [f"m{x}" for x in range(10)], "season": 2022, "origin": "X", "destination": "Y"})
+
+    every_week = transfers.portability({2021: before, 2022: after}, moved, final_week_only=False).iloc[0]
+    # Same-week pairs only: 4 stayers x 2 weeks = 8 rows (a cross join would give 16), 20 mover rows.
+    # Stayers pooled, x = 0..3 twice: Sxx = 10, Sxy = 5 (week 1) + 10 (week 2), so slope 1.5.
+    assert (every_week["stayers"], every_week["movers"]) == (8, 20)
+    assert every_week["stay_slope"] == pytest.approx(1.5)
+    assert every_week["move_slope"] == pytest.approx(0.5)
+    assert every_week["portable_share"] == pytest.approx(0.5 / 1.5)
+
+    last_week = transfers.portability({2021: before, 2022: after}, moved).iloc[0]
+    assert (last_week["stayers"], last_week["movers"]) == (4, 10)
+    assert last_week["stay_slope"] == pytest.approx(2.0)

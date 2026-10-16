@@ -118,7 +118,7 @@ def _final_week(frame: pd.DataFrame, final_week_only: bool) -> pd.DataFrame:
     if final_week_only and not frame.empty:
         frame = frame[frame["week"].eq(frame["week"].max())]
     frame = frame[frame["qualified"].astype(bool)]
-    return frame[["athlete_id", "trait", "position_group", "value"]]
+    return frame[["athlete_id", "trait", "week", "position_group", "value"]]
 
 
 def portability(
@@ -130,7 +130,10 @@ def portability(
 
     Consecutive seasons ``(t-1, t)`` are pooled into one regression of the
     season-``t`` value on the season-``(t-1)`` value. A player is a mover when
-    ``transfers`` lists them for season ``t``. ``portable_share`` is the mover
+    ``transfers`` lists them for season ``t``. With ``final_week_only`` each
+    season contributes its last week; with ``False`` every week is used and a
+    week-``w`` value in ``t-1`` is paired only with the week-``w`` value in ``t``.
+    Pairs where either value is NaN are dropped. ``portable_share`` is the mover
     slope over the stayer slope, NaN when the stayer slope is not positive or
     fewer than ``MIN_MOVERS`` players moved.
     """
@@ -141,7 +144,9 @@ def portability(
             continue
         before = _final_week(snapshots_by_season[prior], final_week_only)
         after = _final_week(snapshots_by_season[season], final_week_only)
-        both = before.merge(after, on=["athlete_id", "trait"], suffixes=("_before", ""))
+        keys = ["athlete_id", "trait"] + ([] if final_week_only else ["week"])
+        both = before.merge(after, on=keys, suffixes=("_before", ""))
+        both = both.dropna(subset=["value_before", "value"])
         moved = set(transfers.loc[transfers["season"].eq(season), "athlete_id"]) if len(transfers) else set()
         pairs.append(both.assign(mover=both["athlete_id"].isin(moved)))
     if not pairs:
