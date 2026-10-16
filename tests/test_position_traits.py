@@ -2,7 +2,14 @@ import pandas as pd
 import pytest
 
 from backend.players import ingest
-from backend.players.traits import TraitSpec, context, expectations, register, targets
+from backend.players.traits import (
+    TraitSpec,
+    adjust,
+    context,
+    expectations,
+    register,
+    targets,
+)
 
 
 def test_ingest_portal_writes_one_call_per_season(tmp_path, monkeypatch):
@@ -183,3 +190,16 @@ def test_buckets_field_goal_labels_and_conversion_table():
     got = expectations.expected_conversion(tables, situation)
     assert got.loc[5] == pytest.approx(2 / 3)
     assert got.loc[6] == pytest.approx(0.5)  # unseen third down: global mean of the four plays
+
+
+def test_adjust_rate_subtracts_only_prior_week_opponent_deviation():
+    games = pd.DataFrame({"game_id": [1, 2, 3], "model_week": [1, 2, 3]})
+    events = pd.DataFrame([
+        {"game_id": 1, "athlete_id": "a", "opponent": "D1", "numerator": 2.0, "denominator": 10.0},
+        {"game_id": 1, "athlete_id": "b", "opponent": "D2", "numerator": 0.0, "denominator": 10.0},
+        {"game_id": 2, "athlete_id": "c", "opponent": "D1", "numerator": 1.0, "denominator": 10.0},
+    ])
+    out = adjust.adjust_rate(events, games).set_index(["game_id", "athlete_id"])["numerator"]
+    assert out.loc[(1, "a")] == 2.0  # week 1: no prior evidence, unchanged
+    # week 2 vs D1: D1 allowed 0.2 through week 1, league 0.1, so subtract 10 * 0.1
+    assert out.loc[(2, "c")] == pytest.approx(0.0)
