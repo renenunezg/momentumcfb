@@ -96,3 +96,18 @@ def test_recover_targets_skips_ambiguous_names_and_trims_penalty_text():
     out = targets.recover_targets(plays, stats, roster).set_index("play_id")
     assert out["athlete_id"].to_dict() == {"a": "7", "d": "10"}
     assert targets.normalize_name("D.J. Moore III") == "dj moore"
+
+
+def test_recover_targets_ignores_null_feed_ids_and_normalizes_float_ids():
+    plays = pd.DataFrame([
+        {"id": "n", "season": 2024, "game_id": 1, "offense": "Home", "play_type": "Pass Incompletion", "play_text": "Q One pass incomplete to Jon Smith"},
+        {"id": "f", "season": 2024, "game_id": 1, "offense": "Home", "play_type": "Pass Incompletion", "play_text": "Q One pass incomplete"},
+    ])
+    stats = pd.DataFrame([
+        {"play_id": "n", "athlete_id": None, "stat_type": "Target", "team": "Home"},
+        {"play_id": "f", "athlete_id": 4.0, "stat_type": "Target", "team": "Home"},
+    ])
+    roster = pd.DataFrame([{"id": 11.0, "first_name": "Jon", "last_name": "Smith", "team": "Home"}])
+    out = targets.recover_targets(plays, stats, roster).set_index("play_id")
+    assert out.loc["n", "athlete_id"] == "11" and out.loc["n", "source"] == "text"
+    assert out.loc["f", "athlete_id"] == "4" and out.loc["f", "source"] == "feed"
