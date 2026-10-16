@@ -877,22 +877,28 @@ def test_snapshot_percentiles_only_rank_qualified_players_and_keep_unrostered_pl
 
 def test_split_half_reliability_reports_each_game_count():
     frames, positions, games, teams, identity = snapshot_context()
-    out = snapshots.split_half_reliability(frames, positions, games_at=(1,))
+    out = snapshots.split_half_reliability(frames, positions, games_at=(2,))
     assert set(out.columns) == {"position_group", "trait", "games", "players", "correlation"}
     assert out.empty  # three players with two games is under the minimum
 
-    # Twelve QBs with four games each and a rate that differs by player only:
-    # the odd and even halves agree exactly; six games are too few for three per half.
+    # Twelve QBs with four games each. Games 1, 2 and 4 carry a rate that differs
+    # by player only; game 3 is noise. At 2 total games each half is one game
+    # (games 1 and 2) and the halves agree exactly; at 4 the noise game enters
+    # the odd half; 6 games is more than anyone has.
+    noise = [0.0, 2.0, 1.0, 4.0, 0.0, 3.0, 1.0, 1.0, 4.0, 2.0, 0.0, 3.0]
     rows = [
-        _trait_row(f"q{i}", week, 100 * i + week, "qb.explosive", float(i % 3))
+        _trait_row(f"q{i}", week, 100 * i + week, "qb.explosive", noise[i] if week == 3 else float(i % 3))
         for i in range(12) for week in range(1, 5)
     ]
-    out = snapshots.split_half_reliability(_trait_frame(rows), positions.iloc[:0], games_at=(1, 2, 3))
+    out = snapshots.split_half_reliability(_trait_frame(rows), positions.iloc[:0], games_at=(2, 4, 6))
     assert out[["position_group", "trait", "games", "players"]].values.tolist() == [
-        ["QB", "qb.explosive", 1, 12],
         ["QB", "qb.explosive", 2, 12],
+        ["QB", "qb.explosive", 4, 12],
     ]
-    assert out["correlation"].tolist() == pytest.approx([1.0, 1.0])
+    odd = (np.arange(12) % 3 + np.array(noise)) / 20
+    even = np.arange(12) % 3 / 10
+    assert out["correlation"].tolist() == pytest.approx([1.0, np.corrcoef(odd, even)[0, 1]])
+    assert out["correlation"].iloc[1] < 0.99
 
 
 def test_snapshot_latest_and_quantile_aggregates_and_fbs_only_percentiles(monkeypatch):

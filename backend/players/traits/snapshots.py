@@ -229,10 +229,10 @@ def split_half_reliability(
 ) -> pd.DataFrame:
     """Correlation between a trait's odd-game and even-game values per group.
 
-    For ``n`` in ``games_at``, a player needs ``2n`` games with a numerator for
-    the trait; their games in week order alternate between the halves, and each
-    half aggregates its first ``n`` games. ``latest`` traits have no games and
-    are skipped.
+    ``n`` in ``games_at`` counts the player's total games: a player needs ``n``
+    games with a numerator for the trait; their games in week order alternate
+    between the halves, and each half aggregates its first ``n // 2`` games.
+    ``latest`` traits have no games and are skipped.
     """
     rows = frames.astype({"athlete_id": str})
     rows = rows.assign(aggregate=_trait_attribute(rows["trait"], "aggregate"))
@@ -250,7 +250,7 @@ def split_half_reliability(
 
     results = []
     for n in games_at:
-        sample = rows[rows["played"].ge(2 * n) & rows["slot"].lt(n)]
+        sample = rows[rows["played"].ge(n) & rows["slot"].lt(n // 2)]
         if sample.empty:
             continue
         wide = aggregate(sample, [*KEYS, "half"]).unstack("half").dropna()
