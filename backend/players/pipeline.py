@@ -131,9 +131,10 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     """Score the season's weekly trait snapshots with the latest earlier headline fit.
 
     The fit and its expectation tables are frozen: they are only loaded, never refit,
-    and a fit whose development seasons include ``season`` is refused. Each row
-    carries ``fbs`` from the team's classification; headline rows exist for qualified
-    FBS players only, and only FBS rows are published.
+    and a fit whose development seasons include ``season`` is refused; the fit's
+    ``poor_coverage`` fixes the receptions-or-targets mode. Each row carries ``fbs``
+    from the team's classification; headline rows exist for qualified FBS players
+    only, and only FBS rows are published.
     """
     fit_path = latest_headline_fit_path(season)
     fit = headline.load_headline_fit(fit_path)
@@ -141,9 +142,9 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     tables = frozen_expectation_tables(fit_path)
     teams = read_season_source(season, "teams")
     fbs_schools = set(teams.loc[teams["classification"].eq("fbs"), "school"])
-    snapshot = backtest.build_season_traits(season, tables=tables)["snapshots"].astype(
-        {"athlete_id": str}
-    )
+    snapshot = backtest.build_season_traits(
+        season, tables=tables, poor_coverage=fit.poor_coverage
+    )["snapshots"].astype({"athlete_id": str})
     # The headline pool is qualified FBS players, so the flag precedes scoring.
     snapshot = snapshot.assign(fbs=snapshot["team"].isin(fbs_schools))
     values = backtest.player_values(season)
