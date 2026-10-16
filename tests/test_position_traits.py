@@ -1201,6 +1201,40 @@ def test_fit_headline_recovers_a_planted_weight_and_drops_noise():
     assert fit.penalty > 0
 
 
+def test_design_matrix_adds_the_projection_and_drops_games_without_an_anchor():
+    snaps, values, games = matrix_context()
+    plain = headline.design_matrix(snaps, values, games, 2024, anchors=pd.DataFrame())
+    assert "projection" not in plain.columns
+    anchors = pd.DataFrame({"game_id": [3, 5], "model_week": [2, 3], "home_margin": [6.5, -2.0], "margin_sd": 14.0})
+    m = headline.design_matrix(snaps, values, games, 2024, anchors=anchors)
+    assert m["game_id"].tolist() == [3, 5] and m["projection"].tolist() == [6.5, -2.0]  # game 4 has no anchor
+    pd.testing.assert_frame_equal(
+        m.drop(columns="projection"), plain[plain["game_id"].isin([3, 5])].reset_index(drop=True)
+    )
+
+
+def test_fit_headline_leaves_the_projection_unpenalized_and_never_drops_it():
+    m = synthetic_matrix(seed=2)
+    rng = np.random.default_rng(3)
+    m.insert(5, "projection", rng.normal(scale=10.0, size=len(m)))
+    m["margin"] += m["projection"]
+    fit = headline.fit_headline(m, dev_seasons=[2020, 2021, 2022, 2023])
+    assert list(fit.weights.index[:3]) == ["intercept", "home_field", "projection"]
+    assert fit.weights["projection"] == pytest.approx(1.0, abs=0.02)
+    assert "projection" not in fit.dropped and "projection" not in set(fit.feature_scale["feature"])
+    # The penalty never shrinks it: at the largest penalty its weight is the OLS one on the fixed columns.
+    rows = m.assign(intercept=1.0)
+    x = rows[["intercept", "home_field", "projection"]].to_numpy(float)
+    ols = np.linalg.lstsq(x, rows["margin"].to_numpy(float), rcond=None)[0]
+    z = headline._design(rows, [], pd.DataFrame(columns=["mean", "sd"]))
+    assert headline._ridge(z, rows["margin"].to_numpy(float), 1e9, 3) == pytest.approx(ols)
+    assert backtest.predict_margin(fit, m) == pytest.approx(
+        fit.weights["intercept"] + fit.weights["home_field"] * m["home_field"] + fit.weights["projection"] * m["projection"]
+        + ((m[fit.feature_scale["feature"]] - fit.feature_scale.set_index("feature")["mean"])
+           / fit.feature_scale.set_index("feature")["sd"]).to_numpy() @ fit.weights[fit.feature_scale["feature"]].to_numpy()
+    )
+
+
 def test_headline_fit_refuses_to_score_its_own_seasons(tmp_path):
     fit = headline.fit_headline(synthetic_matrix(seed=1), dev_seasons=[2020, 2021, 2022, 2023])
     headline.save_headline_fit(fit, tmp_path / "fit.json")

@@ -18,6 +18,7 @@ feature was dropped carries none.
 """
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,8 @@ from backend.config import PROCESSED_DIR
 from backend.players.traits import MODEL_VERSION, TRAITS
 from backend.players.traits.snapshots import UNIT_PREFIX
 from backend.players.value import REPLACEMENT_PERCENTILE
+
+log = logging.getLogger(__name__)
 
 GROUPS = ("QB", "RB", "WR", "TE", "DL", "LB", "DB", "OL", "K", "P")
 EPA = "epa"
@@ -46,7 +49,10 @@ EXPOSURE_TRAITS = {
     "P": "p.punt_average",
 }
 META_COLUMNS = ["game_id", "season", "model_week", "margin", "home_field"]
-FIXED = ["intercept", "home_field"]  # unpenalized and never dropped
+# Unpenalized and never dropped; ``projection`` (the pregame projected home margin)
+# is a column only when the design matrix was built with anchors.
+FIXED = ["intercept", "home_field", "projection"]
+PROJECTION = "projection"
 PENALTIES = np.logspace(-2, 5, 36)
 DROP_MULTIPLE = 2.0
 RELIABILITY_COLUMNS = ["position_group", "games", "correlation"]
@@ -65,8 +71,8 @@ OUTPUT_COLUMNS = [
 
 @dataclass
 class HeadlineFit:
-    """``weights`` and the three spreads are indexed ``intercept``, ``home_field`` and the
-    kept features; feature weights are per fit-time standard deviation of the column,
+    """``weights`` and the three spreads are indexed ``intercept``, ``home_field``,
+    ``projection`` when the fit had one, and the kept features; feature weights are per fit-time standard deviation of the column,
     whose mean and sd are in ``feature_scale``. ``loso_sd`` is the raw sd (ddof 1) of each
     weight across the leave-one-season-out refits, ``jackknife_sd`` its delete-one-season
     jackknife scaling and ``analytic_se`` the ridge sandwich standard error.
@@ -199,7 +205,11 @@ def team_aggregates(snapshot: pd.DataFrame, player_values: pd.DataFrame) -> pd.D
 
 
 def design_matrix(
-    snapshots: pd.DataFrame, player_values: pd.DataFrame, games: pd.DataFrame, season: int
+    snapshots: pd.DataFrame,
+    player_values: pd.DataFrame,
+    games: pd.DataFrame,
+    season: int,
+    anchors: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """One row per completed FBS-versus-FBS game of ``season`` from model week 2.
 
@@ -208,6 +218,11 @@ def design_matrix(
     week (see ``exposure_shares``; 1.0 for an OL unit). A game in week ``w`` reads the
     week ``w − 1`` snapshot; a team without rows that week has every aggregate 0, and
     a game where neither team has rows is dropped.
+
+    ``anchors`` (``game_id, home_margin``: the pregame projection) adds a
+    ``projection`` column, an unpenalized regressor so the traits fit the margin net
+    of the team model; a game without an anchor is dropped and counted in the log.
+    ``None`` or an empty frame adds no column.
     """
     if "exposure" not in snapshots.columns:
         raise ValueError("design_matrix needs an exposure column on the snapshots")
@@ -234,33 +249,64 @@ def design_matrix(
     out.insert(2, "model_week", played["model_week"].astype(int).to_numpy())
     out.insert(3, "margin", (played["home_points"] - played["away_points"]).to_numpy())
     out.insert(4, "home_field", (~played["neutral_site"].eq(True)).astype(int).to_numpy())
-    return out[known].reset_index(drop=True)
+    out = out[known].reset_index(drop=True)
+    if anchors is None or anchors.empty:
+        return out
+    projection = anchors.drop_duplicates("game_id").set_index("game_id")["home_margin"]
+    out.insert(5, PROJECTION, out["game_id"].map(projection).astype(float))
+    missing = out[PROJECTION].isna()
+    log.info(
+        "position traits %s: %d of %d games have a pregame projection; %d without one dropped",
+        season,
+        int((~missing).sum()),
+        len(out),
+        int(missing.sum()),
+    )
+    return out[~missing].reset_index(drop=True)
 
 
-def _ridge(x: np.ndarray, y: np.ndarray, penalty: float) -> np.ndarray:
-    """Solve (XᵀX + λD)β = Xᵀy where D leaves the leading intercept and home_field free."""
-    diagonal = np.full(x.shape[1], penalty)
-    diagonal[: len(FIXED)] = 0.0
+def fixed_columns(rows: pd.DataFrame) -> list[str]:
+    """The unpenalized leading columns: ``intercept``, ``home_field`` and, when the rows
+    carry it, ``projection``."""
+    return [name for name in FIXED if name == "intercept" or name in rows.columns]
+
+
+def _penalty_diagonal(width: int, penalty: float, fixed: int) -> np.ndarray:
+    diagonal = np.full(width, penalty)
+    diagonal[:fixed] = 0.0
+    return diagonal
+
+
+def _ridge(x: np.ndarray, y: np.ndarray, penalty: float, fixed: int) -> np.ndarray:
+    """Solve (XᵀX + λD)β = Xᵀy where D leaves the ``fixed`` leading columns free."""
+    diagonal = _penalty_diagonal(x.shape[1], penalty, fixed)
     return solve(x.T @ x + np.diag(diagonal), x.T @ y, assume_a="sym")
 
 
 def _leave_one_season_out(
-    x: np.ndarray, y: np.ndarray, seasons: np.ndarray, dev_seasons: list[int], penalty: float
+    x: np.ndarray,
+    y: np.ndarray,
+    seasons: np.ndarray,
+    dev_seasons: list[int],
+    penalty: float,
+    fixed: int,
 ) -> tuple[float, np.ndarray]:
     """Pooled held-out MAE and the refit coefficients, one row per held-out season."""
     predictions = np.empty_like(y)
     betas = []
     for season in dev_seasons:
         held = seasons == season
-        beta = _ridge(x[~held], y[~held], penalty)
+        beta = _ridge(x[~held], y[~held], penalty, fixed)
         predictions[held] = x[held] @ beta
         betas.append(beta)
     return float(np.mean(np.abs(y - predictions))), np.array(betas)
 
 
 def _design(rows: pd.DataFrame, features: list[str], scale: pd.DataFrame) -> np.ndarray:
+    """The fixed columns (``fixed_columns``) unscaled, then the standardized features."""
     z = (rows[features] - scale.loc[features, "mean"]) / scale.loc[features, "sd"]
-    return np.column_stack([np.ones(len(rows)), rows["home_field"].to_numpy(float), z.to_numpy(float)])
+    fixed = [np.ones(len(rows))] + [rows[name].to_numpy(float) for name in fixed_columns(rows)[1:]]
+    return np.column_stack([*fixed, z.to_numpy(float)])
 
 
 def _fit(
@@ -270,22 +316,23 @@ def _fit(
 
     ``jackknife_sd = sqrt((k − 1) / k × Σ_i (β_i − β̄)²)`` over the k held-out refits.
     ``analytic_se`` is the root diagonal of ``σ² A⁻¹ XᵀX A⁻¹`` with ``A = XᵀX + λD`` (the
-    fit's own penalty, free on intercept and home_field) and ``σ²`` the full fit's
-    residual sum of squares over ``n − p``.
+    fit's own penalty, free on the fixed columns) and ``σ²`` the full fit's residual
+    sum of squares over ``n − p``.
     """
+    fixed = fixed_columns(rows)
     x, y = _design(rows, features, scale), rows["margin"].to_numpy(float)
-    _, betas = _leave_one_season_out(x, y, rows["season"].to_numpy(), dev_seasons, penalty)
-    beta = _ridge(x, y, penalty)
+    _, betas = _leave_one_season_out(
+        x, y, rows["season"].to_numpy(), dev_seasons, penalty, len(fixed)
+    )
+    beta = _ridge(x, y, penalty, len(fixed))
     k = len(betas)
     jackknife = np.sqrt((k - 1) / k * ((betas - betas.mean(axis=0)) ** 2).sum(axis=0))
     gram = x.T @ x
-    diagonal = np.full(x.shape[1], penalty)
-    diagonal[: len(FIXED)] = 0.0
-    inverse = np.linalg.inv(gram + np.diag(diagonal))
+    inverse = np.linalg.inv(gram + np.diag(_penalty_diagonal(x.shape[1], penalty, len(fixed))))
     residual = y - x @ beta
     sigma2 = residual @ residual / (len(y) - x.shape[1])
     analytic = np.sqrt(np.diag(sigma2 * inverse @ gram @ inverse))
-    index = [*FIXED, *features]
+    index = [*fixed, *features]
     return {
         "weights": pd.Series(beta, index=index),
         "loso_sd": pd.Series(betas.std(axis=0, ddof=1), index=index),
@@ -297,7 +344,8 @@ def _fit(
 def fit_headline(matrix: pd.DataFrame, dev_seasons: list[int]) -> HeadlineFit:
     """Ridge of ``margin`` on the standardized feature columns of the ``dev_seasons`` rows.
 
-    Feature columns are those whose name holds ``:``. Columns are standardized once
+    Feature columns are those whose name holds ``:``; ``home_field`` and, when present,
+    ``projection`` enter unscaled and unpenalized. Columns are standardized once
     over the dev rows (an outcome-free scale shared by every refit); a column with no
     spread is dropped up front as ``"constant"``. The penalty minimizes pooled
     leave-one-season-out MAE over ``PENALTIES``. A feature is then dropped as
@@ -317,7 +365,8 @@ def fit_headline(matrix: pd.DataFrame, dev_seasons: list[int]) -> HeadlineFit:
 
     x, y = _design(rows, kept, scale), rows["margin"].to_numpy(float)
     seasons = rows["season"].to_numpy()
-    errors = [_leave_one_season_out(x, y, seasons, dev_seasons, p)[0] for p in PENALTIES]
+    fixed = len(fixed_columns(rows))
+    errors = [_leave_one_season_out(x, y, seasons, dev_seasons, p, fixed)[0] for p in PENALTIES]
     penalty = float(PENALTIES[int(np.argmin(errors))])
 
     first = _fit(rows, kept, scale, dev_seasons, penalty)
