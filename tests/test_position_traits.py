@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from backend.players import ingest
-from backend.players.traits import TraitSpec, context, register, targets
+from backend.players.traits import TraitSpec, context, expectations, register, targets
 
 
 def test_ingest_portal_writes_one_call_per_season(tmp_path, monkeypatch):
@@ -111,3 +111,18 @@ def test_recover_targets_ignores_null_feed_ids_and_normalizes_float_ids():
     out = targets.recover_targets(plays, stats, roster).set_index("play_id")
     assert out.loc["n", "athlete_id"] == "11" and out.loc["n", "source"] == "text"
     assert out.loc["f", "athlete_id"] == "4" and out.loc["f", "source"] == "feed"
+
+
+def test_expectation_tables_use_only_earlier_seasons_and_fall_back_to_the_mean():
+    prior = pd.DataFrame({"season": 2021, "down": [1, 1, 3], "distance": [10, 10, 2], "yards_to_goal": [75, 75, 25],
+                          "is_rush": True, "is_competitive": True, "yards_gained": [2.0, 6.0, 1.0], "is_success": [False, True, True],
+                          "play_type": "Rush", "play_text": ""})
+    current = prior.assign(season=2022, yards_gained=99.0)
+    tables = expectations.fit_expectation_tables({2021: prior, 2022: current}, before_season=2022)
+    assert tables.source_seasons == [2021]
+    probe = pd.DataFrame({"down": [1, 4], "distance": [10, 1], "yards_to_goal": [75, 3]})
+    expected = expectations.expected_rush_yards(tables, probe)
+    assert expected.iloc[0] == pytest.approx(4.0)
+    assert expected.iloc[1] == pytest.approx(3.0)  # unseen bucket: global mean of 2, 6, 1
+    with pytest.raises(ValueError):
+        expectations.fit_expectation_tables({2022: current}, before_season=2022)
