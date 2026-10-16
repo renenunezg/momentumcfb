@@ -47,6 +47,7 @@ from backend.players.traits.transfers import (
     portability,
 )
 from backend.players.value import MIN_QUALIFIED_PLAYERS
+from backend.serving.anchors import load_serving_anchors
 
 log = logging.getLogger(__name__)
 
@@ -106,7 +107,9 @@ TABLES = (
     "target_coverage",
     "draft_check",
     "portal",
+    "anchors",
 )
+ANCHOR_COLUMNS = ["season", "games", "with_projection", "dropped"]
 PORTAL_COLUMNS = [
     "season",
     "portal_rows",
@@ -354,6 +357,13 @@ def player_values(season: int) -> pd.DataFrame:
 
 
 # Fits and validation
+
+
+def projection_anchors(season: int) -> pd.DataFrame:
+    """``game_id, model_week, home_margin, margin_sd``: the team model's chronological
+    pregame projection for every game of ``season`` (the calibration replay, each row
+    fit only on games before its week)."""
+    return load_serving_anchors(season=season)
 
 
 def feature_columns(matrix: pd.DataFrame) -> list[str]:
@@ -849,6 +859,7 @@ class BacktestResult:
     target_coverage: pd.DataFrame
     draft_check: pd.DataFrame
     portal: pd.DataFrame
+    anchors: pd.DataFrame
     fit: headline.HeadlineFit
     expectations: ExpectationTables
 
@@ -876,12 +887,29 @@ def run_backtest(
             "snapshots": with_fbs(data["snapshots"], season),
             "values": player_values(season),
         }
+    # The team model's chronological pregame projection, an unpenalized regressor, so
+    # the traits fit the margin net of the opponent and home field as the team model
+    # sees them. A game without a projection is dropped and counted.
     matrices = {
         season: headline.design_matrix(
-            data["snapshots"], data["values"], load_weekly_games(season), season
+            data["snapshots"],
+            data["values"],
+            load_weekly_games(season),
+            season,
+            anchors=projection_anchors(season),
         )
         for season, data in seasons.items()
     }
+    anchors = pd.DataFrame(
+        [
+            {
+                "season": season,
+                "games": matrix.attrs["projection"]["games"],
+                "with_projection": matrix.attrs["projection"]["with_projection"],
+            }
+            for season, matrix in matrices.items()
+        ]
+    ).assign(dropped=lambda f: f["games"] - f["with_projection"])[ANCHOR_COLUMNS]
     dev_matrix = pd.concat(
         [matrices[season] for season in dev_seasons], ignore_index=True
     )
@@ -944,6 +972,7 @@ def run_backtest(
             fit,
         ),
         portal=portal_match_table(snapshots_by_season, matched),
+        anchors=anchors,
         fit=fit,
         expectations=fit_tables_before(validation_season + 1),
     )

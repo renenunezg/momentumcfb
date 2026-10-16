@@ -1208,6 +1208,7 @@ def test_design_matrix_adds_the_projection_and_drops_games_without_an_anchor():
     anchors = pd.DataFrame({"game_id": [3, 5], "model_week": [2, 3], "home_margin": [6.5, -2.0], "margin_sd": 14.0})
     m = headline.design_matrix(snaps, values, games, 2024, anchors=anchors)
     assert m["game_id"].tolist() == [3, 5] and m["projection"].tolist() == [6.5, -2.0]  # game 4 has no anchor
+    assert m.attrs["projection"] == {"games": 3, "with_projection": 2}
     pd.testing.assert_frame_equal(
         m.drop(columns="projection"), plain[plain["game_id"].isin([3, 5])].reset_index(drop=True)
     )
