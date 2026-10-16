@@ -227,14 +227,15 @@ def credited_games(credited: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _uncovered_share(coverage: pd.DataFrame) -> float:
+def uncovered_share(coverage: pd.DataFrame) -> float:
+    """Incompletions with no target from the feed or play text, over all incompletions."""
     incompletions = coverage["incompletions"].sum()
     return float(coverage["uncovered"].sum() / incompletions) if incompletions else 0.0
 
 
 def poor_target_coverage(coverage: pd.DataFrame) -> bool:
     """Whether the uncovered share of incompletions exceeds ``POOR_TARGET_COVERAGE``."""
-    return _uncovered_share(coverage) > POOR_TARGET_COVERAGE
+    return uncovered_share(coverage) > POOR_TARGET_COVERAGE
 
 
 def fit_tables_before(season: int) -> ExpectationTables:
@@ -249,20 +250,17 @@ def fit_tables_before(season: int) -> ExpectationTables:
 
 
 def build_season_traits(
-    season: int,
-    tables: ExpectationTables | None = None,
-    poor_coverage: bool | None = None,
+    season: int, tables: ExpectationTables | None = None
 ) -> dict[str, pd.DataFrame]:
     """Every trait frame, weekly snapshot and reliability table for ``season``.
 
     With ``tables`` (the frozen serving tables) no expectation is refit; a table
     whose source seasons include ``season`` or a later one is refused. Without it
     the tables are fit on every earlier season on disk from 2019, as the backtest
-    does. ``poor_coverage`` (the frozen fit's mode) fixes whether receptions stand in
-    for targets; ``None`` decides from the season's own target coverage, as the
-    backtest does. Writes the snapshots (with ``exposure``), reliability and target
-    coverage, plus the raw frames and per-game credit the backtest pools for
-    reliability.
+    does. The season decides its own target mode from its own coverage
+    (``poor_target_coverage``), served or backtested. Writes the snapshots (with
+    ``exposure``), reliability and target coverage, plus the raw frames and per-game
+    credit the backtest pools for reliability.
     """
     started = time.perf_counter()
     if tables is None:
@@ -276,15 +274,13 @@ def build_season_traits(
         ctx.plays, read_weekly(season, "play_stats"), ctx.roster
     )
     coverage = target_coverage(ctx.plays, recovered)
-    measured = poor_target_coverage(coverage)
-    poor = measured if poor_coverage is None else bool(poor_coverage)
+    poor = poor_target_coverage(coverage)
     log.info(
-        "position traits %s: expectations from %s, uncovered incompletions %.3f%s%s",
+        "position traits %s: expectations from %s, uncovered incompletions %.3f%s",
         season,
         tables.source_seasons,
-        _uncovered_share(coverage),
+        uncovered_share(coverage),
         " (receptions mode)" if poor else " (targets mode)",
-        "" if poor_coverage is None else " frozen by the fit",
     )
     frames = pd.concat(
         [
@@ -927,7 +923,7 @@ def run_backtest(
         group: bool(flag)
         for group, flag in zip(swap["position_group"], swap["replaces_value"])
     }
-    # Served seasons are built in the validation season's coverage mode.
+    # For information only: served seasons decide their own mode.
     fit.poor_coverage = poor_target_coverage(seasons[validation_season]["target_coverage"])
     snapshots_by_season = {
         season: data["snapshots"] for season, data in seasons.items()

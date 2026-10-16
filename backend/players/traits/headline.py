@@ -78,7 +78,8 @@ class HeadlineFit:
     jackknife scaling and ``analytic_se`` the ridge sandwich standard error.
     ``dropped_reason`` maps each dropped feature to ``"constant"`` or ``"insignificant"``.
     ``poor_coverage`` is the validation season's target coverage mode (True: receptions
-    stand in for targets); served seasons are built in that frozen mode."""
+    stood in for targets), kept for information only; a served season decides its own
+    mode from its own coverage. ``None`` when a fit predates the field."""
 
     weights: pd.Series
     penalty: float
@@ -94,7 +95,7 @@ class HeadlineFit:
         default_factory=lambda: pd.DataFrame(columns=RELIABILITY_COLUMNS)
     )
     replaces_value: dict[str, bool] = field(default_factory=lambda: dict.fromkeys(GROUPS, False))
-    poor_coverage: bool = False
+    poor_coverage: bool | None = None
 
 
 def feature_names() -> list[str]:
@@ -531,7 +532,7 @@ def save_headline_fit(fit: HeadlineFit, path: Path) -> Path:
         "feature_scale": _records(fit.feature_scale),
         "reliability": _records(fit.reliability),
         "replaces_value": {group: bool(flag) for group, flag in fit.replaces_value.items()},
-        "poor_coverage": bool(fit.poor_coverage),
+        "poor_coverage": None if fit.poor_coverage is None else bool(fit.poor_coverage),
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -546,10 +547,6 @@ def load_headline_fit(path: Path) -> HeadlineFit:
 
 
 def headline_fit_from_payload(payload: dict) -> HeadlineFit:
-    if "poor_coverage" not in payload:
-        raise ValueError(
-            "headline fit has no poor_coverage mode; rerun position-traits-fit"
-        )
     return HeadlineFit(
         weights=pd.Series(payload["weights"], dtype=float),
         penalty=float(payload["penalty"]),
@@ -567,7 +564,9 @@ def headline_fit_from_payload(payload: dict) -> HeadlineFit:
             else pd.DataFrame(columns=RELIABILITY_COLUMNS)
         ),
         replaces_value={group: bool(flag) for group, flag in payload["replaces_value"].items()},
-        poor_coverage=bool(payload["poor_coverage"]),
+        poor_coverage=(
+            None if payload.get("poor_coverage") is None else bool(payload["poor_coverage"])
+        ),
     )
 
 
