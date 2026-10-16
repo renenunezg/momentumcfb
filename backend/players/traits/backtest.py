@@ -368,24 +368,28 @@ def validation_mae(
     )
 
 
+def swap_features(features: list[str], group: str) -> list[str]:
+    """The swap test's columns for ``group``: its full feature set (traits and
+    ``epa``) and only the ``epa`` column of every other group."""
+    own = [name for name in features if name.startswith(f"{group}:")]
+    others = [
+        name
+        for name in features
+        if name.endswith(f":{headline.EPA}") and not name.startswith(f"{group}:")
+    ]
+    return others + own
+
+
 def swap_maes(
     dev_matrix: pd.DataFrame,
     validation_rows: pd.DataFrame,
     dev_seasons: list[int],
     mae_v4_only: float,
 ) -> pd.DataFrame:
-    """Per group: validation MAE with its full feature set and every other group at ``epa``."""
+    """Per group: validation MAE of the dev fit on ``swap_features``."""
     rows = []
-    others = epa_columns(dev_matrix)
     for group in headline.GROUPS:
-        own = [
-            column
-            for column in feature_columns(dev_matrix)
-            if column.startswith(f"{group}:")
-        ]
-        features = [
-            column for column in others if not column.startswith(f"{group}:")
-        ] + own
+        features = swap_features(feature_columns(dev_matrix), group)
         fit = fit_on(dev_matrix, features, dev_seasons)
         rows.append(
             {
@@ -399,7 +403,12 @@ def swap_maes(
 
 def replacement_flags(swap: pd.DataFrame) -> pd.DataFrame:
     """``improvement = mae_v4_only − mae_with_traits``; the headline replaces the value
-    only when it improves the MAE and is at least as reliable at six games."""
+    only when it improves the MAE and is at least as reliable at six games.
+
+    Both reliabilities come from ``paired_split_half`` (same athletes, same games). A
+    NaN reliability compares False, so a group without a six-game v4 reliability
+    (OL, K and P in v1) never replaces v4.
+    """
     improvement = swap["mae_v4_only"] - swap["mae_with_traits"]
     return swap.assign(
         improvement=improvement,
@@ -441,84 +450,22 @@ def _pearson(left: pd.Series, right: pd.Series) -> float:
     return float(left.corr(right))
 
 
-def _group_correlations(halves: pd.DataFrame, groups: pd.Series, n: int) -> list[dict]:
-    """Pearson correlation of half 0 against half 1 per group with enough players;
-    NaN when either half is constant."""
-    if not {0, 1} <= set(halves.columns):
-        return []
-    wide = halves[[0, 1]].dropna()
-    group = wide.index.to_series().map(groups)
-    rows = []
-    for name, frame in wide.groupby(group):
-        if len(frame) < MIN_QUALIFIED_PLAYERS:
-            continue
-        rows.append(
-            {
-                "position_group": name,
-                "games": n,
-                "players": len(frame),
-                "correlation": _pearson(frame[0], frame[1]),
-            }
-        )
-    return rows
-
-
-def split_half_correlation(
-    per_game: pd.DataFrame,
-    groups: pd.Series,
-    games_at: tuple[int, ...] = RELIABILITY_GAMES,
-) -> pd.DataFrame:
-    """Odd-game against even-game mean of ``value`` per group, the trait method on one series.
-
-    ``per_game`` holds ``athlete_id, game_id, model_week, value``. At ``n`` a player
-    needs ``n`` games; each half averages its first ``n // 2`` games.
-    """
-    per_game = per_game.astype({"athlete_id": str})
-    alternated = _alternate(per_game)
-    rows = []
-    for n in games_at:
-        chosen = _half_games(alternated, n)
-        if n < 2 or chosen.empty:
-            continue
-        sample = per_game.merge(chosen, on=["athlete_id", "game_id"])
-        halves = sample.groupby(["athlete_id", "half"])["value"].mean().unstack("half")
-        rows += _group_correlations(halves, groups, n)
-    return pd.DataFrame(rows, columns=SPLIT_COLUMNS)
-
-
 def _season_keys(values: pd.Series, season: int) -> pd.Series:
     return f"{season}:" + values.astype(str)
 
 
-def v4_split_half(
-    seasons: dict[int, dict[str, pd.DataFrame]], games_at: tuple[int, ...]
-) -> pd.DataFrame:
-    """Split-half reliability of v4 per-game adjusted EPA, dev seasons pooled.
+def paired_games(frames: pd.DataFrame, credited: pd.DataFrame, n: int) -> pd.DataFrame:
+    """``athlete_id, game_id, half``: the games both sides of the reliability use at ``n``.
 
-    Groups are each player's final-week v4 group; ids carry their season so a
-    player's seasons stay separate players.
+    Each athlete's games are every distinct game with a trait-frame row (any trait,
+    NaN numerator included), alternating between halves in week order; an athlete
+    needs ``n`` such games and each half keeps its first ``n // 2``. An athlete with
+    no credited row in those games has no v4 value and is left out of both sides.
     """
-    per_game, groups = [], []
-    for season, data in seasons.items():
-        credited = data["credited"]
-        per_game.append(
-            credited.assign(
-                athlete_id=_season_keys(credited["athlete_id"], season)
-            ).rename(columns={"adjusted_epa": "value"})
-        )
-        values = (
-            data["values"]
-            .sort_values("week")
-            .drop_duplicates("athlete_id", keep="last")
-        )
-        groups.append(
-            values.set_index(_season_keys(values["athlete_id"], season))[
-                "position_group"
-            ]
-        )
-    return split_half_correlation(
-        pd.concat(per_game, ignore_index=True), pd.concat(groups), games_at
-    )
+    chosen = _half_games(_alternate(frames), n)
+    keys = credited[["athlete_id", "game_id"]].drop_duplicates()
+    with_credit = chosen.merge(keys, on=["athlete_id", "game_id"])["athlete_id"]
+    return chosen[chosen["athlete_id"].isin(set(with_credit))]
 
 
 def _half_scores(
@@ -529,11 +476,13 @@ def _half_scores(
     n: int,
     fit: headline.HeadlineFit,
 ) -> pd.DataFrame:
-    """Each chosen player's ``raw_score`` per half, indexed by athlete, columns 0 and 1.
+    """Each chosen athlete's paired half values, indexed by athlete.
 
-    Each half is scored as its own snapshot week: trait values by the registered
-    aggregate over the half's games, and ``epa`` as the half's adjusted EPA per game
-    (0 for a game without credit). ``latest`` traits have no games and score 0.
+    Columns ``("headline", h)`` hold the half's ``raw_score`` and ``("v4", h)`` its
+    adjusted EPA per game (0 for a chosen game without credit) for half ``h``. Each
+    half is scored as its own snapshot week: trait values by the registered aggregate
+    over the half's games and ``epa`` from the same per-game value. ``latest`` traits
+    have no games and score 0.
     """
     rows = frames.merge(chosen, on=["athlete_id", "game_id"])
     rows = rows.assign(
@@ -563,31 +512,35 @@ def _half_scores(
         games=n // 2,
         shrunk_per_game=lambda f: f["total"].fillna(0.0) / (n // 2),
     )
-    scores = []
+    columns = {}
     for half in (0, 1):
         scored = headline.score_players(
             half_snapshot[half_snapshot["week"].eq(half)],
             half_values[half_values["week"].eq(half)],
             fit,
         )
-        scores.append(
-            scored.drop_duplicates("athlete_id")
-            .set_index("athlete_id")["raw_score"]
-            .rename(half)
-        )
-    return pd.concat(scores, axis=1)
+        columns[("headline", half)] = scored.drop_duplicates("athlete_id").set_index(
+            "athlete_id"
+        )["raw_score"]
+        columns[("v4", half)] = half_values[half_values["week"].eq(half)].set_index(
+            "athlete_id"
+        )["shrunk_per_game"]
+    return pd.DataFrame(columns)
 
 
-def headline_split_half(
+def paired_split_half(
     seasons: dict[int, dict[str, pd.DataFrame]],
     fit: headline.HeadlineFit,
     games_at: tuple[int, ...],
-) -> pd.DataFrame:
-    """Split-half reliability of the headline's ``raw_score``, dev seasons pooled.
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split-half reliability of the headline and of v4 on one paired sample.
 
-    A player's games alternate between halves as in ``split_half_reliability``;
-    each half is scored with ``fit`` as a snapshot of its first ``n // 2`` games, and
-    the halves' scores are correlated per group across every dev season's players.
+    For each ``n`` both statistics use the same (season, athlete) set and the same
+    games (``paired_games``): the headline side correlates the halves' ``raw_score``
+    under ``fit``, the v4 side the halves' adjusted EPA per game. Dev seasons are
+    pooled with season-prefixed ids, a group needs ``MIN_QUALIFIED_PLAYERS`` athletes
+    with both sides in both halves, and each group takes its athletes' snapshot
+    group. Returns ``(headline_rows, v4_rows)`` with equal ``players``.
     """
     by_games: dict[int, list[pd.DataFrame]] = {n: [] for n in games_at}
     groups_pooled = []
@@ -603,9 +556,8 @@ def headline_split_half(
         groups_pooled.append(
             groups.set_axis(_season_keys(groups.index.to_series(), season))
         )
-        alternated = _alternate(frames)
         for n in games_at:
-            chosen = _half_games(alternated, n)
+            chosen = paired_games(frames, credited, n)
             if n < 2 or chosen.empty:
                 continue
             halves = _half_scores(frames, credited, groups, chosen, n, fit)
@@ -613,11 +565,28 @@ def headline_split_half(
                 halves.set_axis(_season_keys(halves.index.to_series(), season))
             )
     groups = pd.concat(groups_pooled) if groups_pooled else pd.Series(dtype=object)
-    rows = []
+    headline_rows, v4_rows = [], []
     for n, parts in by_games.items():
-        if parts:
-            rows += _group_correlations(pd.concat(parts), groups, n)
-    return pd.DataFrame(rows, columns=SPLIT_COLUMNS)
+        if not parts:
+            continue
+        wide = pd.concat(parts).dropna()
+        group = wide.index.to_series().map(groups)
+        for name, frame in wide.groupby(group):
+            if len(frame) < MIN_QUALIFIED_PLAYERS:
+                continue
+            for side, out in (("headline", headline_rows), ("v4", v4_rows)):
+                out.append(
+                    {
+                        "position_group": name,
+                        "games": n,
+                        "players": len(frame),
+                        "correlation": _pearson(frame[(side, 0)], frame[(side, 1)]),
+                    }
+                )
+    return (
+        pd.DataFrame(headline_rows, columns=SPLIT_COLUMNS),
+        pd.DataFrame(v4_rows, columns=SPLIT_COLUMNS),
+    )
 
 
 def _at_games(table: pd.DataFrame, name: str) -> pd.DataFrame:
@@ -630,7 +599,7 @@ def reliability_table(
     headline_rows: pd.DataFrame,
     v4_rows: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Each dev season's trait reliability, then the pooled headline and v4 rows."""
+    """Each dev season's trait reliability, then the pooled, paired headline and v4 rows."""
     parts = [
         data["reliability"].assign(season=str(season))
         for season, data in seasons.items()
@@ -822,8 +791,7 @@ def run_backtest(
         ignore_index=True,
     )
 
-    headline_rows = headline_split_half(dev, fit, RELIABILITY_GAMES)
-    v4_rows = v4_split_half(dev, RELIABILITY_GAMES)
+    headline_rows, v4_rows = paired_split_half(dev, fit, RELIABILITY_GAMES)
     swap = swap_maes(
         dev_matrix, validation_rows, dev_seasons, _mae(v4_fit, validation_rows)
     )
