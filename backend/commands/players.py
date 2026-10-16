@@ -135,3 +135,13 @@ def handle_position_traits_fit(args: Namespace) -> None:
     result = run_backtest(args.dev_seasons, args.validate, rebuild=args.rebuild)
     path = write_backtest(result, result.fit, max(args.dev_seasons))
     log.info("position trait headline fit written to %s", path)
+
+
+def handle_position_traits(args: Namespace) -> None:
+    from datetime import datetime, timezone
+
+    from backend.players.pipeline import run_position_traits
+
+    for season in args.seasons:
+        scored = run_position_traits(season, datetime.now(timezone.utc))
+        log.info(f"position traits {season}: {len(scored)} rows written")

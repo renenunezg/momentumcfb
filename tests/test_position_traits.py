@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backend.players import ingest
+from backend.players import ingest, pipeline
 from backend.players.traits import (
     TRAITS,
     TraitSpec,
@@ -1349,3 +1349,98 @@ def test_paired_split_half_scores_both_sides_on_one_athlete_set():
     assert v4[["position_group", "games", "players"]].equals(head[["position_group", "games", "players"]])
     assert head["correlation"].notna().all() and v4["correlation"].notna().all()
     assert head["correlation"].iloc[0] != pytest.approx(v4["correlation"].iloc[0])
+
+
+def _frozen_fit(dev_seasons, replaces_qb=True):
+    features = ["QB:qb.explosive", "QB:epa", "RB:rb.yards_over_expected"]
+    return headline.HeadlineFit(
+        weights=pd.Series({"intercept": 0.0, "home_field": 3.0, "QB:qb.explosive": 2.0, "QB:epa": 1.0,
+                           "RB:rb.yards_over_expected": 0.5}),
+        penalty=1.0, loso_sd=pd.Series(0.1, index=features), jackknife_sd=pd.Series(0.15, index=features),
+        analytic_se=pd.Series(0.12, index=features), dropped=["QB:qb.legs"],
+        dropped_reason={"QB:qb.legs": "insignificant"}, dev_seasons=dev_seasons,
+        model_version=headline.MODEL_VERSION,
+        feature_scale=pd.DataFrame({"feature": features, "mean": 0.0, "sd": [0.5, 1.0, 0.2]}),
+        reliability=pd.DataFrame({"position_group": "QB", "games": [4, 8], "correlation": [0.5, 0.7]}),
+        replaces_value={"QB": replaces_qb, "RB": False},
+    )
+
+
+FROZEN_FIT_2024 = _frozen_fit([2022, 2023, 2024])
+
+
+def _fake_season_2026():
+    rows = []
+    for week in (1, 2):
+        for athlete, group, trait, value, qualified in (
+            ("q1", "QB", "qb.explosive", 0.1 * week, True), ("q2", "QB", "qb.explosive", 0.3, True),
+            ("q1", "QB", "qb.legs", 4.0, True), ("q2", "QB", "qb.legs", 1.0, True),
+            ("q3", "QB", "qb.explosive", 0.2, False),
+            ("r1", "RB", "rb.yards_over_expected", 0.2, True), ("r2", "RB", "rb.yards_over_expected", 0.4, True),
+        ):
+            rows.append({"season": 2026, "week": week, "as_of": "old", "model_version": "old",
+                         "athlete_id": athlete, "athlete_name": athlete.upper(), "team": "A", "team_id": 1,
+                         "position_group": group, "games": week, "trait": trait, "value": value,
+                         "percentile": 50.0, "kind": "raw", "qualified": qualified, "exposure": 10.0 * week})
+    return {"snapshots": pd.DataFrame(rows)}
+
+
+FAKE_SEASON_2026 = _fake_season_2026()
+FAKE_V4_2026 = pd.DataFrame({
+    "week": [1, 1, 2, 2], "athlete_id": ["q1", "q2", "q1", "q2"], "position_group": "QB", "games": [1, 1, 2, 2],
+    "shrunk_per_game": [-1.0, 1.0, -0.5, 0.5], "adjusted_per_game": 0.0, "value_above_replacement": 0.0,
+    "model_version": "cfb_player_value_v4",
+})
+
+
+def test_run_position_traits_scores_with_a_frozen_fit_and_never_refits(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
+    headline.save_headline_fit(FROZEN_FIT_2024, tmp_path / "players" / "models" / "position_traits_2024.json")
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season: FAKE_SEASON_2026)
+    monkeypatch.setattr(pipeline.headline, "fit_headline", lambda *a, **k: pytest.fail("refit"))
+    monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
+    out = pipeline.run_position_traits(2026, AS_OF)
+    assert (out["model_version"] == "cfb_position_traits_v1").all()
+    assert set(out.loc[out["trait"].eq("headline"), "kind"]) == {"fitted"}
+    assert out["uncertainty"].notna().where(out["trait"].eq("headline"), True).all()
+    assert list(out.columns) == [*snapshots.TRAIT_SNAPSHOT_COLUMNS, "uncertainty", "replaces_value", "in_headline"]
+    assert (out["as_of"] == AS_OF.isoformat()).all()
+    assert pd.read_parquet(tmp_path / "players" / "position_traits" / "2026.parquet").shape == out.shape
+
+    headlines = out[out["trait"].eq("headline")]
+    assert len(headlines) == 10  # three QBs and two RBs in each of two weeks
+    q3 = headlines[headlines["athlete_id"].eq("q3")]
+    assert not q3["qualified"].any() and q3["percentile"].isna().all()
+    assert set(q3["team"]) == {"A"} and set(q3["athlete_name"]) == {"Q3"}
+    assert (headlines.groupby("week").size() == 5).all()
+    # the fitted feature is in the headline, the dropped one is not, headlines always are
+    flags = out.groupby("trait")["in_headline"].all()
+    assert flags["qb.explosive"] and flags["headline"] and not out.loc[out["trait"].eq("qb.legs"), "in_headline"].any()
+    assert out.groupby("position_group")["replaces_value"].all().to_dict() == {"QB": True, "RB": False}
+    q1 = headlines[headlines["athlete_id"].eq("q1") & headlines["week"].eq(2)].iloc[0]
+    scored = headline.score_players(
+        FAKE_SEASON_2026["snapshots"].query("week == 2"), FAKE_V4_2026.query("week == 2"), FROZEN_FIT_2024
+    ).set_index("athlete_id")
+    assert q1["value"] == pytest.approx(scored.loc["q1", "headline"])
+    assert q1["games"] == 2 and q1["uncertainty"] == pytest.approx(scored.loc["q1", "uncertainty"])
+
+
+def test_run_position_traits_uses_the_latest_fit_before_the_season(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
+    models = tmp_path / "players" / "models"
+    headline.save_headline_fit(_frozen_fit([2022, 2023, 2024]), models / "position_traits_2024.json")
+    headline.save_headline_fit(_frozen_fit([2022, 2023, 2024, 2025]), models / "position_traits_2025.json")
+    headline.save_headline_fit(_frozen_fit([2022, 2023, 2026]), models / "position_traits_2026.json")
+    assert pipeline.latest_headline_fit_path(2026).name == "position_traits_2025.json"
+    with pytest.raises(FileNotFoundError, match="position-traits-fit"):
+        pipeline.latest_headline_fit_path(2024)
+
+
+def test_run_position_traits_refuses_a_fit_that_saw_the_season(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
+    headline.save_headline_fit(
+        _frozen_fit([2022, 2026]), tmp_path / "players" / "models" / "position_traits_2025.json"
+    )
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season: pytest.fail("built"))
+    with pytest.raises(ValueError, match="cannot score 2026"):
+        pipeline.run_position_traits(2026, AS_OF)
