@@ -26,9 +26,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import lsq_linear
 
 from backend.config import PROCESSED_DIR
-from backend.players.traits import MODEL_VERSION, TRAITS
+from backend.players.traits import EPA_TRAIT, MODEL_VERSION, all_traits
 
 NOISE_RELIABILITY = 0.10
 # The fewest players a pooled split-half reliability may rest on before it counts.
@@ -64,6 +65,16 @@ MIN_TRAIT_AVAILABILITY = 0.5
 # single-game extremes and thin pools, not a tuned value. Snapshot values and
 # percentiles stay uncapped.
 Z_CAP = 3.0
+# The composite is shrunk toward the position average by games / (games + k_g),
+# with k_g the games at which the composite's split-half reliability reaches this
+# value (r = n / (n + k) gives r = 0.5 at n = k), capped at SHRINK_CAP_GAMES when
+# the curve never reaches it.
+SHRINK_RELIABILITY = 0.5
+SHRINK_CAP_GAMES = 12.0
+# The ridge penalty grid for fitted weights, chosen by leave-one-pair-out error:
+# fine and log-spaced so the choice is not a coarse round number.
+PENALTIES = np.logspace(-2, 4, 61)
+ZERO_COEFFICIENT = 1e-9
 GRADE_MEAN, GRADE_SD, GRADE_MIN, GRADE_MAX = 50.0, 10.0, 20.0, 80.0
 WEIGHT_COLUMNS = [
     "position_group",
@@ -73,7 +84,9 @@ WEIGHT_COLUMNS = [
     "reliability",
     "portability",
     "portability_imputed",
+    "coefficient",
     "weight",
+    "weight_method",
     "status",
 ]
 ELIGIBILITY_COLUMNS = [
@@ -103,9 +116,10 @@ GRADE_NAME = re.compile(r"position_grade_(\d{4})\.json")
 
 
 def group_traits() -> pd.DataFrame:
-    """``position_group, trait`` for every registered trait at each of its groups."""
+    """``position_group, trait`` for every registered and derived trait at each of its
+    groups."""
     return pd.DataFrame(
-        [(group, name) for name, spec in TRAITS.items() for group in spec.position_groups],
+        [(group, name) for name, spec in all_traits().items() for group in spec.position_groups],
         columns=["position_group", "trait"],
     )
 
@@ -129,8 +143,9 @@ def orientations(final_weeks: pd.DataFrame) -> pd.DataFrame:
     for qualified players at the final week of each development season.
     """
     rows = []
+    specs = all_traits()
     for group, trait in group_traits().itertuples(index=False):
-        spec = TRAITS[trait]
+        spec = specs[trait]
         part = final_weeks[final_weeks["position_group"].eq(group) & final_weeks["trait"].eq(trait)]
         part = part.dropna(subset=["value", "shrunk_per_game"])
         rho = _spearman(part["value"], part["shrunk_per_game"]) if len(part) else np.nan
@@ -210,7 +225,94 @@ def trait_weights(
     raw = raw.where(out["status"].isin(["weighted", "unmeasured"]), 0.0).fillna(0.0)
     total = raw.groupby(out["position_group"]).transform("sum")
     out["weight"] = (raw / total.where(total.gt(0))).fillna(0.0)
+    out["coefficient"] = np.nan
+    out["weight_method"] = "reliability"
     return out[WEIGHT_COLUMNS].reset_index(drop=True)
+
+
+# Fitted weights
+
+
+def _ridge(x: np.ndarray, y: np.ndarray, lower: np.ndarray, penalty: float) -> np.ndarray:
+    """Bounded ridge: an unpenalized free intercept, then coefficients with lower
+    bounds ``lower`` and penalty ``penalty`` on their squares."""
+    width = x.shape[1]
+    design = np.vstack([
+        np.column_stack([np.ones(len(x)), x]),
+        np.column_stack([np.zeros(width), np.sqrt(penalty) * np.eye(width)]),
+    ])
+    target = np.concatenate([y, np.zeros(width)])
+    bounds = (np.concatenate([[-np.inf], lower]), np.full(width + 1, np.inf))
+    return lsq_linear(design, target, bounds=bounds).x
+
+
+def fit_ridge_weights(
+    pairs: dict[int, tuple[pd.DataFrame, pd.Series]], lower: pd.Series
+) -> tuple[pd.Series, float]:
+    """Coefficients of next-season EPA on season-t trait z-scores, and the penalty.
+
+    ``pairs`` maps each development pair's first season to ``(X, y)``: X one column
+    per candidate trait (capped oriented z, 0 where missing or unavailable), y the
+    next season's v4 value z-scored within the group and season. ``lower`` gives
+    each column's lower bound (0 for higher-is-better traits, ``-inf`` where a
+    negative weight is allowed). The penalty minimizes the pooled squared error of
+    leave-one-pair-out refits over ``PENALTIES``; the coefficients are the refit on
+    every pair at that penalty. With one pair the smallest penalty is used.
+    """
+    columns = list(lower.index)
+    bound = lower.to_numpy(float)
+    seasons = sorted(pairs)
+    stacked = {season: (pairs[season][0][columns].to_numpy(float), pairs[season][1].to_numpy(float))
+               for season in seasons}
+    if len(seasons) > 1:
+        errors = []
+        for penalty in PENALTIES:
+            sse, n = 0.0, 0
+            for held in seasons:
+                x = np.vstack([stacked[s][0] for s in seasons if s != held])
+                y = np.concatenate([stacked[s][1] for s in seasons if s != held])
+                beta = _ridge(x, y, bound, penalty)
+                x_held, y_held = stacked[held]
+                residual = y_held - beta[0] - x_held @ beta[1:]
+                sse += float(residual @ residual)
+                n += len(residual)
+            errors.append(sse / n)
+        penalty = float(PENALTIES[int(np.argmin(errors))])
+    else:
+        penalty = float(PENALTIES[0])
+    x = np.vstack([stacked[s][0] for s in seasons])
+    y = np.concatenate([stacked[s][1] for s in seasons])
+    beta = _ridge(x, y, bound, penalty)
+    return pd.Series(beta[1:], index=columns), penalty
+
+
+def fitted_group_weights(
+    base: pd.DataFrame, group: str, coefficients: pd.Series
+) -> pd.DataFrame:
+    """``base``'s rows for ``group`` with the fitted coefficients as weights.
+
+    ``weight`` is the coefficient over the sum of absolute coefficients. A trait that
+    did not enter the fit keeps its status (``unmeasured_reliability`` or ``not kept``)
+    with weight 0; one fitted to 0 is ``unweighted``; a weighted trait whose measured
+    portability is at or below zero is ``team-driven (weighted)``.
+    """
+    rows = base[base["position_group"].eq(group)].copy()
+    # The solver leaves bound-active coefficients at round-off, not exactly 0.
+    coefficients = coefficients.where(coefficients.abs().gt(ZERO_COEFFICIENT), 0.0)
+    coefficient = rows["trait"].map(coefficients)
+    total = coefficients.abs().sum()
+    rows["coefficient"] = coefficient
+    rows["weight"] = (coefficient / total if total > 0 else coefficient * 0).fillna(0.0)
+    rows["weight_method"] = "fitted"
+    entered = coefficient.notna()
+    weighted = entered & coefficient.ne(0)
+    team_driven = weighted & ~rows["portability_imputed"] & rows["portability"].le(0)
+    rows["status"] = np.select(
+        [~entered, team_driven, weighted],
+        [rows["status"], "team-driven (weighted)", "weighted"],
+        "unweighted",
+    )
+    return rows
 
 
 # The model artifact
@@ -227,6 +329,9 @@ class GradeModel:
         default_factory=lambda: pd.DataFrame(columns=RELIABILITY_COLUMNS)
     )
     model_version: str = MODEL_VERSION
+    # Per group, the k in games / (games + k) the composite is shrunk by; absent or 0
+    # means no shrinkage at that group.
+    shrink_games: dict[str, float] = field(default_factory=dict)
 
 
 def grade_model_path(cutoff_season: int) -> Path:
@@ -267,6 +372,7 @@ def save_grade_model(model: GradeModel, path: Path) -> Path:
         "dev_seasons": [int(season) for season in model.dev_seasons],
         "weights": _records(model.weights[WEIGHT_COLUMNS]),
         "reliability": _records(model.reliability[RELIABILITY_COLUMNS]),
+        "shrink_games": {group: float(k) for group, k in model.shrink_games.items()},
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -278,7 +384,7 @@ def save_grade_model(model: GradeModel, path: Path) -> Path:
 
 def grade_model_from_payload(payload: dict) -> GradeModel:
     weights = pd.DataFrame(payload["weights"], columns=WEIGHT_COLUMNS)
-    for column in ("sign", "reliability", "portability", "weight"):
+    for column in ("sign", "reliability", "portability", "coefficient", "weight"):
         weights[column] = weights[column].astype(float)
     weights["portability_imputed"] = weights["portability_imputed"].astype(bool)
     reliability = pd.DataFrame(payload["reliability"], columns=RELIABILITY_COLUMNS)
@@ -287,6 +393,7 @@ def grade_model_from_payload(payload: dict) -> GradeModel:
         dev_seasons=[int(season) for season in payload["dev_seasons"]],
         reliability=reliability.astype({"games": int, "correlation": float}),
         model_version=payload["model_version"],
+        shrink_games={group: float(k) for group, k in payload.get("shrink_games", {}).items()},
     )
 
 
@@ -326,8 +433,97 @@ def reliability_at(table: pd.DataFrame, games: pd.Series) -> np.ndarray:
 
 
 def graded_groups(model: GradeModel) -> set[str]:
-    """Groups with at least one trait of positive weight."""
-    return set(model.weights.loc[model.weights["weight"].gt(0), "position_group"])
+    """Groups with at least one trait of nonzero weight."""
+    return set(model.weights.loc[model.weights["weight"].ne(0), "position_group"])
+
+
+def shrink_games_from(reliability: pd.DataFrame) -> dict[str, float]:
+    """Per group, the games at which the composite reliability curve (linear from
+    r(0) = 0) first reaches ``SHRINK_RELIABILITY``, or ``SHRINK_CAP_GAMES``."""
+    out = {}
+    for group, table in reliability.dropna(subset=["correlation"]).groupby("position_group"):
+        table = table.sort_values("games")
+        games = np.concatenate([[0.0], table["games"].to_numpy(float)])
+        r = np.concatenate([[0.0], table["correlation"].to_numpy(float)])
+        k = SHRINK_CAP_GAMES
+        for i in range(1, len(r)):
+            if r[i] >= SHRINK_RELIABILITY:
+                k = games[i - 1] + (SHRINK_RELIABILITY - r[i - 1]) / (r[i] - r[i - 1]) * (
+                    games[i] - games[i - 1]
+                )
+                break
+        out[group] = float(min(k, SHRINK_CAP_GAMES))
+    return out
+
+
+def with_epa_credit(snapshot: pd.DataFrame, values: pd.DataFrame) -> pd.DataFrame:
+    """``snapshot`` plus one ``epa.credit`` row per player, week and group that the
+    trait covers, from v4 ``shrunk_per_game`` at the latest v4 week at or before the
+    snapshot week. The row copies the player's identity, games and qualified flag at
+    that group and week; its percentile ranks it among qualified FBS players there."""
+    spec = all_traits()[EPA_TRAIT]
+    snapshot = snapshot[snapshot["trait"].ne(EPA_TRAIT)]
+    base = snapshot[snapshot["position_group"].isin(spec.position_groups)]
+    keys = ["week", "athlete_id", "position_group"]
+    people = base.astype({"athlete_id": str}).drop_duplicates(keys)
+    v4_weeks = np.array(sorted(values["week"].astype(int).unique()))
+    if people.empty or not len(v4_weeks):
+        return snapshot
+    position = np.searchsorted(v4_weeks, people["week"].astype(int).to_numpy(), side="right") - 1
+    people = people[position >= 0].assign(value_week=v4_weeks[position[position >= 0]])
+    credit = values[["week", "athlete_id", "shrunk_per_game"]].astype({"athlete_id": str})
+    rows = people.drop(columns=["value"]).merge(
+        credit.rename(columns={"week": "value_week", "shrunk_per_game": "value"}),
+        on=["athlete_id", "value_week"],
+    ).drop(columns="value_week")
+    rows = rows.assign(trait=EPA_TRAIT, kind=spec.kind)
+    ranked = rows["qualified"].eq(True) & rows["fbs"].eq(True) if "fbs" in rows else rows["qualified"].eq(True)
+    groups = [rows.loc[ranked, "week"], rows.loc[ranked, "position_group"]]
+    rank = rows.loc[ranked, "value"].groupby(groups).rank(method="average")
+    n = rows.loc[ranked, "value"].groupby(groups).transform("size")
+    rows["percentile"] = ((100 * (rank - 1) / (n - 1)).where(n.gt(1), 100.0)).reindex(rows.index)
+    return pd.concat([snapshot, rows[snapshot.columns]], ignore_index=True)
+
+
+def _week_pool(
+    snapshot_week: pd.DataFrame, traits: pd.DataFrame, groups: set[str]
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.MultiIndex]:
+    """The week's qualified FBS players at ``groups``, their rows of ``traits``
+    (``position_group, trait, sign`` and any weight columns) with capped oriented
+    z-scores, and the (group, trait) pairs available that week."""
+    missing = {"team", "fbs"} - set(snapshot_week.columns)
+    if missing:
+        raise ValueError(f"score_grades needs {sorted(missing)} on the snapshot")
+    keys = ["athlete_id", "position_group"]
+    rows = snapshot_week.astype({"athlete_id": str})
+    rows = rows.assign(qualified=rows["qualified"].eq(True), fbs=rows["fbs"].eq(True))
+    players = rows.groupby(keys, as_index=False).agg(
+        games=("games", "max"), qualified=("qualified", "any"), fbs=("fbs", "any")
+    )
+    players = players[
+        players["qualified"] & players["fbs"] & players["position_group"].isin(groups)
+    ][[*keys, "games"]].reset_index(drop=True)
+    pool = rows.merge(players[keys], on=keys).merge(traits, on=["position_group", "trait"])
+    value = pool["value"].astype(float)
+    z = _scaled(value, value, [pool["position_group"], pool["trait"]]) * pool["sign"]
+    pool = pool.assign(z=z.clip(-Z_CAP, Z_CAP))[z.notna()]
+    pool_size = players.groupby("position_group").size()
+    share = pool.groupby(["position_group", "trait"])["athlete_id"].nunique().div(
+        pool_size, level="position_group"
+    )
+    available = share[share.ge(MIN_TRAIT_AVAILABILITY)].index
+    return players, pool, available
+
+
+def trait_z_frame(snapshot_week: pd.DataFrame, traits: pd.DataFrame, group: str) -> pd.DataFrame:
+    """One row per qualified FBS player at ``group``, one column per trait of
+    ``traits`` at the group: the capped oriented z, 0 where the player has no value
+    or the trait is unavailable that week."""
+    traits = traits[traits["position_group"].eq(group)]
+    players, pool, available = _week_pool(snapshot_week, traits, {group})
+    pool = pool[pd.MultiIndex.from_frame(pool[["position_group", "trait"]]).isin(available)]
+    wide = pool.pivot_table(index="athlete_id", columns="trait", values="z", aggfunc="first")
+    return wide.reindex(index=players["athlete_id"], columns=traits["trait"]).fillna(0.0)
 
 
 def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame:
@@ -340,42 +536,26 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     available at the group that week when at least ``MIN_TRAIT_AVAILABILITY`` of the
     pool has a value for it; an unavailable trait leaves the composite for everyone
     that week, so every player at the group is graded on the same traits.
-    ``composite = Σ w_t z_t / Σ w_t`` over the available traits (the weights
+    ``composite = Σ w_t z_t / Σ |w_t|`` over the available traits (the weights
     renormalized for the week), with ``z = 0`` for an available trait the player has
-    no value for. ``coverage`` is the
-    weight of the available traits he has a value for over the weight of every
-    available trait; ``graded`` needs ``has_primary`` (a value for
-    ``PRIMARY_TRAITS[group]``) and ``coverage`` of at least ``MIN_WEIGHT_COVERAGE``.
-    ``composite`` is NaN where he is not graded.
+    no value for, then multiplied by ``games / (games + k_g)`` where the model has a
+    shrinkage ``k_g`` for the group. ``coverage`` is the absolute weight of the
+    available traits he has a value for over that of every available trait;
+    ``graded`` needs ``has_primary`` (a value for ``PRIMARY_TRAITS[group]``) and
+    ``coverage`` of at least ``MIN_WEIGHT_COVERAGE``. ``composite`` is NaN where he
+    is not graded.
     """
-    missing = {"team", "fbs"} - set(snapshot_week.columns)
-    if missing:
-        raise ValueError(f"score_grades needs {sorted(missing)} on the snapshot")
     keys = ["athlete_id", "position_group"]
-    rows = snapshot_week.astype({"athlete_id": str})
-    rows = rows.assign(qualified=rows["qualified"].eq(True), fbs=rows["fbs"].eq(True))
-    players = rows.groupby(keys, as_index=False).agg(
-        games=("games", "max"), qualified=("qualified", "any"), fbs=("fbs", "any")
+    weights = model.weights[model.weights["weight"].ne(0)].assign(
+        magnitude=lambda frame: frame["weight"].abs()
     )
-    players = players[
-        players["qualified"]
-        & players["fbs"]
-        & players["position_group"].isin(graded_groups(model))
-    ][[*keys, "games"]].reset_index(drop=True)
-    weights = model.weights[model.weights["weight"].gt(0)]
-    pool = rows.merge(players[keys], on=keys).merge(
-        weights[["position_group", "trait", "sign", "weight"]], on=["position_group", "trait"]
+    players, pool, available = _week_pool(
+        snapshot_week,
+        weights[["position_group", "trait", "sign", "weight", "magnitude"]],
+        graded_groups(model),
     )
-    value = pool["value"].astype(float)
-    z = _scaled(value, value, [pool["position_group"], pool["trait"]]) * pool["sign"]
-    pool = pool.assign(z=z.clip(-Z_CAP, Z_CAP))[z.notna()]
-    pool_size = players.groupby("position_group").size()
-    share = pool.groupby(["position_group", "trait"])["athlete_id"].nunique().div(
-        pool_size, level="position_group"
-    )
-    available = share[share.ge(MIN_TRAIT_AVAILABILITY)].index
     available_weight = (
-        weights.set_index(["position_group", "trait"])["weight"]
+        weights.set_index(["position_group", "trait"])["magnitude"]
         .reindex(available)
         .groupby(level="position_group")
         .sum()
@@ -384,20 +564,30 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     sums = (
         pool.assign(
             weighted=(pool["weight"] * pool["z"]).where(in_available, 0.0),
-            covered=pool["weight"].where(in_available, 0.0),
+            covered=pool["magnitude"].where(in_available, 0.0),
         )
         .groupby(keys)[["weighted", "covered"]]
         .sum()
         .reindex(pd.MultiIndex.from_frame(players[keys]))
         .fillna(0.0)
     )
-    primary = pool[pool["trait"].eq(pool["position_group"].map(PRIMARY_TRAITS))]
+    # The primary trait is read from the snapshot, whatever its weight.
+    rows = snapshot_week.astype({"athlete_id": str})
+    primary = rows[
+        rows["trait"].eq(rows["position_group"].map(PRIMARY_TRAITS)) & rows["value"].notna()
+    ]
     primary_keys = set(zip(primary["athlete_id"], primary["position_group"]))
-    players["has_primary"] = [key in primary_keys for key in zip(players["athlete_id"], players["position_group"])]
+    players["has_primary"] = [
+        key in primary_keys for key in zip(players["athlete_id"], players["position_group"])
+    ]
     denominator = players["position_group"].map(available_weight)
-    players["coverage"] = sums["covered"].to_numpy() / denominator.where(denominator.gt(0))
+    denominator = denominator.where(denominator.gt(0))
+    players["coverage"] = sums["covered"].to_numpy() / denominator
     players["graded"] = players["has_primary"] & players["coverage"].ge(MIN_WEIGHT_COVERAGE)
-    composite = sums["weighted"].to_numpy() / denominator.where(denominator.gt(0)).to_numpy()
+    k = players["position_group"].map(model.shrink_games).fillna(0.0)
+    games = players["games"].astype(float)
+    shrink = (games / (games + k)).where(k.gt(0), 1.0).to_numpy()
+    composite = sums["weighted"].to_numpy() / denominator.to_numpy() * shrink
     players["composite"] = np.where(players["graded"], composite, np.nan)
     return players[ELIGIBILITY_COLUMNS]
 

@@ -177,11 +177,12 @@ def score_snapshot(
     values, ``credited`` its per-game credit and ``projections`` its pregame
     projections for WAR.
     """
+    snapshot = grade.with_epa_credit(snapshot, values)
     scored = grade_rows(snapshot, model)
     measured = war_rows(
         snapshot, values, war.wins_above_replacement(values, credited, projections)
     )
-    weighted = model.weights[model.weights["weight"].gt(0)]
+    weighted = model.weights[model.weights["weight"].ne(0)]
     weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
     traits = snapshot[TRAIT_SNAPSHOT_COLUMNS].assign(uncertainty=np.nan)
     traits["in_grade"] = [

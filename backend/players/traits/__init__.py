@@ -27,6 +27,11 @@ class TraitSpec:
 
 
 TRAITS: dict[str, TraitSpec] = {}
+# Traits the grade reads that no builder emits: they are added to the snapshots
+# from other models (``epa.credit`` from player value v4). Kept apart from
+# ``TRAITS`` so the builders' registry stays exactly what they produce.
+DERIVED_TRAITS: dict[str, TraitSpec] = {}
+EPA_TRAIT = "epa.credit"
 
 
 def register(spec: TraitSpec) -> TraitSpec:
@@ -34,6 +39,19 @@ def register(spec: TraitSpec) -> TraitSpec:
         raise ValueError(f"trait {spec.name!r} is already registered")
     TRAITS[spec.name] = spec
     return spec
+
+
+def all_traits() -> dict[str, TraitSpec]:
+    """``TRAITS`` and ``DERIVED_TRAITS`` together."""
+    return {**TRAITS, **DERIVED_TRAITS}
+
+
+# v4 ``shrunk_per_game`` through the week, the player's EPA credit, as a trait. It has
+# no OL value. Per game it is the game's adjusted EPA, so a ``rate`` over games with
+# denominator 1 is its per-game mean for split-half reliability.
+DERIVED_TRAITS[EPA_TRAIT] = TraitSpec(
+    EPA_TRAIT, ("QB", "RB", "WR", "TE", "DL", "LB", "DB", "K", "P"), "counted"
+)
 
 
 # Importing a position module registers its traits, so the registry is complete

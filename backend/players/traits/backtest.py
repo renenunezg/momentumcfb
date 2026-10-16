@@ -26,7 +26,7 @@ from backend.etl import store
 from backend.features.possessions import classify_plays
 from backend.players import pipeline
 from backend.players.ingest import read_season_source, read_weekly
-from backend.players.traits import TRAITS, grade, snapshots, war
+from backend.players.traits import EPA_TRAIT, all_traits, grade, snapshots, war
 from backend.players.traits.context import load_season_context
 from backend.players.traits.defense import defense_traits
 from backend.players.traits.expectations import (
@@ -99,6 +99,8 @@ SEASON_ARTIFACTS = {
 }
 TABLES = (
     "weights",
+    "selection",
+    "dev_pairs",
     "grade_coverage",
     "reliability",
     "portability",
@@ -340,14 +342,35 @@ def _people(snapshot: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def frames_with_epa(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """The season's raw trait frames plus one ``epa.credit`` row per credited game of
+    an athlete in the snapshot: the game's adjusted EPA over a denominator of 1, so
+    its ``rate`` aggregate is adjusted EPA per game."""
+    frames = data["frames"].astype({"athlete_id": str})
+    credited = data["credited"].astype({"athlete_id": str})
+    credited = credited[credited["athlete_id"].isin(set(data["snapshots"]["athlete_id"].astype(str)))]
+    epa = pd.DataFrame(
+        {
+            "athlete_id": credited["athlete_id"],
+            "game_id": credited["game_id"],
+            "model_week": credited["model_week"],
+            "trait": EPA_TRAIT,
+            "numerator": credited["adjusted_epa"].astype(float),
+            "denominator": 1.0,
+        }
+    )
+    return pd.concat([frames, epa], ignore_index=True)
+
+
 def pooled_frames(
     seasons: dict[int, dict[str, pd.DataFrame]],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The seasons' raw trait frames and ``athlete_id, position_group`` with
-    season-suffixed ids; each athlete takes his snapshot group in that season."""
+    """The seasons' raw trait frames (with ``epa.credit``) and ``athlete_id,
+    position_group`` with season-suffixed ids; each athlete takes his snapshot group
+    in that season."""
     frames, groups = [], []
     for season, data in seasons.items():
-        frame = data["frames"].astype({"athlete_id": str})
+        frame = frames_with_epa(data)
         frames.append(frame.assign(athlete_id=_season_keys(frame["athlete_id"], season)))
         people = _people(data["snapshots"])["position_group"].reset_index()
         groups.append(people.assign(athlete_id=_season_keys(people["athlete_id"], season)))
@@ -429,7 +452,7 @@ def half_composites(
     """
     rows = frames.merge(chosen, on=["athlete_id", "game_id"])
     rows = rows.assign(
-        aggregate=rows["trait"].map({name: spec.aggregate for name, spec in TRAITS.items()})
+        aggregate=rows["trait"].map({name: spec.aggregate for name, spec in all_traits().items()})
     )
     values = snapshots.aggregate(rows, ["athlete_id", "trait", "half"]).reset_index()
     half_snapshot = values.assign(
@@ -461,9 +484,9 @@ def composite_split_half(
     """
     by_games: dict[int, list[pd.DataFrame]] = {n: [] for n in games_at}
     for season, data in seasons.items():
-        frames = data["frames"].astype({"athlete_id": str})
+        frames = frames_with_epa(data)
         people = _people(data["snapshots"])
-        alternated = _alternate(frames)
+        alternated = _alternate(data["frames"].astype({"athlete_id": str}))
         for n in games_at:
             chosen = _half_games(alternated, n)
             if n < 2 or chosen.empty:
@@ -586,7 +609,7 @@ def final_week_grades(snapshot: pd.DataFrame, model: grade.GradeModel) -> pd.Dat
 
 def next_season_table(
     seasons: dict[int, dict[str, pd.DataFrame]],
-    model: grade.GradeModel,
+    model: grade.GradeModel | dict[int, grade.GradeModel],
     validation_season: int,
 ) -> pd.DataFrame:
     """Does a final-week grade predict next season, compared with EPA credit alone?
@@ -598,18 +621,20 @@ def next_season_table(
     (the EPA-only baseline). Where at least ``MIN_QUALIFIED_PLAYERS`` players have all
     four numbers every correlation uses only them; otherwise (OL has no v4 value, few
     punters have one) the grade rows are kept and the EPA columns are mostly empty.
-    ``holdout`` is True only for the pair ending in the validation season.
+    ``holdout`` is True only for the pair ending in the validation season. ``model``
+    may map each pair's first season to the model that grades both of its seasons
+    (cross-fitted weights).
     """
-    grades = {season: final_week_grades(data["snapshots"], model) for season, data in seasons.items()}
     epa = {season: _final_epa(data["values"]) for season, data in seasons.items()}
     rows = []
     for season in sorted(seasons):
         later = season + 1
         if later not in seasons or later > validation_season:
             continue
-        both = grades[season].merge(
-            grades[later], on=["athlete_id", "position_group"], suffixes=("", "_next")
-        )
+        pair_model = model[season] if isinstance(model, dict) else model
+        now = final_week_grades(seasons[season]["snapshots"], pair_model)
+        nxt = final_week_grades(seasons[later]["snapshots"], pair_model)
+        both = now.merge(nxt, on=["athlete_id", "position_group"], suffixes=("", "_next"))
         both = both.assign(
             epa=both["athlete_id"].map(epa[season]),
             epa_next=both["athlete_id"].map(epa[later]),
@@ -790,12 +815,256 @@ def score_cached_season(season: int) -> pd.DataFrame:
     return out
 
 
+# Model selection on the development pairs
+
+
+DEV_PAIR_COLUMNS = [
+    "variant",
+    "season",
+    "next_season",
+    "position_group",
+    "players",
+    "spearman_grade_next_epa",
+    "spearman_epa_next_epa",
+]
+SELECTION_COLUMNS = [
+    "position_group",
+    "current",
+    "epa_trait",
+    "fitted",
+    "shrinkage",
+    "epa_alone",
+    "epa_weight_share",
+    "epa_kept",
+    "fitted_kept",
+    "fitted_penalty",
+    "shrink_games",
+    "shrink_kept",
+]
+MIN_FIT_ROWS = 30  # per development pair; a sample floor, not a tuned value
+
+
+def dev_pair_table(
+    dev: dict[int, dict[str, pd.DataFrame]],
+    model: grade.GradeModel | dict[int, grade.GradeModel],
+    variant: str,
+) -> pd.DataFrame:
+    """``next_season_table`` over the development pairs only, labelled ``variant``."""
+    table = next_season_table(dev, model, max(dev))
+    return table.assign(variant=variant)[DEV_PAIR_COLUMNS]
+
+
+def pair_means(table: pd.DataFrame, column: str = "spearman_grade_next_epa") -> pd.Series:
+    """The mean of ``column`` over the development pairs, per group."""
+    return table.groupby("position_group")[column].mean()
+
+
+def _replace_groups(base: pd.DataFrame, parts: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """``base`` weights with each group in ``parts`` replaced by its rows."""
+    kept = base[~base["position_group"].isin(parts)]
+    return pd.concat([kept, *parts.values()], ignore_index=True)[grade.WEIGHT_COLUMNS]
+
+
+def _model(weights: pd.DataFrame, dev_seasons: list[int], **fields) -> grade.GradeModel:
+    return grade.GradeModel(weights=weights.reset_index(drop=True), dev_seasons=dev_seasons, **fields)
+
+
+def regression_pairs(
+    dev: dict[int, dict[str, pd.DataFrame]],
+    base: grade.GradeModel,
+    group: str,
+    candidates: pd.DataFrame,
+) -> dict[int, tuple[pd.DataFrame, pd.Series]]:
+    """``(X, y)`` per development pair for ``group``.
+
+    The sample is the players graded under ``base`` at the final week of season t
+    who have a v4 value at the same group at the final week of t + 1. X holds their
+    capped oriented z-scores on ``candidates`` (0 where missing or unavailable that
+    week), y the next season's v4 ``shrunk_per_game`` z-scored over the sample. A
+    pair with fewer than ``MIN_FIT_ROWS`` rows is left out.
+    """
+    out = {}
+    for season in sorted(dev):
+        later = season + 1
+        if later not in dev:
+            continue
+        snapshot = dev[season]["snapshots"]
+        final = snapshot[snapshot["week"].eq(snapshot["week"].max())]
+        graded = grade.score_grades(final, base)
+        graded = graded[graded["position_group"].eq(group)]["athlete_id"]
+        values = dev[later]["values"]
+        nxt = values[values["week"].eq(values["week"].max())].astype({"athlete_id": str})
+        nxt = nxt[nxt["position_group"].eq(group)].drop_duplicates("athlete_id")
+        target = nxt.set_index("athlete_id")["shrunk_per_game"].reindex(graded).dropna()
+        if len(target) < MIN_FIT_ROWS or not target.std() > 0:
+            continue
+        x = grade.trait_z_frame(final, candidates, group).reindex(target.index).fillna(0.0)
+        out[season] = (x, (target - target.mean()) / target.std())
+    return out
+
+
+def _candidates(weights: pd.DataFrame, group: str, epa_kept: bool) -> pd.DataFrame:
+    """The traits that may enter the fit at ``group``: a reliability on at least the
+    player floor (``latest`` traits have none) and, for ``epa.credit``, the EPA trait
+    kept there."""
+    rows = weights[weights["position_group"].eq(group) & weights["reliability"].notna()]
+    if not epa_kept:
+        rows = rows[rows["trait"].ne(EPA_TRAIT)]
+    return rows[["position_group", "trait", "sign"]]
+
+
+def _lower_bounds(candidates: pd.DataFrame) -> pd.Series:
+    """0 for a higher-is-better trait, unbounded below for ``False`` or ``None``."""
+    specs = all_traits()
+    return pd.Series(
+        [0.0 if specs[trait].higher_is_better is True else -np.inf for trait in candidates["trait"]],
+        index=candidates["trait"].to_list(),
+    )
+
+
+def select_grade_model(
+    dev: dict[int, dict[str, pd.DataFrame]],
+    pooled: pd.DataFrame,
+    portability: pd.DataFrame,
+    orientation: pd.DataFrame,
+) -> tuple[grade.GradeModel, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """The grade model, chosen position by position on the development pairs.
+
+    Starting from the current grade (reliability × portability weights without EPA
+    credit), each change is evaluated by the mean over the development pairs of the
+    Spearman of the season-t final-week grade with season t + 1 v4 EPA credit, and
+    kept at a group only where that mean improves: (1) ``epa.credit`` as a trait in
+    the reliability × portability weights; (2) weights fitted by a bounded ridge of
+    next-season EPA on the traits, evaluated with weights fitted on the other pairs
+    (leave-one-pair-out), kept as the fit on every pair; (3) shrinkage of the
+    composite by games / (games + k_g), k_g from the composite's split-half curve.
+    Returns the model, the composite reliability table, the long ``dev_pairs`` table
+    and the per-group ``selection`` table.
+    """
+    dev_seasons = sorted(dev)
+    with_epa = grade.trait_weights(pooled, portability, orientation)
+    without = grade.trait_weights(
+        pooled, portability, orientation[orientation["trait"].ne(EPA_TRAIT)]
+    )
+    current = _model(without, dev_seasons)
+    epa_model = _model(with_epa, dev_seasons)
+    tables = [dev_pair_table(dev, current, "current"), dev_pair_table(dev, epa_model, "epa_trait")]
+    base_mean, epa_mean = pair_means(tables[0]), pair_means(tables[1])
+    groups = sorted(grade.graded_groups(epa_model) | grade.graded_groups(current))
+    epa_kept = {g: bool(epa_mean.get(g, np.nan) > base_mean.get(g, np.nan)) for g in groups}
+
+    epa_rows = with_epa[with_epa["trait"].eq(EPA_TRAIT)]
+    dropped_epa = epa_rows.assign(weight=0.0, status="not kept")
+    step1_parts = {}
+    for g in groups:
+        if epa_kept[g]:
+            step1_parts[g] = with_epa[with_epa["position_group"].eq(g)]
+        else:
+            step1_parts[g] = pd.concat(
+                [without[without["position_group"].eq(g)], dropped_epa[dropped_epa["position_group"].eq(g)]]
+            )
+    step1 = _replace_groups(pd.concat([without, dropped_epa], ignore_index=True), step1_parts)
+    model1 = _model(step1, dev_seasons)
+    step1_mean = pd.Series({g: (epa_mean if epa_kept[g] else base_mean).get(g, np.nan) for g in groups})
+
+    # (2) fitted weights, cross-fitted for the evaluation
+    designs, lowers, candidate_frames = {}, {}, {}
+    for g in groups:
+        candidates = _candidates(step1, g, epa_kept[g])
+        if candidates.empty:
+            continue
+        pairs = regression_pairs(dev, model1, g, candidates)
+        if len(pairs) < 2:
+            continue
+        designs[g], lowers[g], candidate_frames[g] = pairs, _lower_bounds(candidates), candidates
+    pair_seasons = [season for season in dev_seasons if season + 1 in dev]
+    cross_models = {}
+    for held in pair_seasons:
+        parts = {}
+        for g, pairs in designs.items():
+            training = {season: frame for season, frame in pairs.items() if season != held}
+            if not training:
+                continue
+            coefficients, _ = grade.fit_ridge_weights(training, lowers[g])
+            parts[g] = grade.fitted_group_weights(step1, g, coefficients)
+        cross_models[held] = _model(_replace_groups(step1, parts), dev_seasons)
+    fitted_table = dev_pair_table(dev, cross_models, "fitted")
+    fitted_mean = pair_means(fitted_table)
+    fitted_kept = {g: g in designs and bool(fitted_mean.get(g, np.nan) > step1_mean.get(g, np.nan))
+                   for g in groups}
+    final_parts, penalties = {}, {}
+    for g in groups:
+        if fitted_kept[g]:
+            coefficients, penalties[g] = grade.fit_ridge_weights(designs[g], lowers[g])
+            final_parts[g] = grade.fitted_group_weights(step1, g, coefficients)
+    step2 = _replace_groups(step1, final_parts)
+    model2 = _model(step2, dev_seasons)
+    step2_mean = pd.Series(
+        {g: (fitted_mean if fitted_kept[g] else step1_mean).get(g, np.nan) for g in groups}
+    )
+    composite = composite_split_half(dev, model2, RELIABILITY_GAMES)
+    reliability = composite.dropna(subset=["correlation"])[grade.RELIABILITY_COLUMNS].reset_index(drop=True)
+
+    # (3) shrinkage, on the same cross-fitted weights where they were kept
+    shrink = grade.shrink_games_from(reliability)
+    shrink_models = {}
+    for held in pair_seasons:
+        cross = cross_models[held].weights
+        parts = {g: cross[cross["position_group"].eq(g)] for g in groups if fitted_kept[g]}
+        shrink_models[held] = _model(
+            _replace_groups(step2, parts), dev_seasons, reliability=reliability, shrink_games=shrink
+        )
+    shrink_table = dev_pair_table(dev, shrink_models, "shrinkage")
+    shrink_mean = pair_means(shrink_table)
+    shrink_kept = {g: bool(shrink_mean.get(g, np.nan) > step2_mean.get(g, np.nan)) for g in groups}
+    model = _model(
+        step2,
+        dev_seasons,
+        reliability=reliability,
+        shrink_games={g: shrink[g] for g in groups if shrink_kept[g] and g in shrink},
+    )
+
+    epa_alone = pair_means(tables[0], "spearman_epa_next_epa")
+    share = epa_rows.set_index("position_group")["weight"]
+    selection = pd.DataFrame(
+        [
+            {
+                "position_group": g,
+                "current": base_mean.get(g, np.nan),
+                "epa_trait": epa_mean.get(g, np.nan),
+                "fitted": fitted_mean.get(g, np.nan) if g in designs else np.nan,
+                "shrinkage": shrink_mean.get(g, np.nan),
+                "epa_alone": epa_alone.get(g, np.nan),
+                "epa_weight_share": share.get(g, np.nan),
+                "epa_kept": epa_kept[g],
+                "fitted_kept": fitted_kept[g],
+                "fitted_penalty": penalties.get(g, np.nan),
+                "shrink_games": shrink.get(g, np.nan),
+                "shrink_kept": shrink_kept[g],
+            }
+            for g in groups
+        ],
+        columns=SELECTION_COLUMNS,
+    )
+    dev_pairs = pd.concat([*tables, fitted_table, shrink_table], ignore_index=True)
+    for row in selection.itertuples():
+        log.info(
+            "position grade %s: dev-pair mean current %.4f, +epa %.4f, +fitted %.4f, "
+            "+shrinkage %.4f, epa alone %.4f; kept epa %s, fitted %s, shrinkage %s (k %.2f)",
+            row.position_group, row.current, row.epa_trait, row.fitted, row.shrinkage,
+            row.epa_alone, row.epa_kept, row.fitted_kept, row.shrink_kept, row.shrink_games,
+        )
+    return model, composite, dev_pairs, selection
+
+
 # The backtest
 
 
 @dataclass
 class BacktestResult:
     weights: pd.DataFrame
+    selection: pd.DataFrame
+    dev_pairs: pd.DataFrame
     grade_coverage: pd.DataFrame
     reliability: pd.DataFrame
     portability: pd.DataFrame
@@ -808,7 +1077,10 @@ class BacktestResult:
 
 
 def run_backtest(
-    dev_seasons: list[int], validation_season: int, rebuild: bool = False
+    dev_seasons: list[int],
+    validation_season: int,
+    rebuild: bool = False,
+    score_holdout: bool = True,
 ) -> BacktestResult:
     """Set the grade's weights on ``dev_seasons`` and judge it on ``validation_season``.
 
@@ -816,7 +1088,9 @@ def run_backtest(
     validation season enters no weight and no reliability curve, and is only scored.
     ``rebuild`` rebuilds cached season artifacts. The result also carries the serving
     expectation tables, fit on every play season through ``validation_season``, for
-    the weekly runner to score later seasons with.
+    the weekly runner to score later seasons with. With ``score_holdout`` False the
+    validation season's next-season row and the draft check are not computed, so the
+    model can be developed without looking at them.
     """
     dev_seasons = sorted({int(season) for season in dev_seasons})
     if validation_season <= max(dev_seasons):
@@ -826,10 +1100,11 @@ def run_backtest(
     seasons = {}
     for season in [*dev_seasons, validation_season]:
         data = load_season(season, rebuild)
+        values = player_values(season)
         seasons[season] = {
             **data,
-            "snapshots": with_fbs(data["snapshots"], season),
-            "values": player_values(season),
+            "snapshots": grade.with_epa_credit(with_fbs(data["snapshots"], season), values),
+            "values": values,
         }
     dev = {season: seasons[season] for season in dev_seasons}
     snapshots_by_season = {season: data["snapshots"] for season, data in seasons.items()}
@@ -850,15 +1125,14 @@ def run_backtest(
             row.spearman_epa,
             row.players,
         )
-    weights = grade.trait_weights(pooled, dev_portability, orientation)
-    model = grade.GradeModel(weights=weights, dev_seasons=dev_seasons)
-    composite = composite_split_half(dev, model, RELIABILITY_GAMES)
-    model.reliability = composite.dropna(subset=["correlation"])[
-        grade.RELIABILITY_COLUMNS
-    ].reset_index(drop=True)
+    model, composite, dev_pairs, selection = select_grade_model(
+        dev, pooled, dev_portability, orientation
+    )
     log_war_leaders(seasons[validation_season], validation_season)
     return BacktestResult(
-        weights=weights,
+        weights=model.weights,
+        selection=selection,
+        dev_pairs=dev_pairs,
         grade_coverage=grade_coverage_table(seasons, model),
         reliability=reliability_table(dev, pooled, composite),
         portability=dev_portability,
@@ -866,11 +1140,19 @@ def run_backtest(
         target_coverage=pd.concat(
             [data["target_coverage"] for data in seasons.values()], ignore_index=True
         ),
-        next_season=next_season_table(seasons, model, validation_season),
-        draft_check=draft_check(
-            snapshots_by_season,
-            {season: data["values"] for season, data in seasons.items()},
-            model,
+        next_season=(
+            next_season_table(seasons, model, validation_season)
+            if score_holdout
+            else pd.DataFrame(columns=NEXT_SEASON_COLUMNS)
+        ),
+        draft_check=(
+            draft_check(
+                snapshots_by_season,
+                {season: data["values"] for season, data in seasons.items()},
+                model,
+            )
+            if score_holdout
+            else pd.DataFrame(columns=DRAFT_COLUMNS)
         ),
         model=model,
         expectations=fit_tables_before(validation_season + 1),
