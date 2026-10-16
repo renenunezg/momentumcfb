@@ -1252,9 +1252,16 @@ def test_replacement_rule_needs_both_a_better_mae_and_equal_reliability():
         {"position_group": "QB", "mae_v4_only": 13.0, "mae_with_traits": 12.8, "reliability_6_v4": 0.5, "reliability_6_headline": 0.55},
         {"position_group": "RB", "mae_v4_only": 13.0, "mae_with_traits": 12.8, "reliability_6_v4": 0.5, "reliability_6_headline": 0.4},
         {"position_group": "DL", "mae_v4_only": 13.0, "mae_with_traits": 13.1, "reliability_6_v4": 0.5, "reliability_6_headline": 0.9},
+        # K, P and OL meet the rule here but never replace v4 in v1
+        {"position_group": "K", "mae_v4_only": 13.0, "mae_with_traits": 12.9, "reliability_6_v4": 0.0, "reliability_6_headline": 0.2},
+        {"position_group": "P", "mae_v4_only": 13.0, "mae_with_traits": 12.9, "reliability_6_v4": 0.0, "reliability_6_headline": 0.2},
+        {"position_group": "OL", "mae_v4_only": 13.0, "mae_with_traits": 12.9, "reliability_6_v4": 0.0, "reliability_6_headline": 0.2},
     ])
-    out = backtest.replacement_flags(swap).set_index("position_group")["replaces_value"]
-    assert out.to_dict() == {"QB": True, "RB": False, "DL": False}
+    out = backtest.replacement_flags(swap).set_index("position_group")
+    assert out["replaces_value"].to_dict() == {
+        "QB": True, "RB": False, "DL": False, "K": False, "P": False, "OL": False
+    }
+    assert out.loc["K", "improvement"] == pytest.approx(0.1)  # the numbers stay in the table
 
 
 def exposure_frames():
@@ -1369,6 +1376,27 @@ def _frozen_fit(dev_seasons, replaces_qb=True):
 
 
 FROZEN_FIT_2024 = _frozen_fit([2022, 2023, 2024])
+FBS_TEAMS = pd.DataFrame({"school": ["A", "Z"], "classification": ["fbs", "fcs"]})
+
+
+def _serving_tables(last_season=2025):
+    """Expectation tables with all three parts, fit on seasons through ``last_season``."""
+    plays = pd.DataFrame({
+        "down": [1, 1, 3, 4, 4, 4], "distance": [10, 10, 2, 5, 5, 5], "yards_to_goal": [75, 75, 25, 30, 30, 30],
+        "is_rush": [True, True, True, False, False, False], "is_competitive": [True, True, True, False, False, False],
+        "yards_gained": [2.0, 6.0, 1.0, 0.0, 0.0, 0.0], "is_success": [False, True, True, False, False, False],
+        "play_type": ["Rush", "Rush", "Rush", "Field Goal Good", "Field Goal Missed", "Field Goal Good"],
+        "play_text": ["", "", "", "A 42 yd FG GOOD", "A 44 yd FG MISSED", "A 51 yd FG GOOD"],
+    })
+    by_season = {season: plays.assign(season=season) for season in (last_season - 1, last_season)}
+    return expectations.fit_expectation_tables(by_season, before_season=last_season + 1)
+
+
+def _install_frozen_model(models, fit=FROZEN_FIT_2024, cutoff=2024, tables=None):
+    headline.save_headline_fit(fit, models / f"position_traits_{cutoff}.json")
+    expectations.save_expectation_tables(
+        tables or _serving_tables(), expectations.expectation_tables_path(models, cutoff)
+    )
 
 
 def _fake_season_2026():
@@ -1397,8 +1425,9 @@ FAKE_V4_2026 = pd.DataFrame({
 
 def test_run_position_traits_scores_with_a_frozen_fit_and_never_refits(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
-    headline.save_headline_fit(FROZEN_FIT_2024, tmp_path / "players" / "models" / "position_traits_2024.json")
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season: FAKE_SEASON_2026)
+    _install_frozen_model(tmp_path / "players" / "models")
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: FAKE_SEASON_2026)
+    monkeypatch.setattr(pipeline, "read_season_source", lambda season, name: FBS_TEAMS)
     monkeypatch.setattr(pipeline.headline, "fit_headline", lambda *a, **k: pytest.fail("refit"))
     monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
     out = pipeline.run_position_traits(2026, AS_OF)
@@ -1406,8 +1435,9 @@ def test_run_position_traits_scores_with_a_frozen_fit_and_never_refits(monkeypat
     assert set(out.loc[out["trait"].eq("headline"), "kind"]) == {"fitted"}
     assert out["uncertainty"].notna().where(out["trait"].eq("headline"), True).all()
     assert list(out.columns) == [
-        *snapshots.TRAIT_SNAPSHOT_COLUMNS, "exposure", "uncertainty", "replaces_value", "in_headline"
+        *snapshots.TRAIT_SNAPSHOT_COLUMNS, "exposure", "uncertainty", "replaces_value", "in_headline", "fbs"
     ]
+    assert out["fbs"].all()  # every fake player is on team A
     on_traits = out["trait"].ne("headline")
     assert out.loc[on_traits, "exposure"].tolist() == FAKE_SEASON_2026["snapshots"]["exposure"].tolist()
     assert out.loc[~on_traits, "exposure"].isna().all()
@@ -1448,8 +1478,70 @@ def test_run_position_traits_refuses_a_fit_that_saw_the_season(monkeypatch, tmp_
     headline.save_headline_fit(
         _frozen_fit([2022, 2026]), tmp_path / "players" / "models" / "position_traits_2025.json"
     )
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season: pytest.fail("built"))
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: pytest.fail("built"))
     with pytest.raises(ValueError, match="cannot score 2026"):
+        pipeline.run_position_traits(2026, AS_OF)
+
+
+def test_expectation_tables_round_trip_through_the_serving_artifact(tmp_path):
+    tables = _serving_tables()
+    assert all(len(getattr(tables, name)) for name in expectations.TABLE_KEYS)
+    path = expectations.save_expectation_tables(tables, expectations.expectation_tables_path(tmp_path, 2024))
+    assert path.name == "position_traits_expectations_2024.parquet"
+    assert set(pd.read_parquet(path)["table"]) == {"rush_yards", "conversion", "field_goal"}
+    loaded = expectations.load_expectation_tables(path)
+    assert loaded.source_seasons == [2024, 2025]
+    for name, keys in expectations.TABLE_KEYS.items():
+        pd.testing.assert_frame_equal(
+            getattr(loaded, name), expectations.tables_frame(tables).query("table == @name")[
+                [*keys, "expected", "plays"]].reset_index(drop=True)
+        )
+    probe = pd.DataFrame({"down": [1, 3, 4], "distance": [10, 2, 1], "yards_to_goal": [75, 25, 3],
+                          "play_text": ["", "", "B 43 yd FG"]})
+    for lookup in (expectations.expected_rush_yards, expectations.expected_conversion,
+                   expectations.expected_field_goal):
+        assert lookup(loaded, probe).tolist() == pytest.approx(lookup(tables, probe).tolist())
+
+
+def test_run_position_traits_passes_the_frozen_tables_and_never_fits_expectations(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
+    _install_frozen_model(tmp_path / "players" / "models")
+    monkeypatch.setattr(backtest, "fit_expectation_tables", lambda *a, **k: pytest.fail("refit expectations"))
+    monkeypatch.setattr(backtest, "earlier_play_seasons", lambda season: pytest.fail("read history"))
+    monkeypatch.setattr(pipeline, "read_season_source", lambda season, name: FBS_TEAMS)
+    monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
+    seen = []
+
+    def build(season, tables=None):
+        seen.append(tables)
+        return FAKE_SEASON_2026
+
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", build)
+    pipeline.run_position_traits(2026, AS_OF)
+    assert len(seen) == 1 and seen[0].source_seasons == [2024, 2025]
+    pd.testing.assert_frame_equal(
+        expectations.tables_frame(seen[0]), expectations.tables_frame(_serving_tables())
+    )
+
+
+def test_build_season_traits_with_frozen_tables_skips_the_fit(monkeypatch):
+    class Built(Exception):
+        pass
+
+    monkeypatch.setattr(backtest, "fit_expectation_tables", lambda *a, **k: pytest.fail("refit expectations"))
+    monkeypatch.setattr(backtest, "earlier_play_seasons", lambda season: pytest.fail("read history"))
+    monkeypatch.setattr(backtest, "load_season_context", lambda season: (_ for _ in ()).throw(Built()))
+    with pytest.raises(Built):  # got past the expectation step without fitting
+        backtest.build_season_traits(2026, tables=_serving_tables(2025))
+    with pytest.raises(ValueError, match="cannot rate 2026"):
+        backtest.build_season_traits(2026, tables=_serving_tables(2026))
+
+
+def test_run_position_traits_needs_the_frozen_tables(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
+    headline.save_headline_fit(FROZEN_FIT_2024, tmp_path / "players" / "models" / "position_traits_2024.json")
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: pytest.fail("built"))
+    with pytest.raises(FileNotFoundError, match="position-traits-fit"):
         pipeline.run_position_traits(2026, AS_OF)
 
 
@@ -1458,7 +1550,7 @@ def _two_week_traits() -> pd.DataFrame:
         {"season": 2026, "week": week, "as_of": "2026-10-01T00:00:00+00:00", "model_version": "cfb_position_traits_v1",
          "athlete_id": athlete, "athlete_name": athlete.upper(), "team": "A", "team_id": 1, "position_group": "QB",
          "games": week, "trait": trait, "value": 1.0, "percentile": 50.0, "kind": "fitted", "qualified": True,
-         "exposure": 10.0, "uncertainty": np.nan, "replaces_value": True, "in_headline": True}
+         "exposure": 10.0, "uncertainty": np.nan, "replaces_value": True, "in_headline": True, "fbs": True}
         for week in (7, 8) for athlete in ("q1", "q2") for trait in ("headline", "qb.explosive")
     ]
     return pd.DataFrame(rows)[pipeline.POSITION_TRAIT_COLUMNS]
@@ -1488,6 +1580,20 @@ def test_player_artifacts_publish_only_the_latest_trait_week(monkeypatch, tmp_pa
     assert list(out.columns) == pipeline.POSITION_TRAIT_COLUMNS
 
 
+def test_player_artifacts_publish_only_fbs_trait_rows(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(pipeline, "PROCESSED_DIR", tmp_path)
+    write_fake_player_artifacts(tmp_path, season=2026)
+    traits = _two_week_traits()
+    traits.loc[traits["athlete_id"].eq("q2"), ["team", "fbs"]] = ["Z", False]
+    pipeline.store.write_processed(traits, *pipeline.position_traits_artifact(2026))
+    out = pipeline.read_player_artifacts(2026)["position_traits"]
+    assert set(out["athlete_id"]) == {"q1"} and out["fbs"].all() and out["week"].eq(8).all()
+
+    pipeline.store.write_processed(traits.drop(columns="fbs"), *pipeline.position_traits_artifact(2026))
+    assert pipeline.read_player_artifacts(2026)["position_traits"].empty
+
+
 def test_player_artifacts_tolerate_a_missing_trait_artifact(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
     monkeypatch.setattr(pipeline, "PROCESSED_DIR", tmp_path)
@@ -1504,9 +1610,9 @@ def test_migration_declares_the_trait_table_contract():
         assert column in sql
     assert "primary key (season, athlete_id, trait)" in sql.lower()
     assert "site_revalidate" not in sql
-    published = set(pipeline.POSITION_TRAIT_COLUMNS) - {"exposure", "qualified"}
+    published = set(pipeline.POSITION_TRAIT_COLUMNS) - {"exposure", "qualified", "fbs"}
     declared = {line.split()[0] for line in sql.splitlines() if line.startswith("    ")}
-    assert published <= declared and "exposure" not in declared
+    assert published <= declared and "exposure" not in declared and "fbs" not in declared
 
 
 def draft_fixture():

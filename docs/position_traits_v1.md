@@ -28,7 +28,8 @@ evaluation is
 `backend/data/processed/players/position_traits/evaluation_2024.parquet`, and
 every table below is copied from those two files and from the run log of
 `position-traits-fit --dev-seasons 2020 2021 2022 2023 2024 --validate 2025`
-on 2026-10-16. Player values for 2020 through 2025 were rebuilt under
+on 2026-10-16, re-run after the penalty grid was extended and the
+replacement and serving fixes went in. Player values for 2020 through 2025 were rebuilt under
 `cfb_player_value_v4` before the run, so the baseline is one model.
 
 ## Data coverage
@@ -71,17 +72,20 @@ which is mostly players who left for a non-FBS school or have no destination.
 Each feature column is standardized once over the development rows. A column
 with no spread is dropped as constant; `OL:epa` is the only one, because v4
 gives linemen no credit. The fit is a ridge in closed form with the
-intercept and home field unpenalized. The penalty is chosen from 25
-log-spaced values between 0.01 and 1000 by pooled leave-one-season-out MAE
+intercept and home field unpenalized. The penalty is chosen from 36
+log-spaced values between 0.01 and 100,000 by pooled leave-one-season-out MAE
 over the five development seasons. A feature is then dropped when its weight
 is under twice the larger of its delete-one-season jackknife sd and its
 analytic ridge standard error, and the rest are refit once at the same
 penalty.
 
-The chosen penalty is 1000, the largest value on the grid. Recomputed with
-the same functions on the same development rows, the pooled
-leave-one-season-out MAE is 14.462 at the smallest penalty, 14.381 at 619
-and 14.371 at 1000, so it was still falling at the edge.
+The chosen penalty is 1000. A first run searched only up to 1000 and landed
+on that edge, so the grid was extended two decades. The minimum stayed at
+1000, now inside the grid. Recomputed with the same functions on the same
+development rows, the pooled leave-one-season-out MAE is 14.380 at 631,
+14.371 at 1000, 14.371 at 1585 and 14.384 at 2512, so the curve is flat
+between 1000 and 1585 and rises on either side. The penalty is large: the
+weights are heavily shrunk.
 
 ## Weights
 
@@ -150,9 +154,9 @@ the v4 EPA credit columns alone on the same development seasons.
 
 | Week bucket | Games | traits | v4 | v4 minus traits |
 | --- | --- | --- | --- | --- |
-| 2-5 | 198 | 15.472 | 15.878 | 0.406 |
-| 6-9 | 218 | 13.807 | 14.460 | 0.653 |
-| 10+ | 344 | 14.129 | 14.939 | 0.810 |
+| 2-5 | 198 | 15.472 | 15.879 | 0.407 |
+| 6-9 | 218 | 13.807 | 14.458 | 0.652 |
+| 10+ | 344 | 14.129 | 14.939 | 0.811 |
 | all | 760 | 14.386 | 15.046 | 0.660 |
 
 The trait headline beats v4 in every bucket, by 0.66 points over the season.
@@ -168,18 +172,18 @@ reliability is at least v4's, both measured on the same players and games.
 
 | Group | MAE v4 only | MAE with traits | Improvement | Reliability 6, v4 | Reliability 6, headline | Replaces v4 |
 | --- | --- | --- | --- | --- | --- | --- |
-| QB | 15.046 | 14.937 | 0.109 | 0.463 | 0.424 | False |
+| QB | 15.046 | 14.929 | 0.117 | 0.463 | 0.424 | False |
 | RB | 15.046 | 14.986 | 0.060 | 0.334 | 0.167 | False |
-| WR | 15.046 | 15.078 | -0.032 | 0.375 |  | False |
+| WR | 15.046 | 15.078 | -0.031 | 0.375 |  | False |
 | TE | 15.046 | 15.081 | -0.035 | 0.311 | 0.417 | False |
 | DL | 15.046 | 14.788 | 0.258 | 0.149 | 0.178 | True |
-| LB | 15.046 | 14.874 | 0.172 | 0.199 |  | False |
+| LB | 15.046 | 14.875 | 0.171 | 0.199 |  | False |
 | DB | 15.046 | 14.869 | 0.177 | 0.092 | 0.144 | True |
 | OL | 15.046 | 14.774 | 0.273 |  |  | False |
-| K | 15.046 | 14.975 | 0.071 | -0.004 | 0.244 | True |
+| K | 15.046 | 14.975 | 0.072 | -0.004 | 0.244 | False |
 | P | 15.046 | 15.055 | -0.009 | -0.084 |  | False |
 
-The headline replaces v4 at DL, DB and K. It ships beside v4 everywhere
+The headline replaces v4 at DL and DB. It ships beside v4 everywhere
 else. QB and RB improve the margin but are less reliable than v4 at six
 games. WR and TE do not improve the margin. LB improves it in the swap test,
 but the joint fit keeps no LB feature, so the LB headline is constant and
@@ -187,10 +191,12 @@ has no reliability. OL improves the most, but v4 has no OL rating to compare
 against, so it cannot replace by construction. P neither improves nor has a
 headline.
 
-The design expected OL, K and P never to replace in v1, because v4 has no
-six-game reliability for them. That holds for OL and P. It does not hold for
-K: v4 has a six-game reliability for kickers measured on 14 players, it is
--0.004, and the headline's 0.244 clears it, so the rule fires. See Findings.
+OL, K and P never replace v4 in v1; the code holds them back whatever their
+numbers, and the table still shows those numbers. OL and P would not have
+replaced anyway. K met the rule: v4's six-game reliability for kickers is
+-0.004 on 14 players, the headline's is 0.244, and the swap improvement is
+0.072 points. On a sample of 14 kickers that is not evidence, so K is held
+back pending Rene's decision.
 
 ## Reliability
 
@@ -392,29 +398,40 @@ Tuning it is not worth doing until the estimator shows persistence.
 data for 2026 ends at week 1, so the artifact holds weeks 0 and 1. The top
 five QB headlines in week 1 are Chaston Ditta (North Texas), Josh Hoover
 (Indiana), Lincoln Kienholz (Louisville), Rocco Becht (Penn State) and
-Darian Mensah (Miami), each on one game. The latest week, which the
-publisher reads, has 53,025 rows.
+Darian Mensah (Miami), each on one game. The scoring used the frozen
+expectation tables and read no earlier play-by-play season.
+
+Every artifact row carries an `fbs` flag from the team's classification (an
+OL unit by its team), and the publisher keeps only FBS rows; the table has
+no `fbs` column. The latest 2026 week the publisher reads has 32,113 FBS
+rows of 53,025. For a late-season size, the 2025 week 17 snapshot scored
+the same way has 53,772 FBS rows (45,839 trait rows and 7,933 headline rows)
+of 73,942. The trait table keeps only the latest week per season.
 
 ## Serving and the weekly step
 
-The fit JSON lives under `backend/data/processed/players/models/`, which is
-gitignored and travels through the weekly workflow cache. It must be
-restored into that cache, the same way the Heisman model bundle is, before
-the first weekly run. The weekly workflow no longer swallows a
-`position-traits` failure, so a missing fit stops the player step. The
-README and runbook change for installing the fit is a follow-up. The fit alone is
-not enough: the 2026 trait build also needs earlier play-by-play seasons on
-the runner (see Findings).
+The frozen model is two artifacts in `backend/data/processed/players/models/`:
+the fit, `position_traits_2024.json`, and the expectation tables,
+`position_traits_expectations_2024.parquet`. The tables are the down,
+distance and field position baselines for rushing yards and conversions and
+the distance baseline for field goals, fit on every play season on disk from
+2019 through 2025, with the source seasons stored in the parquet metadata.
+The weekly runner loads both and refits neither, so it needs no historical
+play-by-play. The directory is gitignored and travels through the weekly
+workflow cache. Both artifacts must be restored there before the first
+weekly run, the same way the Heisman model bundle is. The weekly workflow no
+longer swallows a `position-traits` failure, so a missing artifact stops the
+player step, and with it the Heisman board and `publish-players`. The
+README and runbook change for installing the two artifacts is a follow-up.
 
 ## Findings
 
 These are results from the sanity read that did not match expectations. None
 was tuned away.
 
-The penalty sits at 1000, the top of the grid. The leave-one-season-out MAE
-was still falling there (14.381 at 619, 14.371 at 1000), so the best penalty
-may be larger and the weights are heavily shrunk. Widening the grid is a modelling decision for a v2 and was
-not done here.
+The first run's penalty sat at 1000, the top of the original grid, with the
+error still falling. The grid now runs to 100,000 and the minimum is still
+1000, so that was a search range defect and not a hidden larger penalty.
 
 `qb.explosive` reliability at 8 games is above 0.3 in 2020 (0.317), 2022
 (0.334) and 2023 (0.320) but not in 2021 (0.187) or 2024 (0.286).
@@ -428,31 +445,26 @@ weights are stable. The ones that are hard to explain are
 margin on a trait with near-zero reliability, and `DL:def.run_stop` at
 -1.01, which reads as an offset to havoc.
 
-K replaces v4, against the design's expectation. The decision rests on 14
-kickers with six paired games; at eight games the headline reliability is
--0.044. The rule as written fires, and the swap improvement is 0.071 points.
-Rene should decide whether K replacement stands in v1.
+K met the replacement rule, against the design's expectation. The decision
+rests on 14 kickers with six paired games; at eight games the headline
+reliability is -0.044. K is held back with OL and P until Rene decides.
 
-LB improves the margin in the swap test (0.172) but has no headline,
+LB improves the margin in the swap test (0.171) but has no headline,
 because the swap test and the joint fit select features separately and the
 joint fit drops every LB feature.
 
-The publisher's latest week for 2026 has 53,025 rows, above the 40,000
-expected. The 2025 trait snapshots grow from 38,027 rows in week 1 to 62,893
-in week 17 before headline rows are added (11,049 players that week), so a
-late-season publish will be about 74,000 rows. About 40 percent of the 2026 week 1 rows (20,912) are
-non-FBS players, almost all defenders, who appear in box scores against FBS
-teams. The headline
-percentile and replacement level for DL, LB, DB, K and P include those
+Before the FBS filter the latest 2026 week had 53,025 rows, about 40 percent
+of them (20,912) non-FBS players, almost all defenders who appear in box
+scores against FBS teams. Publishing FBS rows only brings it to 32,113, and
+the late-season 2025 week to 53,772. Scoring is unchanged: the headline
+percentile and replacement level for DL, LB, DB, K and P still include
 non-FBS players, while trait percentiles rank FBS players only.
 
-The weekly runner does not have the earlier play-by-play seasons that the
-2026 trait build fits its expectation tables on. With only the current
-season on disk, `build_season_traits(2026)` raises "no season before 2026 to
-fit expectations on". Restoring the fit JSON alone will not make the weekly
-step pass. Because the step runs under `bash -e`, the failure also stops the
-Heisman board and `publish-players`. The expectation tables, or the
-2019-2025 play-by-play, must reach the runner before this change is pushed.
+The first version of the weekly step refit its expectation tables from the
+2019-2025 play-by-play, which the weekly runner does not have; with only the
+current season on disk it raised "no season before 2026 to fit expectations
+on". The tables are now frozen with the fit, and the 2026 scoring above was
+checked with every earlier play-by-play read made to fail.
 
 All five portal seasons clear 60 percent of rows naming an FBS destination;
 2021 is the lowest at 0.630. The traits variant's validation MAE is finite

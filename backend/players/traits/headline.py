@@ -41,7 +41,7 @@ EXPOSURE_TRAITS = {
 }
 META_COLUMNS = ["game_id", "season", "model_week", "margin", "home_field"]
 FIXED = ["intercept", "home_field"]  # unpenalized and never dropped
-PENALTIES = np.logspace(-2, 3, 25)
+PENALTIES = np.logspace(-2, 5, 36)
 DROP_MULTIPLE = 2.0
 RELIABILITY_COLUMNS = ["position_group", "games", "correlation"]
 OUTPUT_COLUMNS = [
