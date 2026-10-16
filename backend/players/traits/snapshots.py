@@ -10,7 +10,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from backend.players.traits import MODEL_VERSION, TRAITS
+from backend.players.traits import MODEL_VERSION, TRAITS, all_traits
 from backend.players.value import MIN_QUALIFIED_PLAYERS, QUALIFYING_GAMES
 
 TRAIT_SNAPSHOT_COLUMNS = [
@@ -40,10 +40,11 @@ KEYS = ["athlete_id", "trait"]
 
 
 def _trait_attribute(traits: pd.Series, attribute: str) -> pd.Series:
-    unknown = set(traits.unique()) - set(TRAITS)
+    specs = all_traits()
+    unknown = set(traits.unique()) - set(specs)
     if unknown:
         raise ValueError(f"unregistered traits: {sorted(unknown)}")
-    return traits.map({name: getattr(spec, attribute) for name, spec in TRAITS.items()})
+    return traits.map({name: getattr(spec, attribute) for name, spec in specs.items()})
 
 
 def position_groups(frames: pd.DataFrame, positions: pd.DataFrame) -> pd.DataFrame:
