@@ -820,6 +820,11 @@ def publish_players(season: int) -> dict[str, int]:
     artifacts = read_player_artifacts(season)
     by_season = ("player_values", "heisman_board")
     full_refresh = ("heisman_history", "player_model_meta")
+    # Traits are optional: a missing artifact must not block the Heisman publish.
+    if artifacts["position_traits"].empty:
+        log.info(f"position traits {season}: no artifact, skipping cfb.position_traits")
+    else:
+        by_season = (*by_season, "position_traits")
     with engine.begin() as conn:
         required_evaluation = {
             "heisman_evaluation_kind",
