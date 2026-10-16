@@ -1,6 +1,6 @@
 # Position trait ratings: design
 
-Date: 2026-10-16. Status: approved by Rene on 2026-10-16, including the seven CFBD portal calls. Implementation complete on 2026-10-16; the backtest report is at `docs/position_traits_v1.md`.
+Date: 2026-10-16. Status: approved; amended the same day (see Amendment) after the first backtest.
 
 ## Intent
 
@@ -151,3 +151,15 @@ Replacement rule, decided by Rene: the new headline replaces player value v4 on 
 ## Open questions for Rene
 
 - Approve about seven CFBD `/player/portal` calls (one per season, 2020 through 2025) so transfers can calibrate the teammate-relative traits on the development seasons.
+
+## Amendment, 2026-10-16: the headline is a player grade, not a margin fit
+
+Rene's correction after seeing the first result: the point is to rate and quantify players individually, as prospects, for the draft board, and as a scouting process in itself. The margin fit answered a team question (does a trait improve a team spread forecast beyond the team model) and under that question almost nothing passed. That gate is withdrawn.
+
+Decided:
+
+- Each player carries two numbers. A **grade** on the 20 to 80 scouting scale (mean 50, sd 10 among qualified FBS players at the position that week) built from his traits. An **impact** in points per game above positional replacement from his credited plays, opponent adjusted, with win probability added beside it; this is player value v4's measured contribution and is not refit.
+- Trait weights per position come from player-level evidence on the development seasons only: split-half reliability (stability from a player's odd games to his even games) and portability (the share of a trait that travels with a transfer). A trait's weight is reliability times portability, clipped at zero and normalized within the position; a trait with reliability under 0.10 or portability at or below zero gets no weight and is shown dimmed as descriptive. Where portability cannot be measured (too few movers) the trait keeps its reliability weight and the card says portability is unmeasured.
+- Validation is player-level and held out: on 2020 through 2024 the grade's weights are set, and on 2025 the grade is checked once for whether it predicts the player's own next-season grade and production, his draft slot, and his three-season NFL participation, compared with EPA credit alone. The report says where it does and where it does not.
+- Nothing is fitted to team margins. The team projection, the ridge, the swap test and the replacement rule are removed. Player value v4 stays published unchanged; the grade is a new number beside it.
+- Serving is unchanged in shape: the `cfb.position_traits` table carries trait rows and one `grade` row per qualified FBS player-week (value on the 20 to 80 scale, percentile, uncertainty from reliability at the player's game count).
