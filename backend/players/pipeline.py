@@ -307,4 +307,13 @@ def read_player_artifacts(season: int) -> dict[str, pd.DataFrame]:
         "heisman_board": board,
         "heisman_history": history,
         "player_model_meta": meta,
+        "position_traits": _latest_trait_week(season),
     }
+
+
+def _latest_trait_week(season: int) -> pd.DataFrame:
+    """The newest weekly trait snapshot; the artifact keeps every week."""
+    if not PROCESSED_DIR.joinpath(*position_traits_artifact(season)).exists():
+        return pd.DataFrame(columns=POSITION_TRAIT_COLUMNS)
+    traits = store.read_processed(*position_traits_artifact(season))
+    return traits[traits["week"].eq(traits["week"].max())].reset_index(drop=True)

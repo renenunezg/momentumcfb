@@ -1,5 +1,6 @@
 import dataclasses
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -1449,3 +1450,59 @@ def test_run_position_traits_refuses_a_fit_that_saw_the_season(monkeypatch, tmp_
     monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season: pytest.fail("built"))
     with pytest.raises(ValueError, match="cannot score 2026"):
         pipeline.run_position_traits(2026, AS_OF)
+
+
+def _two_week_traits() -> pd.DataFrame:
+    rows = [
+        {"season": 2026, "week": week, "as_of": "2026-10-01T00:00:00+00:00", "model_version": "cfb_position_traits_v1",
+         "athlete_id": athlete, "athlete_name": athlete.upper(), "team": "A", "team_id": 1, "position_group": "QB",
+         "games": week, "trait": trait, "value": 1.0, "percentile": 50.0, "kind": "fitted", "qualified": True,
+         "exposure": 10.0, "uncertainty": np.nan, "replaces_value": True, "in_headline": True}
+        for week in (7, 8) for athlete in ("q1", "q2") for trait in ("headline", "qb.explosive")
+    ]
+    return pd.DataFrame(rows)[pipeline.POSITION_TRAIT_COLUMNS]
+
+
+def write_fake_player_artifacts(root: Path, season: int) -> None:
+    """The v4 values, one Heisman board, the history and the meta that publishing reads."""
+    values = FAKE_V4_2026.assign(overall_rank=[1, 2, 1, 2])
+    pipeline.store.write_processed(values, *pipeline.player_values_artifact(season))
+    pipeline.store.write_processed(
+        pd.DataFrame({"season": [season], "week": [8], "athlete_id": ["q1"]}),
+        *pipeline.heisman_board_artifact(season, 8),
+    )
+    for name in (pipeline.HISTORY_ARTIFACT, pipeline.META_ARTIFACT):
+        pipeline.store.write_processed(pd.DataFrame({"season": [season]}), *name)
+
+
+def test_player_artifacts_publish_only_the_latest_trait_week(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(pipeline, "PROCESSED_DIR", tmp_path)
+    write_fake_player_artifacts(tmp_path, season=2026)
+    traits = _two_week_traits()
+    pipeline.store.write_processed(traits, *pipeline.position_traits_artifact(2026))
+    out = pipeline.read_player_artifacts(2026)["position_traits"]
+    assert out["week"].unique().tolist() == [traits["week"].max()]
+    assert len(out) == len(traits) // 2
+    assert list(out.columns) == pipeline.POSITION_TRAIT_COLUMNS
+
+
+def test_player_artifacts_tolerate_a_missing_trait_artifact(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(pipeline, "PROCESSED_DIR", tmp_path)
+    write_fake_player_artifacts(tmp_path, season=2026)
+    artifacts = pipeline.read_player_artifacts(2026)
+    assert artifacts["position_traits"].empty
+    assert list(artifacts["position_traits"].columns) == pipeline.POSITION_TRAIT_COLUMNS
+    assert set(artifacts) >= {"player_values", "heisman_board", "heisman_history", "player_model_meta"}
+
+
+def test_migration_declares_the_trait_table_contract():
+    sql = next(Path("sql").glob("*_position_traits.sql")).read_text()
+    for column in ("replaces_value boolean", "in_headline boolean", "uncertainty double precision"):
+        assert column in sql
+    assert "primary key (season, athlete_id, trait)" in sql.lower()
+    assert "site_revalidate" not in sql
+    published = set(pipeline.POSITION_TRAIT_COLUMNS) - {"exposure", "qualified"}
+    declared = {line.split()[0] for line in sql.splitlines() if line.startswith("    ")}
+    assert published <= declared and "exposure" not in declared
