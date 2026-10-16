@@ -9,6 +9,7 @@ from backend.players.traits import (
     absence,
     adjust,
     context,
+    defense,
     expectations,
     offense,
     register,
@@ -547,3 +548,123 @@ def test_receiver_traits_count_receptions_under_poor_coverage():
     assert _pair(out, "rec.target_share", "te1", 1) == pytest.approx([0.0, 1.0])
     assert _pair(out, "rec.value_per_target", "wr1", 1) == pytest.approx([0.8, 1.0])
     assert _pair(out, "rec.explosive", "wr1", 1) == pytest.approx([1.0, 1.0])
+
+
+# Home hosts Away in odd weeks and visits in even weeks.
+DEFENSE_GAMES = pd.DataFrame({"game_id": [1, 2, 3, 4], "model_week": [1, 2, 3, 4],
+                              "home_team": ["Home", "Away", "Home", "Away"],
+                              "away_team": ["Away", "Home", "Away", "Home"], "completed": True,
+                              "home_classification": "fbs", "away_classification": "fbs"})
+DEFENSIVE_STATS = ("TOT", "SOLO", "TFL", "SACKS", "QB HUR", "PD")
+
+
+def defense_context():
+    """Home's de1 plays weeks 1-3 (week 3 with every stat zero) and misses week 4; lb1 and db1
+    play every week; Away's ad1 plays weeks 1-2. Away's offense runs one rush a game for -1 EPA
+    in weeks 1-3 and +2 in week 4. Sacks of Away's passer: de1 alone in week 1 (WPA -0.04),
+    lb1 alone in week 1 (-0.10), and de1 and lb1 split in week 2 (-0.06). de1 forces a fumble
+    in week 1."""
+    lines = {
+        ("de1", "Home", 1): {"TOT": 4, "SOLO": 3, "TFL": 2, "SACKS": 1, "QB HUR": 2},
+        ("de1", "Home", 2): {"TOT": 3, "SOLO": 2, "TFL": 1, "SACKS": 0.5, "QB HUR": 1, "PD": 1},
+        ("de1", "Home", 3): {},
+        ("lb1", "Home", 1): {"TOT": 6, "SOLO": 4, "TFL": 1, "SACKS": 1, "PD": 1},
+        ("lb1", "Home", 2): {"TOT": 5, "SOLO": 3, "TFL": 0.5, "SACKS": 0.5},
+        ("lb1", "Home", 3): {"TOT": 4, "SOLO": 2},
+        ("lb1", "Home", 4): {"TOT": 5, "SOLO": 3, "INT": 1},
+        ("db1", "Home", 1): {"TOT": 3, "SOLO": 3, "PD": 1},
+        ("db1", "Home", 2): {"TOT": 2, "SOLO": 2, "INT": 1},
+        ("db1", "Home", 3): {"TOT": 4, "SOLO": 4},
+        ("db1", "Home", 4): {"TOT": 2, "SOLO": 1, "PD": 2},
+        ("ad1", "Away", 1): {"TOT": 2},
+        ("ad1", "Away", 2): {"TOT": 3, "TFL": 1},
+    }
+    box = []
+    for (athlete_id, team, game_id), line in lines.items():
+        for stat_name in DEFENSIVE_STATS:
+            box.append({"game_id": game_id, "team": team, "athlete_id": athlete_id, "category": "defensive",
+                        "stat_name": stat_name, "stat": float(line.get(stat_name, 0))})
+        if "INT" in line:
+            box.append({"game_id": game_id, "team": team, "athlete_id": athlete_id, "category": "interceptions",
+                        "stat_name": "INT", "stat": float(line["INT"])})
+    box = pd.DataFrame(box).assign(athlete_name="", stat_text="")
+
+    plays, credit = [], []
+
+    def add(game_id, play_type, epa, wpa=0.0, credited=()):
+        play_id = len(plays) + 1
+        home = DEFENSE_GAMES.loc[game_id - 1, "home_team"]
+        plays.append({"id": play_id, "game_id": game_id, "season": 2026, "week": game_id,
+                      "season_type": "regular", "home": home, "away": "Home" if home == "Away" else "Away",
+                      "offense": "Away", "defense": "Home", "offense_score": 0, "defense_score": 0,
+                      "drive_id": f"{game_id}-1", "drive_number": 1, "play_number": play_id, "period": 1,
+                      "clock": {"minutes": 10, "seconds": 0}, "clock_seconds_remaining": 600, "down": 2,
+                      "distance": 8, "yards_to_goal": 60, "yards_gained": -6.0 if play_type == "Sack" else 3.0,
+                      "scoring": False, "play_type": play_type, "play_text": "", "is_success": False,
+                      "epa": epa, "wpa": wpa})
+        for athlete_id, role, share in credited:
+            credit.append({"play_id": str(play_id), "game_id": game_id, "model_week": game_id, "team": "Home",
+                           "opponent": "Away", "side": "defense", "athlete_id": athlete_id, "role": role,
+                           "share": share, "weight": 1.0, "is_competitive": True,
+                           "wpa": -wpa * share})
+
+    for game_id, epa in zip((1, 2, 3, 4), (-1.0, -1.0, -1.0, 2.0)):
+        add(game_id, "Rush", epa)
+    add(1, "Sack", -0.5, -0.04, [("de1", "sacker", 1.0)])
+    add(1, "Sack", -0.5, -0.10, [("lb1", "sacker", 1.0)])
+    add(2, "Sack", -0.5, -0.06, [("de1", "sacker", 0.5), ("lb1", "sacker", 0.5)])
+    add(1, "Fumble Recovery (Opponent)", -2.0, -0.08, [("de1", "fumble_forcer", 1.0)])
+
+    plays, credit = pd.DataFrame(plays), pd.DataFrame(credit)
+    positions = pd.DataFrame({"athlete_id": ["de1", "lb1", "db1", "ad1"], "position_group": ["DL", "LB", "DB", "DL"]})
+    empty = pd.DataFrame()
+    return context.SeasonContext(season=2026, plays=plays, games=DEFENSE_GAMES, effects=empty, credit=credit,
+                                 box=box, roster=empty, teams=empty, positions=positions,
+                                 presence=context.player_presence(box, credit, DEFENSE_GAMES))
+
+
+def test_defense_traits_treat_a_zero_stat_box_row_as_present_and_need_an_absence():
+    ctx = defense_context()  # de1 present weeks 1-3 (week 3 all zeros), absent week 4; lb1 present every week
+    out = defense.defense_traits(ctx)
+    # one row per (player, week); the latest week carries the estimate through every game
+    latest = out[out["trait"].eq("def.impact") & out["model_week"].eq(4)]
+    impact = latest.set_index("athlete_id")["numerator"]
+    assert np.isfinite(impact.loc["de1"])
+    assert np.isnan(impact.loc["lb1"])
+
+
+def test_defense_every_week_counts_games_with_any_disruption():
+    ctx = defense_context()
+    out = defense.defense_traits(ctx)
+    ew = out[out["trait"].eq("def.every_week") & out["athlete_id"].eq("de1")].sort_values("game_id")
+    assert ew["numerator"].tolist() == [1.0, 1.0, 0.0]
+
+
+def test_defense_rates_follow_the_box_score_and_the_sack_win_probability():
+    ctx = defense_context()
+    out = defense.defense_traits(ctx)
+    per_game = out[out["game_id"].notna()].set_index(["trait", "athlete_id", "game_id"])
+    # week 1 has no prior sacks to price de1's two hurries; in week 2 the median sack is
+    # worth 0.07 (0.04 and 0.10), on top of de1's half of the 0.06 sack
+    assert np.isnan(per_game.loc[("def.pass_rush", "de1", 1), "numerator"])
+    assert _pair(per_game, "def.pass_rush", "lb1", 1) == pytest.approx([0.10, 1.0])
+    assert _pair(per_game, "def.pass_rush", "de1", 2) == pytest.approx([0.03 + 0.07, 1.0])
+    assert _pair(per_game, "def.pass_rush", "de1", 3) == pytest.approx([0.0, 1.0])
+    assert _pair(per_game, "def.finishing", "de1", 1) == pytest.approx([1.0, 3.0])
+    assert _pair(per_game, "def.finishing", "de1", 2) == pytest.approx([0.5, 1.5])
+    assert ("def.finishing", "de1", 3) not in per_game.index  # no sack chance
+    # havoc in week 1 is raw: two TFLs and the forced fumble. Through week 1 Away allowed
+    # 6 havoc plays to three Home defenders (2 a game) against a league 6 in 4 (1.5), so
+    # week 2's two plays (a TFL and a PD) lose 0.5. Through week 2 Away allowed 9.5 in 6
+    # against a league 10.5 in 8.
+    assert _pair(per_game, "def.havoc", "de1", 1) == pytest.approx([3.0, 1.0])
+    assert _pair(per_game, "def.havoc", "de1", 2) == pytest.approx([1.5, 1.0])
+    assert _pair(per_game, "def.havoc", "de1", 3) == pytest.approx([-(9.5 / 6 - 10.5 / 8), 1.0])
+
+    groups = out["athlete_id"].map(ctx.positions.set_index("athlete_id")["position_group"])
+    allowed = out["trait"].map(lambda name: TRAITS[name].position_groups)
+    assert all(group in names for group, names in zip(groups, allowed))
+    assert set(out.loc[out["athlete_id"].eq("db1"), "trait"]) == {
+        name for name, spec in TRAITS.items() if "DB" in spec.position_groups
+    }
+    assert not out.duplicated(["athlete_id", "game_id", "model_week", "trait"]).any()
