@@ -254,13 +254,33 @@ def _starter_dropbacks():
     return out
 
 
+# Home hosts Away in week 1 and visits in week 2.
+GAMES = pd.DataFrame({"game_id": [1, 2], "model_week": [1, 2], "home_team": ["Home", "Away"],
+                      "away_team": ["Away", "Home"], "completed": True})
+
+
+def _flat_tables(rush_yards=4.0):
+    """No bucket matches a probe play, so every lookup falls back to the table mean:
+    0.4 conversions and ``rush_yards`` yards per carry."""
+    def flat(expected):
+        return pd.DataFrame({"down_bucket": pd.array([9], dtype="Int64"), "distance_bucket": ["none"],
+                             "field_bucket": ["none"], "expected": [expected], "plays": [1]})
+    return expectations.ExpectationTables(rush_yards=flat(rush_yards), conversion=flat(0.4),
+                                          field_goal=pd.DataFrame(), source_seasons=[2025])
+
+
+def _season_context(plays, credit, positions):
+    empty = pd.DataFrame()
+    return context.SeasonContext(season=2026, plays=pd.DataFrame(plays), games=GAMES, effects=empty,
+                                 credit=pd.DataFrame(credit), box=empty, roster=empty, teams=empty,
+                                 positions=positions, presence=empty)
+
+
 def qb_context():
     """Home hosts Away in week 1 and visits in week 2. Each starter has twelve
     dropbacks and two third-down scrambles per game, all at his team's receiver
     except the sack and the interception; Home's backup throws two completions
     to the same receiver in week 2."""
-    games = pd.DataFrame({"game_id": [1, 2], "model_week": [1, 2], "home_team": ["Home", "Away"],
-                          "away_team": ["Away", "Home"], "completed": True})
     starters = {"Home": ("qb_home", "wr_home"), "Away": ("qb_away", "wr_away")}
     plays, credit = [], []
 
@@ -307,16 +327,7 @@ def qb_context():
         "position": ["QB", "QB", "QB", "WR", "WR"],
         "position_group": ["QB", "QB", "QB", "WR", "WR"],
     })
-    # No bucket matches the probe plays, so every lookup falls back to the table mean of 0.4.
-    conversion = pd.DataFrame({"down_bucket": pd.array([9], dtype="Int64"), "distance_bucket": ["none"],
-                               "field_bucket": ["none"], "expected": [0.4], "plays": [1]})
-    tables = expectations.ExpectationTables(rush_yards=pd.DataFrame(), conversion=conversion,
-                                            field_goal=pd.DataFrame(), source_seasons=[2025])
-    empty = pd.DataFrame()
-    ctx = context.SeasonContext(season=2026, plays=pd.DataFrame(plays), games=games, effects=empty,
-                                credit=pd.DataFrame(credit), box=empty, roster=empty, teams=empty,
-                                positions=positions, presence=empty)
-    return ctx, tables
+    return _season_context(plays, credit, positions), _flat_tables()
 
 
 NO_RECOVERED_TARGETS = pd.DataFrame(columns=["play_id", "athlete_id", "source"])
@@ -370,3 +381,169 @@ def test_qb_receiver_independence_compares_to_the_receivers_rate_with_other_pass
     poor = offense.qb_traits(ctx, tables, NO_RECOVERED_TARGETS, poor_coverage=True)
     poor = poor.set_index(["trait", "athlete_id", "game_id"])
     assert np.isnan(poor.loc[("qb.receiver_independence", "qb_backup", 2), "numerator"])
+
+
+def _add_play(plays, credit, game_id, team, play_type, credited, *, yards=0.0, down=1, distance=10,
+              yards_to_goal=60, epa=0.0, wpa=0.0):
+    """Append one competitive play and a credit row for each (athlete, role, share); return its id."""
+    play_id = len(plays) + 1
+    opponent = "Away" if team == "Home" else "Home"
+    success = yards >= (distance if down >= 3 else 0.5 * distance)
+    plays.append({"id": play_id, "game_id": game_id, "offense": team, "defense": opponent, "down": down,
+                  "distance": distance, "yards_to_goal": yards_to_goal, "yards_gained": yards, "period": 1,
+                  "clock_seconds_remaining": 600, "is_competitive": True, "is_rush": play_type == "Rush",
+                  "is_pass": play_type.startswith("Pass"), "is_success": bool(success), "play_type": play_type,
+                  "play_text": "", "epa": epa, "wpa": wpa})
+    for athlete_id, role, share in credited:
+        credit.append({"play_id": str(play_id), "team": team, "opponent": opponent, "side": "offense",
+                       "game_id": game_id, "model_week": game_id, "weight": 1.0, "plays": 1.0,
+                       "is_competitive": True, "athlete_id": athlete_id, "role": role, "share": share,
+                       "channel": "rush" if play_type == "Rush" else "pass", "raw_epa": share * epa,
+                       "adjusted_epa": share * epa, "wpa": share * wpa})
+    return str(play_id)
+
+
+def rb_context():
+    """Home's two backs share week 1: rb1 runs six times for +0.5 credited EPA a carry (one
+    stuffed, one 12-yard breakaway, one third-and-1 conversion), rb2 six times for -0.5 (three
+    stuffed). In week 2 rb1 is Home's only back: four carries, a fumble, a catch, and an
+    incompletion with no target row. Expected rushing yards are 4 a carry everywhere."""
+    plays, credit = [], []
+    rb1 = [("rb1", "rusher", 0.7)]
+    for yards in (4.0, 4.0, 4.0, 12.0, 0.0):
+        _add_play(plays, credit, 1, "Home", "Rush", rb1, yards=yards, epa=0.5 / 0.7)
+    _add_play(plays, credit, 1, "Home", "Rush", rb1, yards=4.0, down=3, distance=1, epa=0.5 / 0.7)
+    for yards in (0.0, 0.0, -1.0, 2.0, 2.0, 2.0):
+        _add_play(plays, credit, 1, "Home", "Rush", [("rb2", "rusher", 0.7)], yards=yards, epa=-0.5 / 0.7)
+    for _ in range(4):
+        _add_play(plays, credit, 2, "Home", "Rush", rb1, yards=3.0, epa=0.1)
+    _add_play(plays, credit, 2, "Home", "Fumble Recovery (Opponent)", [("rb1", "fumbler", 1.0)], epa=-2.0, wpa=-0.2)
+    _add_play(plays, credit, 2, "Home", "Pass Reception", [("qb1", "passer", 0.6), ("rb1", "receiver", 0.4)],
+              yards=6.0, epa=1.0)
+    _add_play(plays, credit, 2, "Home", "Pass Incompletion", [("qb1", "passer", 0.7)], epa=-0.4)
+    positions = pd.DataFrame({"athlete_id": ["rb1", "rb2", "qb1"], "position_group": ["RB", "RB", "QB"]})
+    return _season_context(plays, credit, positions), _flat_tables()
+
+
+def _pair(out, trait, athlete_id, game_id):
+    return out.loc[(trait, athlete_id, game_id), ["numerator", "denominator"]].tolist()
+
+
+def test_rb_line_independence_is_relative_to_backs_behind_the_same_line():
+    ctx, tables = rb_context()  # two backs on Home in game 1: rb1 +0.5 EPA/carry, rb2 -0.5; one back in game 2
+    out = offense.rb_traits(ctx, tables, NO_RECOVERED_TARGETS)
+    li = out[out["trait"].eq("rb.line_independence")].set_index(["athlete_id", "game_id"])
+    assert li.loc[("rb1", 1), "numerator"] / li.loc[("rb1", 1), "denominator"] == pytest.approx(1.0)
+    assert np.isnan(li.loc[("rb1", 2), "numerator"])
+
+
+def test_rb_traits_cover_every_registered_rb_trait_once_per_game():
+    ctx, tables = rb_context()
+    out = offense.rb_traits(ctx, tables, NO_RECOVERED_TARGETS)
+    specs = {name: spec for name, spec in TRAITS.items() if "RB" in spec.position_groups}
+    assert set(out["trait"]) == set(specs)
+    assert out["kind"].eq(out["trait"].map(lambda name: specs[name].kind)).all()
+    assert not out.duplicated(["athlete_id", "game_id", "trait"]).any()
+    assert set(out["athlete_id"]) == {"rb1", "rb2"}
+
+
+def test_rb_carry_traits_measure_against_expectation_and_teammates():
+    ctx, tables = rb_context()
+    out = offense.rb_traits(ctx, tables, NO_RECOVERED_TARGETS).set_index(["trait", "athlete_id", "game_id"])
+    assert _pair(out, "rb.yards_over_expected", "rb1", 1) == pytest.approx([28.0 - 6 * 4.0, 6.0])
+    assert _pair(out, "rb.breakaway", "rb1", 1) == pytest.approx([1.0, 6.0])
+    assert _pair(out, "rb.short_yardage", "rb1", 1) == pytest.approx([1.0 - 0.4, 1.0])
+    # rb1 was stuffed once in six carries against rb2's three in six: 3 expected, 1 allowed
+    assert _pair(out, "rb.stuff_avoidance", "rb1", 1) == pytest.approx([2.0, 6.0])
+    assert _pair(out, "rb.stuff_avoidance", "rb2", 1) == pytest.approx([-2.0, 6.0])
+
+
+def test_rb_receiving_and_ball_security_count_recovered_targets():
+    ctx, tables = rb_context()
+    incompletion = ctx.plays.loc[ctx.plays["play_type"].eq("Pass Incompletion"), "id"].astype(str)
+    recovered = pd.DataFrame({"play_id": incompletion, "athlete_id": "rb1", "source": "text"})
+    out = offense.rb_traits(ctx, tables, recovered).set_index(["trait", "athlete_id", "game_id"])
+    # the catch keeps its 0.4 credit row; the recovered target takes the 0.3 target share of -0.4
+    assert _pair(out, "rb.receiving", "rb1", 2) == pytest.approx([0.4 - 0.12, 2.0])
+    # four carries, two targets, and the fumbled play are touches
+    assert _pair(out, "rb.ball_security", "rb1", 2) == pytest.approx([-0.2, 7.0])
+    assert _pair(out, "rb.ball_security", "rb1", 1) == pytest.approx([0.0, 6.0])
+
+    poor = offense.rb_traits(ctx, tables, recovered, poor_coverage=True)
+    poor = poor.set_index(["trait", "athlete_id", "game_id"])
+    assert _pair(poor, "rb.receiving", "rb1", 2) == pytest.approx([0.4, 1.0])
+    assert _pair(poor, "rb.ball_security", "rb1", 2) == pytest.approx([-0.2, 6.0])
+
+
+def receiver_context():
+    """Week 1: wr1 has two feed targets (a 25-yard third-down catch and a first-down
+    incompletion), wr2 one third-down incompletion that only the play text names, and te1 only
+    a carry. Week 2: qb1 completes five passes to wr1 and throws five incompletions at te1."""
+    plays, credit = [], []
+    _add_play(plays, credit, 1, "Home", "Pass Reception", [("qb1", "passer", 0.6), ("wr1", "receiver", 0.4)],
+              yards=25.0, down=3, distance=5, epa=2.0)
+    feed = _add_play(plays, credit, 1, "Home", "Pass Incompletion",
+                     [("qb1", "passer", 0.7), ("wr1", "target", 0.3)], epa=-0.4)
+    text = _add_play(plays, credit, 1, "Home", "Pass Incompletion", [("qb1", "passer", 0.7)],
+                     down=3, distance=5, epa=-0.4)
+    _add_play(plays, credit, 1, "Home", "Rush", [("te1", "rusher", 0.7)], yards=5.0, epa=0.2)
+    for _ in range(5):
+        _add_play(plays, credit, 2, "Home", "Pass Reception", [("qb1", "passer", 0.6), ("wr1", "receiver", 0.4)],
+                  yards=9.0, epa=1.0)
+        _add_play(plays, credit, 2, "Home", "Pass Incompletion", [("qb1", "passer", 0.7), ("te1", "target", 0.3)],
+                  epa=-0.4)
+    positions = pd.DataFrame({"athlete_id": ["wr1", "wr2", "te1", "qb1"], "position_group": ["WR", "WR", "TE", "QB"]})
+    # recover_targets returns the feed's Target rows as well as the text matches
+    recovered = pd.DataFrame([{"play_id": feed, "athlete_id": "wr1", "source": "feed"},
+                              {"play_id": text, "athlete_id": "wr2", "source": "text"}])
+    return _season_context(plays, credit, positions), _flat_tables(), recovered
+
+
+def test_receiver_target_share_uses_recovered_targets():
+    ctx, tables, recovered = receiver_context()  # wr1: 2 feed targets; wr2: 1 recovered target; team total 3
+    out = offense.receiver_traits(ctx, tables, recovered)
+    share = out[out["trait"].eq("rec.target_share")].groupby("athlete_id")[["numerator", "denominator"]].sum()
+    assert share.loc["wr2"].tolist() == [1.0, 3.0]
+
+
+def test_receiver_traits_cover_wr_and_te_once_per_game():
+    ctx, tables, recovered = receiver_context()
+    out = offense.receiver_traits(ctx, tables, recovered)
+    specs = {name: spec for name, spec in TRAITS.items() if "WR" in spec.position_groups}
+    assert set(out["trait"]) == set(specs)
+    assert all(spec.position_groups == ("WR", "TE") for spec in specs.values())
+    assert out["kind"].eq(out["trait"].map(lambda name: specs[name].kind)).all()
+    assert not out.duplicated(["athlete_id", "game_id", "trait"]).any()
+    assert set(out["athlete_id"]) == {"wr1", "wr2", "te1"}
+    # te1 appeared on a carry in week 1 and drew none of the three targets
+    out = out.set_index(["trait", "athlete_id", "game_id"])
+    assert _pair(out, "rec.target_share", "te1", 1) == pytest.approx([0.0, 3.0])
+
+
+def test_receiver_rates_credit_the_recovered_target_at_the_target_share():
+    ctx, tables, recovered = receiver_context()
+    out = offense.receiver_traits(ctx, tables, recovered).set_index(["trait", "athlete_id", "game_id"])
+    assert _pair(out, "rec.value_per_target", "wr2", 1) == pytest.approx([0.3 * -0.4, 1.0])
+    assert _pair(out, "rec.value_per_target", "wr1", 1) == pytest.approx([0.4 * 2.0 + 0.3 * -0.4, 2.0])
+    assert _pair(out, "rec.explosive", "wr1", 1) == pytest.approx([1.0, 2.0])
+    assert _pair(out, "rec.late_down", "wr1", 1) == pytest.approx([1.0 - 0.4, 1.0])
+    assert _pair(out, "rec.late_down", "wr2", 1) == pytest.approx([0.0 - 0.4, 1.0])
+
+
+def test_receiver_qb_independence_is_relative_to_the_passers_other_targets():
+    ctx, tables, recovered = receiver_context()
+    out = offense.receiver_traits(ctx, tables, recovered).set_index(["trait", "athlete_id", "game_id"])
+    # week 2: wr1's 0.4 a catch against te1's -0.12 a target from the same passer
+    assert _pair(out, "rec.qb_independence", "wr1", 2) == pytest.approx([5 * (0.4 + 0.12), 5.0])
+    assert np.isnan(out.loc[("rec.qb_independence", "wr1", 1), "numerator"])  # one other target
+
+
+def test_receiver_traits_count_receptions_under_poor_coverage():
+    ctx, tables, recovered = receiver_context()
+    out = offense.receiver_traits(ctx, tables, recovered, poor_coverage=True)
+    assert "wr2" not in set(out["athlete_id"])
+    out = out.set_index(["trait", "athlete_id", "game_id"])
+    assert _pair(out, "rec.target_share", "wr1", 1) == pytest.approx([1.0, 1.0])
+    assert _pair(out, "rec.target_share", "te1", 1) == pytest.approx([0.0, 1.0])
+    assert _pair(out, "rec.value_per_target", "wr1", 1) == pytest.approx([0.8, 1.0])
+    assert _pair(out, "rec.explosive", "wr1", 1) == pytest.approx([1.0, 1.0])
