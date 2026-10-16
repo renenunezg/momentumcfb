@@ -427,6 +427,12 @@ def _add_publish_commands(sub) -> None:
     )
     _seasons_argument(player_values, SEASONS)
 
+    position_traits = sub.add_parser(
+        "position-traits",
+        help="score weekly position traits and headlines with the latest frozen fit",
+    )
+    _seasons_argument(position_traits, SEASONS)
+
     heisman = sub.add_parser(
         "heisman",
         help="build the Heisman board from a previously trained model artifact",
