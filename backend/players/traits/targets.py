@@ -28,9 +28,12 @@ def normalize_name(value: str) -> str:
     return " ".join(word for word in text.split() if word not in SUFFIXES)
 
 
-def _ids(values: pd.Series) -> pd.Series:
+def athlete_ids(values: pd.Series) -> pd.Series:
     """String ids; an integer-valued float (4.0) becomes "4" and nulls stay null."""
     return values.astype("string").str.replace(r"\.0$", "", regex=True)
+
+
+_ids = athlete_ids
 
 
 def _receiver_name(play_text: object) -> str | None:

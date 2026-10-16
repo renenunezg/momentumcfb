@@ -20,6 +20,7 @@ from backend.players.traits import (
     snapshots,
     targets,
     teammate,
+    transfers,
 )
 
 
@@ -950,3 +951,80 @@ def test_snapshot_latest_and_quantile_aggregates_and_fbs_only_percentiles(monkey
         out = snapshots.weekly_trait_snapshots(frames, positions, games, teams, identity, 2024, AS_OF)
         week2 = out[out["week"].eq(2) & out["trait"].eq("qb.explosive")].set_index("athlete_id")["percentile"]
         assert week2.loc[["qb1", "qb2"]].tolist() == pytest.approx(expected, nan_ok=True)
+
+
+def test_match_transfers_requires_both_rosters_to_agree_on_one_player():
+    portal = pd.DataFrame([{"season": 2022, "first_name": "Jon", "last_name": "Smith", "origin": "Troy", "destination": "Auburn"},
+                           {"season": 2022, "first_name": "Al", "last_name": "Dupe", "origin": "Troy", "destination": "Auburn"}])
+    roster_to = pd.DataFrame([{"id": "7", "first_name": "Jon", "last_name": "Smith", "team": "Auburn"},
+                              {"id": "8", "first_name": "Al", "last_name": "Dupe", "team": "Auburn"},
+                              {"id": "9", "first_name": "Al", "last_name": "Dupe", "team": "Auburn"}])
+    roster_from = pd.DataFrame([{"id": "7", "first_name": "Jon", "last_name": "Smith", "team": "Troy"},
+                                {"id": "8", "first_name": "Al", "last_name": "Dupe", "team": "Troy"}])
+    out = transfers.match_transfers(portal, roster_to, roster_from)
+    assert out["athlete_id"].tolist() == ["7"]
+
+
+def test_match_transfers_counts_each_dropped_reason_and_handles_an_empty_portal():
+    def person(first, last, team, id_):
+        return {"id": id_, "first_name": first, "last_name": last, "team": team}
+
+    def move(first, last, origin, destination):
+        return {"season": 2023, "first_name": first, "last_name": last, "origin": origin, "destination": destination}
+
+    portal = pd.DataFrame([
+        move("Jon", "Smith Jr.", "Troy", "Auburn"),  # matches despite suffix and integer ids
+        move("Ann", "Gone", "Troy", "Auburn"),       # absent from the destination roster
+        move("Bo", "Twin", "Troy", "Auburn"),        # two destination players share the name
+        move("Cy", "Lost", "Troy", "Auburn"),        # absent from the origin roster
+        move("Di", "Clone", "Troy", "Auburn"),       # two origin players share the name
+        move("Ed", "Swap", "Troy", "Auburn"),        # different ids on the two rosters
+    ])
+    roster_to = pd.DataFrame([
+        person("Jon", "Smith", "Auburn", 7), person("Bo", "Twin", "Auburn", 11), person("Bo", "Twin", "Auburn", 12),
+        person("Cy", "Lost", "Auburn", 13), person("Di", "Clone", "Auburn", 14), person("Ed", "Swap", "Auburn", 15),
+    ])
+    roster_from = pd.DataFrame([
+        person("Jon", "Smith", "Troy", 7.0), person("Di", "Clone", "Troy", 14), person("Di", "Clone", "Troy", 99),
+        person("Ed", "Swap", "Troy", 16),
+    ])
+    out = transfers.match_transfers(portal, roster_to, roster_from)
+    assert out.to_dict("records") == [{"athlete_id": "7", "season": 2023, "origin": "Troy", "destination": "Auburn"}]
+    assert out.attrs["dropped"] == {
+        "no_destination_match": 1, "ambiguous_destination": 1,
+        "no_origin_match": 1, "ambiguous_origin": 1, "id_mismatch": 1,
+    }
+
+    for empty in (pd.DataFrame({"season": [2020]}), portal.iloc[0:0]):
+        out = transfers.match_transfers(empty, roster_to, roster_from)
+        assert out.empty and list(out.columns) == ["athlete_id", "season", "origin", "destination"]
+        assert sum(out.attrs["dropped"].values()) == 0
+
+
+def test_portability_regresses_each_season_on_the_last_for_stayers_and_movers():
+    def season_frame(season, values, group="WR"):
+        return pd.DataFrame([
+            {"season": season, "week": week, "athlete_id": athlete, "trait": "wr.test", "position_group": group,
+             "value": value if week == 15 else -99.0, "qualified": ok}
+            for athlete, value, ok in values for week in (3, 15)
+        ])
+
+    stayers = [(f"s{i}", float(i), True) for i in range(30)]
+    movers = [(f"m{i}", float(i), True) for i in range(25)]
+    noise = [("q", 1000.0, False)]  # unqualified in the prior season, so excluded
+    before = season_frame(2022, stayers + movers + noise)
+    after = season_frame(2023, [(a, v, ok) for a, v, ok in stayers] + [(a, 0.5 * v, ok) for a, v, ok in movers] + [("q", 0.0, True)])
+    moved = pd.DataFrame({"athlete_id": [a for a, _, _ in movers] + ["s0"], "season": [2023] * 25 + [2022],
+                          "origin": "X", "destination": "Y"})
+
+    out = transfers.portability({2022: before, 2023: after}, moved)
+    assert list(out.columns) == ["position_group", "trait", "stayers", "movers", "stay_slope", "move_slope", "move_slope_se", "portable_share"]
+    row = out.iloc[0]
+    assert (row["position_group"], row["trait"], row["stayers"], row["movers"]) == ("WR", "wr.test", 30, 25)
+    assert row["stay_slope"] == pytest.approx(1.0)
+    assert row["move_slope"] == pytest.approx(0.5)
+    assert row["move_slope_se"] == pytest.approx(0.0, abs=1e-9)
+    assert row["portable_share"] == pytest.approx(0.5)
+
+    few = moved[moved["athlete_id"].isin([f"m{i}" for i in range(19)])]
+    assert np.isnan(transfers.portability({2022: before, 2023: after}, few).iloc[0]["portable_share"])
