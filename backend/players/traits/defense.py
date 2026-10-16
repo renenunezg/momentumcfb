@@ -230,7 +230,7 @@ def weekly_impact(
 ) -> pd.DataFrame:
     """``with_without`` through each week over games of that week or earlier.
 
-    One row per player and week with ``game_id`` NaN, the impact as numerator
+    One row per player and week with ``game_id`` missing, the impact as numerator
     and a denominator of 1.
     """
     frames = []
@@ -243,7 +243,7 @@ def weekly_impact(
         )
         frames.append(
             impact[["athlete_id"]].assign(
-                model_week=week, game_id=np.nan, numerator=impact["impact"], denominator=1.0
+                model_week=week, game_id=pd.NA, numerator=impact["impact"], denominator=1.0
             )
         )
     return trait_rows(pd.concat(frames, ignore_index=True), spec)
@@ -253,7 +253,8 @@ def defense_traits(ctx: SeasonContext) -> pd.DataFrame:
     """The eleven DL, LB and DB traits in the trait frame contract.
 
     Per-game traits have one row per player and game; ``def.impact`` and
-    ``def.pass_impact`` have one row per player and week.
+    ``def.pass_impact`` have one row per player and week, so ``game_id`` is a
+    nullable integer that is missing on those rows.
     """
     rows = defense_rows(ctx)
     games = defender_games(ctx, rows, group_ids(ctx.positions, DEFENSE_GROUPS))
@@ -285,4 +286,4 @@ def defense_traits(ctx: SeasonContext) -> pd.DataFrame:
             DEF_TRAITS["def.pass_impact"],
         ),
     ]
-    return pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True).astype({"game_id": "Int64"})

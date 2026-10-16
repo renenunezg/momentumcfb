@@ -6,6 +6,7 @@ exactly the plays, opponent effects, and finalized credit the v4 player values
 are built from.
 """
 
+import logging
 from dataclasses import dataclass
 
 import pandas as pd
@@ -17,6 +18,7 @@ from backend.model.weekly import load_weekly_games
 from backend.players.credit import assign_play_credit
 from backend.players.ingest import read_season_source, read_weekly
 from backend.players.value import (
+    POSITION_GROUPS,
     _historical_win_probabilities,
     _live_win_probabilities,
     _position_groups,
@@ -43,6 +45,8 @@ CREDITED_COLUMNS = [
     "weight",
 ]
 PRESENCE_COLUMNS = ["athlete_id", "team", "game_id", "model_week", "present"]
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -96,6 +100,31 @@ def player_presence(
     return out[PRESENCE_COLUMNS].reset_index(drop=True)
 
 
+def box_positions(
+    positions: pd.DataFrame, box: pd.DataFrame, roster: pd.DataFrame
+) -> pd.DataFrame:
+    """The v4 position groups plus every box-score player they miss.
+
+    v4 groups only credited players, so a defender with tackles and no play
+    credit has no group there. Such a player takes the group of his roster
+    position; one with no roster row (and so no credit either) or a roster
+    position outside ``POSITION_GROUPS`` stays ungrouped.
+    """
+    missing = set(box["athlete_id"].astype(str)) - set(positions["athlete_id"].astype(str))
+    rostered = roster[["id", "position"]].rename(columns={"id": "athlete_id"})
+    rostered = rostered.assign(athlete_id=rostered["athlete_id"].astype(str)).drop_duplicates(
+        "athlete_id"
+    )
+    added = rostered[rostered["athlete_id"].isin(missing)]
+    unrostered = len(missing) - len(added)
+    if unrostered:
+        log.info("%d box-score players have no roster row and no credit; skipped", unrostered)
+    added = added.assign(position_group=added["position"].map(POSITION_GROUPS)).dropna(
+        subset=["position_group"]
+    )
+    return pd.concat([positions, added], ignore_index=True)
+
+
 def load_season_context(season: int) -> SeasonContext:
     plays = classify_plays(store.read_season_pbp(season))
     games = load_weekly_games(season)
@@ -140,6 +169,7 @@ def load_season_context(season: int) -> SeasonContext:
         stat_text=box["stat"], stat=pd.to_numeric(box["stat"], errors="coerce")
     )
     presence = player_presence(box, credit, games)
+    positions = box_positions(positions, box, roster)
     return SeasonContext(
         season=season,
         plays=plays,
