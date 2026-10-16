@@ -429,7 +429,7 @@ def _add_publish_commands(sub) -> None:
 
     position_traits = sub.add_parser(
         "position-traits",
-        help="score weekly position traits and headlines with the latest frozen fit",
+        help="score weekly position traits and grades with the latest frozen grade model",
     )
     _seasons_argument(position_traits, SEASONS)
 
@@ -458,7 +458,7 @@ def _add_publish_commands(sub) -> None:
 
     traits_fit = sub.add_parser(
         "position-traits-fit",
-        help="backtest the position trait headline offline and save its fit",
+        help="set the position grade weights offline, validate them and save the model",
     )
     traits_fit.add_argument("--dev-seasons", type=int, nargs="+", required=True)
     traits_fit.add_argument("--validate", type=int, required=True)

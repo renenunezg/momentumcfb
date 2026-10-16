@@ -124,8 +124,8 @@ def expected_field_goal(tables: ExpectationTables, plays: pd.DataFrame) -> pd.Se
 
 
 def expectation_tables_path(models_dir: Path, cutoff_season: int) -> Path:
-    """The frozen tables saved beside ``position_traits_<cutoff>.json``."""
-    return Path(models_dir) / f"position_traits_expectations_{cutoff_season}.parquet"
+    """The frozen tables saved beside ``position_grade_<cutoff>.json``."""
+    return Path(models_dir) / f"position_grade_expectations_{cutoff_season}.parquet"
 
 
 def _typed(frame: pd.DataFrame) -> pd.DataFrame:

@@ -1,12 +1,15 @@
-"""Season assembly and the offline backtest of the position trait headline.
+"""Season assembly and the offline backtest of the position grade.
 
 ``build_season_traits`` runs every trait builder for one season and writes the
 weekly snapshots, their split-half reliability and the target coverage.
-``run_backtest`` fits the headline on chronological development seasons, scores a
-later validation season it never saw, and runs the per-group swap test that
-decides where the headline may replace the v4 value. ``write_backtest`` saves
-the fit, the frozen expectation tables the weekly runner scores with, and one
-long evaluation frame, and prints every table as Markdown.
+``run_backtest`` sets the grade's trait weights from player-level evidence on
+chronological development seasons (pooled split-half reliability times transfer
+portability), measures the composite's own reliability, and checks the grade on
+a later validation season it never saw: does a player's grade predict his next
+season's grade and production better than his EPA credit does, and how does it
+rank against the draft. ``write_backtest`` saves the grade model, the frozen
+expectation tables the weekly runner scores with, and one long evaluation frame,
+and prints every table as Markdown.
 """
 
 import logging
@@ -21,10 +24,9 @@ import pandas as pd
 from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.etl import store
 from backend.features.possessions import classify_plays
-from backend.model.weekly import load_weekly_games
 from backend.players import pipeline
 from backend.players.ingest import read_season_source, read_weekly
-from backend.players.traits import TRAITS, headline, snapshots
+from backend.players.traits import TRAITS, grade, snapshots
 from backend.players.traits.context import load_season_context
 from backend.players.traits.defense import defense_traits
 from backend.players.traits.expectations import (
@@ -47,17 +49,12 @@ from backend.players.traits.transfers import (
     portability,
 )
 from backend.players.value import MIN_QUALIFIED_PLAYERS
-from backend.serving.anchors import load_serving_anchors
 
 log = logging.getLogger(__name__)
 
 FIRST_PLAY_SEASON = 2019
 FIRST_PORTAL_SEASON = 2021
 RELIABILITY_GAMES = (4, 6, 8, 12)
-REPLACEMENT_GAMES = 6
-# v4 has no rating (OL) or no usable reliability (K, P) to compare against.
-NEVER_REPLACES = ("OL", "K", "P")
-WEEK_BUCKETS = {"2-5": (2, 5), "6-9": (6, 9), "10+": (10, None)}
 VALUE_COLUMNS = [
     "week",
     "athlete_id",
@@ -70,22 +67,23 @@ VALUE_COLUMNS = [
 CREDITED_GAME_COLUMNS = ["athlete_id", "game_id", "model_week", "adjusted_epa"]
 IDENTITY_COLUMNS = ["athlete_id", "athlete_name", "team"]
 SPLIT_COLUMNS = ["position_group", "games", "players", "correlation"]
-SWAP_COLUMNS = [
+NEXT_SEASON_COLUMNS = [
+    "season",
+    "next_season",
     "position_group",
-    "mae_v4_only",
-    "mae_with_traits",
-    "improvement",
-    "reliability_6_v4",
-    "reliability_6_headline",
-    "replaces_value",
+    "players",
+    "spearman_grade_next_grade",
+    "spearman_grade_next_epa",
+    "spearman_epa_next_epa",
+    "holdout",
 ]
 DRAFT_COLUMNS = [
     "position_group",
     "players",
     "spearman_pick_v4",
-    "spearman_pick_headline",
+    "spearman_pick_grade",
     "spearman_nfl_games_v4",
-    "spearman_nfl_games_headline",
+    "spearman_nfl_games_grade",
 ]
 DRAFT_COHORT = PROCESSED_DIR / "draft" / "2027" / "historical_cohort.parquet"
 MATURE_OUTCOME = "observed"
@@ -100,16 +98,13 @@ SEASON_ARTIFACTS = {
 }
 TABLES = (
     "weights",
-    "validation",
-    "swap",
     "reliability",
     "portability",
-    "target_coverage",
-    "draft_check",
     "portal",
-    "anchors",
+    "target_coverage",
+    "next_season",
+    "draft_check",
 )
-ANCHOR_COLUMNS = ["season", "games", "with_projection", "without_projection"]
 PORTAL_COLUMNS = [
     "season",
     "portal_rows",
@@ -180,38 +175,10 @@ def season_identity(
     return pd.concat([people, units], ignore_index=True)
 
 
-def with_exposure(
-    snapshot: pd.DataFrame, frames: pd.DataFrame, positions_map: pd.Series
-) -> pd.DataFrame:
-    """``snapshot`` plus each player's cumulative ``exposure`` through the week.
-
-    Exposure comes from ``headline.exposure_shares``; a snapshot week past the last
-    week of ``frames`` keeps the latest total, a player without usage gets 0, and an
-    OL unit 1.0.
-    """
-    shares = headline.exposure_shares(frames, positions_map)
-    weeks = sorted(set(shares["week"].astype(int)) | set(snapshot["week"].astype(int)))
-    wide = (
-        shares.pivot(index="athlete_id", columns="week", values="exposure")
-        .reindex(columns=weeks)
-        .ffill(axis=1)
-        .fillna(0.0)
-    )
-    wide.index.name, wide.columns.name = "athlete_id", "week"
-    out = snapshot.astype({"athlete_id": str}).merge(
-        wide.stack().rename("exposure").reset_index(),
-        on=["athlete_id", "week"],
-        how="left",
-    )
-    out["exposure"] = out["exposure"].fillna(0.0)
-    out.loc[out["athlete_id"].str.startswith(snapshots.UNIT_PREFIX), "exposure"] = 1.0
-    return out
-
-
 def with_fbs(snapshot: pd.DataFrame, season: int) -> pd.DataFrame:
     """``snapshot`` plus ``fbs``: whether the row's team is FBS in the season's teams file.
 
-    The headline pool is qualified FBS players, so every scoring path adds the flag
+    The grade pool is qualified FBS players, so every scoring path adds the flag
     the same way the weekly runner does.
     """
     teams = read_season_source(season, "teams")
@@ -261,9 +228,9 @@ def build_season_traits(
     whose source seasons include ``season`` or a later one is refused. Without it
     the tables are fit on every earlier season on disk from 2019, as the backtest
     does. The season decides its own target mode from its own coverage
-    (``poor_target_coverage``), served or backtested. Writes the snapshots (with
-    ``exposure``), reliability and target coverage, plus the raw frames and per-game
-    credit the backtest pools for reliability.
+    (``poor_target_coverage``), served or backtested. Writes the snapshots,
+    reliability and target coverage, plus the raw frames and per-game credit the
+    backtest pools for reliability.
     """
     started = time.perf_counter()
     if tables is None:
@@ -297,9 +264,6 @@ def build_season_traits(
         ignore_index=True,
     ).astype({"athlete_id": str})
     identity = season_identity(ctx.credit, ctx.box, ctx.games, frames)
-    positions_map = snapshots.position_groups(frames, ctx.positions).set_index(
-        "athlete_id"
-    )["position_group"]
     weekly = snapshots.weekly_trait_snapshots(
         frames,
         ctx.positions,
@@ -311,7 +275,7 @@ def build_season_traits(
     )
     outputs = {
         "frames": frames,
-        "snapshots": with_exposure(weekly, frames, positions_map),
+        "snapshots": weekly,
         "reliability": snapshots.split_half_reliability(
             frames, ctx.positions, games_at=RELIABILITY_GAMES
         ),
@@ -356,129 +320,66 @@ def player_values(season: int) -> pd.DataFrame:
     return values[VALUE_COLUMNS].astype({"athlete_id": str})
 
 
-# Fits and validation
+# Pooled development evidence
 
 
-def projection_anchors(season: int) -> pd.DataFrame:
-    """``game_id, model_week, home_margin, margin_sd``: the team model's chronological
-    pregame projection for every game of ``season`` (the calibration replay, each row
-    fit only on games before its week)."""
-    return load_serving_anchors(season=season)
+def _season_keys(values: pd.Series, season: int) -> pd.Series:
+    """Season-suffixed ids, so one athlete's seasons stay apart when pooled; an OL
+    unit id keeps its ``unit:`` prefix."""
+    return values.astype(str) + f"@{season}"
 
 
-def feature_columns(matrix: pd.DataFrame) -> list[str]:
-    return [column for column in matrix.columns if ":" in column]
-
-
-def epa_columns(matrix: pd.DataFrame) -> list[str]:
-    return [
-        column
-        for column in feature_columns(matrix)
-        if column.endswith(f":{headline.EPA}")
-    ]
-
-
-def fit_on(
-    matrix: pd.DataFrame, features: list[str], dev_seasons: list[int]
-) -> headline.HeadlineFit:
-    fixed = [name for name in headline.fixed_columns(matrix) if name in matrix.columns]
-    columns = list(dict.fromkeys([*headline.META_COLUMNS, *fixed, *features]))
-    return headline.fit_headline(matrix[columns], dev_seasons)
-
-
-def predict_margin(fit: headline.HeadlineFit, rows: pd.DataFrame) -> np.ndarray:
-    """The fit's margin for each row, on the fit's dev-season feature scale."""
-    scale = fit.feature_scale.set_index("feature")
-    kept = list(scale.index)
-    z = ((rows[kept] - scale["mean"]) / scale["sd"]).to_numpy(float)
-    fixed = sum(
-        fit.weights[name] * rows[name].to_numpy(float)
-        for name in headline.FIXED[1:]
-        if name in fit.weights.index
-    )
-    return fit.weights["intercept"] + fixed + z @ fit.weights.reindex(kept).to_numpy(float)
-
-
-def _mae(fit: headline.HeadlineFit, rows: pd.DataFrame) -> float:
-    return float(
-        np.mean(np.abs(rows["margin"].to_numpy(float) - predict_margin(fit, rows)))
+def _people(snapshot: pd.DataFrame) -> pd.DataFrame:
+    """``position_group, team, fbs`` per athlete, indexed by athlete id."""
+    return (
+        snapshot.astype({"athlete_id": str})
+        .drop_duplicates("athlete_id")
+        .set_index("athlete_id")[["position_group", "team", "fbs"]]
     )
 
 
-def validation_mae(
-    fit: headline.HeadlineFit, rows: pd.DataFrame, variant: str
+def pooled_frames(
+    seasons: dict[int, dict[str, pd.DataFrame]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The seasons' raw trait frames and ``athlete_id, position_group`` with
+    season-suffixed ids; each athlete takes his snapshot group in that season."""
+    frames, groups = [], []
+    for season, data in seasons.items():
+        frame = data["frames"].astype({"athlete_id": str})
+        frames.append(frame.assign(athlete_id=_season_keys(frame["athlete_id"], season)))
+        people = _people(data["snapshots"])["position_group"].reset_index()
+        groups.append(people.assign(athlete_id=_season_keys(people["athlete_id"], season)))
+    return pd.concat(frames, ignore_index=True), pd.concat(groups, ignore_index=True)
+
+
+def pooled_trait_reliability(
+    seasons: dict[int, dict[str, pd.DataFrame]], games_at: tuple[int, ...]
 ) -> pd.DataFrame:
-    """``variant, week_bucket, games, mae`` over the validation rows by model week."""
-    buckets = []
-    for bucket, (first, last) in WEEK_BUCKETS.items():
-        week = rows["model_week"]
-        inside = week.ge(first) if last is None else week.between(first, last)
-        buckets.append((bucket, rows[inside]))
-    buckets.append(("all", rows))
-    return pd.DataFrame(
-        [
-            {
-                "variant": variant,
-                "week_bucket": bucket,
-                "games": len(part),
-                "mae": _mae(fit, part) if len(part) else np.nan,
-            }
-            for bucket, part in buckets
-        ]
-    )
+    """Each trait's split-half reliability with the seasons pooled."""
+    frames, groups = pooled_frames(seasons)
+    return snapshots.split_half_reliability(frames, groups, games_at=games_at)
 
 
-def swap_features(features: list[str], group: str) -> list[str]:
-    """The swap test's columns for ``group``: its full feature set (traits and
-    ``epa``) and only the ``epa`` column of every other group."""
-    own = [name for name in features if name.startswith(f"{group}:")]
-    others = [
-        name
-        for name in features
-        if name.endswith(f":{headline.EPA}") and not name.startswith(f"{group}:")
-    ]
-    return others + own
-
-
-def swap_maes(
-    dev_matrix: pd.DataFrame,
-    validation_rows: pd.DataFrame,
-    dev_seasons: list[int],
-    mae_v4_only: float,
-) -> pd.DataFrame:
-    """Per group: validation MAE of the dev fit on ``swap_features``."""
-    rows = []
-    for group in headline.GROUPS:
-        features = swap_features(feature_columns(dev_matrix), group)
-        fit = fit_on(dev_matrix, features, dev_seasons)
-        rows.append(
-            {
-                "position_group": group,
-                "mae_v4_only": mae_v4_only,
-                "mae_with_traits": _mae(fit, validation_rows),
-            }
+def final_week_rows(seasons: dict[int, dict[str, pd.DataFrame]]) -> pd.DataFrame:
+    """Qualified FBS trait rows at each season's final week with that week's v4
+    ``shrunk_per_game``, season-suffixed ids; the input to ``grade.orientations``."""
+    parts = []
+    for season, data in seasons.items():
+        snapshot = data["snapshots"]
+        final = snapshot[
+            snapshot["week"].eq(snapshot["week"].max())
+            & snapshot["qualified"].eq(True)
+            & snapshot["fbs"].eq(True)
+        ].astype({"athlete_id": str})
+        epa = _final_epa(data["values"])
+        rows = final[["athlete_id", "position_group", "trait", "value"]].assign(
+            shrunk_per_game=final["athlete_id"].map(epa)
         )
-    return pd.DataFrame(rows)
+        parts.append(rows.assign(athlete_id=_season_keys(rows["athlete_id"], season)))
+    return pd.concat(parts, ignore_index=True)
 
 
-def replacement_flags(swap: pd.DataFrame) -> pd.DataFrame:
-    """``improvement = mae_v4_only − mae_with_traits``; the headline replaces the value
-    only when it improves the MAE and is at least as reliable at six games.
-
-    Both reliabilities come from ``paired_split_half`` (same athletes, same games). A
-    NaN reliability compares False. The groups in ``NEVER_REPLACES`` (OL, K and P)
-    never replace v4 in v1, whatever their numbers, which are still returned.
-    """
-    improvement = swap["mae_v4_only"] - swap["mae_with_traits"]
-    return swap.assign(
-        improvement=improvement,
-        replaces_value=improvement.gt(0)
-        & swap["reliability_6_headline"].ge(swap["reliability_6_v4"])
-        & ~swap["position_group"].isin(NEVER_REPLACES),
-    )
-
-
-# Split-half reliability of v4 and the headline
+# Split-half reliability of the composite
 
 
 def _alternate(games: pd.DataFrame) -> pd.DataFrame:
@@ -504,184 +405,102 @@ def _half_games(alternated: pd.DataFrame, n: int) -> pd.DataFrame:
 
 
 def _pearson(left: pd.Series, right: pd.Series) -> float:
-    """Pearson correlation; NaN when either side is constant (say, a group whose every
-    headline feature was dropped)."""
+    """Pearson correlation; NaN when either side is constant."""
     if not (left.std() > 0 and right.std() > 0):
         return np.nan
     return float(left.corr(right))
 
 
-def _season_keys(values: pd.Series, season: int) -> pd.Series:
-    return f"{season}:" + values.astype(str)
-
-
-def paired_games(frames: pd.DataFrame, credited: pd.DataFrame, n: int) -> pd.DataFrame:
-    """``athlete_id, game_id, half``: the games both sides of the reliability use at ``n``.
-
-    Each athlete's games are every distinct game with a trait-frame row (any trait,
-    NaN numerator included), alternating between halves in week order; an athlete
-    needs ``n`` such games and each half keeps its first ``n // 2``. An athlete with
-    no credited row in those games has no v4 value and is left out of both sides.
-    """
-    chosen = _half_games(_alternate(frames), n)
-    keys = credited[["athlete_id", "game_id"]].drop_duplicates()
-    with_credit = chosen.merge(keys, on=["athlete_id", "game_id"])["athlete_id"]
-    return chosen[chosen["athlete_id"].isin(set(with_credit))]
-
-
-def _half_scores(
+def half_composites(
     frames: pd.DataFrame,
-    credited: pd.DataFrame,
     people: pd.DataFrame,
     chosen: pd.DataFrame,
     n: int,
-    fit: headline.HeadlineFit,
+    model: grade.GradeModel,
 ) -> pd.DataFrame:
-    """Each chosen athlete's paired half values, indexed by athlete.
+    """Each chosen athlete's composite in half 0 and half 1, indexed by athlete.
 
-    Columns ``("headline", h)`` hold the half's ``raw_score`` and ``("v4", h)`` its
-    adjusted EPA per game (0 for a chosen game without credit) for half ``h``. Each
-    half is scored as its own snapshot week: trait values by the registered aggregate
-    over the half's games and ``epa`` from the same per-game value. ``latest`` traits
-    have no games and score 0. ``people`` (indexed by athlete) gives each athlete's
-    ``position_group``, ``team`` and ``fbs``; scoring keeps the headline's own rule, so
-    a non-FBS athlete has no headline and drops out of both sides. A group with no
-    headline (``headline.headline_groups``) scores its FBS athletes 0, a constant whose
-    correlation is NaN, so its v4 side is still reported.
+    Each half is scored as its own snapshot week: trait values by the registered
+    aggregate over the half's games, every athlete qualified, and the grade's own
+    pool (FBS athletes at the group, from ``people``). ``latest`` traits have no
+    games and drop out.
     """
-    groups = people["position_group"]
     rows = frames.merge(chosen, on=["athlete_id", "game_id"])
     rows = rows.assign(
-        aggregate=rows["trait"].map(
-            {name: spec.aggregate for name, spec in TRAITS.items()}
-        )
+        aggregate=rows["trait"].map({name: spec.aggregate for name, spec in TRAITS.items()})
     )
     values = snapshots.aggregate(rows, ["athlete_id", "trait", "half"]).reset_index()
     half_snapshot = values.assign(
-        week=values["half"],
-        position_group=values["athlete_id"].map(groups),
+        position_group=values["athlete_id"].map(people["position_group"]),
         team=values["athlete_id"].map(people["team"]),
         fbs=values["athlete_id"].map(people["fbs"]).eq(True),
-        exposure=1.0,  # raw_score does not depend on the share
         games=n // 2,
         qualified=True,
     ).dropna(subset=["position_group"])
-    idle = people.index[
-        ~people["position_group"].isin(headline.headline_groups(fit)) & people["fbs"].eq(True)
-    ]
-
-    players = chosen.drop_duplicates(["athlete_id", "half"])[["athlete_id", "half"]]
-    epa = chosen.merge(credited, on=["athlete_id", "game_id"], how="left")
-    epa = (
-        epa.groupby(["athlete_id", "half"])["adjusted_epa"]
-        .sum()
-        .rename("total")
-        .reset_index()
-    )
-    half_values = players.merge(epa, on=["athlete_id", "half"], how="left").assign(
-        week=lambda f: f["half"],
-        position_group=lambda f: f["athlete_id"].map(groups),
-        games=n // 2,
-        shrunk_per_game=lambda f: f["total"].fillna(0.0) / (n // 2),
-    )
     columns = {}
     for half in (0, 1):
-        scored = headline.score_players(
-            half_snapshot[half_snapshot["week"].eq(half)],
-            half_values[half_values["week"].eq(half)],
-            fit,
-        )
-        raw = scored.drop_duplicates("athlete_id").set_index("athlete_id")["raw_score"]
-        present = half_values.loc[half_values["week"].eq(half), "athlete_id"]
-        constant = pd.Series(0.0, index=present[present.isin(idle)].to_numpy())
-        columns[("headline", half)] = pd.concat([raw, constant])
-        columns[("v4", half)] = half_values[half_values["week"].eq(half)].set_index(
-            "athlete_id"
-        )["shrunk_per_game"]
+        scored = grade.score_grades(half_snapshot[half_snapshot["half"].eq(half)], model)
+        columns[half] = scored.set_index("athlete_id")["composite"]
     return pd.DataFrame(columns)
 
 
-def paired_split_half(
+def composite_split_half(
     seasons: dict[int, dict[str, pd.DataFrame]],
-    fit: headline.HeadlineFit,
+    model: grade.GradeModel,
     games_at: tuple[int, ...],
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split-half reliability of the headline and of v4 on one paired sample.
+) -> pd.DataFrame:
+    """Split-half reliability of the grade's composite per group at each game count.
 
-    For each ``n`` both statistics use the same (season, athlete) set and the same
-    games (``paired_games``): the headline side correlates the halves' ``raw_score``
-    under ``fit``, the v4 side the halves' adjusted EPA per game. Dev seasons are
-    pooled with season-prefixed ids, a group needs ``MIN_QUALIFIED_PLAYERS`` athletes
-    with both sides in both halves, and each group takes its athletes' snapshot
-    group. The snapshots carry ``team`` and ``fbs`` (``with_fbs``), so only FBS athletes
-    have a headline side, as in serving. Returns ``(headline_rows, v4_rows)`` with
-    equal ``players``.
+    Each athlete's distinct games with a trait-frame row alternate between halves in
+    week order; at ``n`` an athlete needs ``n`` games and each half keeps its first
+    ``n // 2``. The seasons are pooled with season-suffixed ids and each athlete takes
+    his snapshot group; a group needs ``MIN_QUALIFIED_PLAYERS`` athletes scored in
+    both halves.
     """
     by_games: dict[int, list[pd.DataFrame]] = {n: [] for n in games_at}
-    groups_pooled = []
     for season, data in seasons.items():
         frames = data["frames"].astype({"athlete_id": str})
-        credited = data["credited"].astype({"athlete_id": str})
-        people = (
-            data["snapshots"]
-            .astype({"athlete_id": str})
-            .drop_duplicates("athlete_id")
-            .set_index("athlete_id")[["position_group", "team", "fbs"]]
-        )
-        groups = people["position_group"]
-        groups_pooled.append(
-            groups.set_axis(_season_keys(groups.index.to_series(), season))
-        )
+        people = _people(data["snapshots"])
+        alternated = _alternate(frames)
         for n in games_at:
-            chosen = paired_games(frames, credited, n)
+            chosen = _half_games(alternated, n)
             if n < 2 or chosen.empty:
                 continue
-            halves = _half_scores(frames, credited, people, chosen, n, fit)
-            by_games[n].append(
-                halves.set_axis(_season_keys(halves.index.to_series(), season))
-            )
-    groups = pd.concat(groups_pooled) if groups_pooled else pd.Series(dtype=object)
-    headline_rows, v4_rows = [], []
+            halves = half_composites(frames, people, chosen, n, model)
+            halves["position_group"] = halves.index.map(people["position_group"])
+            by_games[n].append(halves.set_axis(_season_keys(halves.index.to_series(), season)))
+    rows = []
     for n, parts in by_games.items():
         if not parts:
             continue
         wide = pd.concat(parts).dropna()
-        group = wide.index.to_series().map(groups)
-        for name, frame in wide.groupby(group):
+        for group, frame in wide.groupby("position_group"):
             if len(frame) < MIN_QUALIFIED_PLAYERS:
                 continue
-            for side, out in (("headline", headline_rows), ("v4", v4_rows)):
-                out.append(
-                    {
-                        "position_group": name,
-                        "games": n,
-                        "players": len(frame),
-                        "correlation": _pearson(frame[(side, 0)], frame[(side, 1)]),
-                    }
-                )
-    return (
-        pd.DataFrame(headline_rows, columns=SPLIT_COLUMNS),
-        pd.DataFrame(v4_rows, columns=SPLIT_COLUMNS),
-    )
-
-
-def _at_games(table: pd.DataFrame, name: str) -> pd.DataFrame:
-    rows = table[table["games"].eq(REPLACEMENT_GAMES)]
-    return rows.set_index("position_group")["correlation"].rename(name).reset_index()
+            rows.append(
+                {
+                    "position_group": group,
+                    "games": n,
+                    "players": len(frame),
+                    "correlation": _pearson(frame[0], frame[1]),
+                }
+            )
+    out = pd.DataFrame(rows, columns=SPLIT_COLUMNS)
+    return out.sort_values(["position_group", "games"], ignore_index=True)
 
 
 def reliability_table(
     seasons: dict[int, dict[str, pd.DataFrame]],
-    headline_rows: pd.DataFrame,
-    v4_rows: pd.DataFrame,
+    pooled_traits: pd.DataFrame,
+    composite: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Each dev season's trait reliability, then the pooled, paired headline and v4 rows."""
+    """Each dev season's trait reliability, the pooled trait rows the weights read,
+    and the pooled composite curve (``trait`` ``grade``)."""
     parts = [
-        data["reliability"].assign(season=str(season))
-        for season, data in seasons.items()
+        data["reliability"].assign(season=str(season)) for season, data in seasons.items()
     ]
-    parts.append(headline_rows.assign(trait="headline", season="pooled"))
-    parts.append(v4_rows.assign(trait=headline.EPA, season="pooled"))
+    parts.append(pooled_traits.assign(season="pooled"))
+    parts.append(composite.assign(trait="grade", season="pooled"))
     columns = ["season", *snapshots.RELIABILITY_COLUMNS]
     return pd.concat(
         [part[columns] for part in parts if len(part)], ignore_index=True
@@ -751,34 +570,91 @@ def _spearman(left: pd.Series, right: pd.Series) -> float:
     return _pearson(left[both].rank(), right[both].rank())
 
 
-def final_week_values(
-    snapshot: pd.DataFrame, values: pd.DataFrame, fit: headline.HeadlineFit
-) -> pd.DataFrame:
-    """``athlete_id, headline, value_above_replacement`` at each source's final week."""
+def _final_epa(values: pd.DataFrame) -> pd.Series:
+    """v4 ``shrunk_per_game`` at the values' final week, by athlete id."""
+    final = values[values["week"].eq(values["week"].max())].astype({"athlete_id": str})
+    return final.drop_duplicates("athlete_id").set_index("athlete_id")["shrunk_per_game"]
+
+
+def final_week_grades(snapshot: pd.DataFrame, model: grade.GradeModel) -> pd.DataFrame:
+    """``athlete_id, position_group, games, grade`` at the snapshot's final week."""
     final = snapshot[snapshot["week"].eq(snapshot["week"].max())]
-    final_values = values[values["week"].eq(values["week"].max())]
+    return grade.score_grades(final, model)[["athlete_id", "position_group", "games", "grade"]]
+
+
+def next_season_table(
+    seasons: dict[int, dict[str, pd.DataFrame]],
+    model: grade.GradeModel,
+    validation_season: int,
+) -> pd.DataFrame:
+    """Does a final-week grade predict next season, compared with EPA credit alone?
+
+    For each consecutive pair ``(t, t + 1)`` with ``t + 1 ≤ validation_season``, over
+    players graded at the final week of both seasons at the same group: the Spearman
+    of the season-``t`` grade with the ``t + 1`` grade and with the ``t + 1`` v4
+    ``shrunk_per_game``, and of the season-``t`` v4 value with the ``t + 1`` v4 value
+    (the EPA-only baseline). Where at least ``MIN_QUALIFIED_PLAYERS`` players have all
+    four numbers every correlation uses only them; otherwise (OL has no v4 value, few
+    punters have one) the grade rows are kept and the EPA columns are mostly empty.
+    ``holdout`` is True only for the pair ending in the validation season.
+    """
+    grades = {season: final_week_grades(data["snapshots"], model) for season, data in seasons.items()}
+    epa = {season: _final_epa(data["values"]) for season, data in seasons.items()}
+    rows = []
+    for season in sorted(seasons):
+        later = season + 1
+        if later not in seasons or later > validation_season:
+            continue
+        both = grades[season].merge(
+            grades[later], on=["athlete_id", "position_group"], suffixes=("", "_next")
+        )
+        both = both.assign(
+            epa=both["athlete_id"].map(epa[season]),
+            epa_next=both["athlete_id"].map(epa[later]),
+        )
+        for group, frame in both.groupby("position_group"):
+            complete = frame.dropna(subset=["grade", "grade_next", "epa", "epa_next"])
+            used = complete if len(complete) >= MIN_QUALIFIED_PLAYERS else frame
+            rows.append(
+                {
+                    "season": season,
+                    "next_season": later,
+                    "position_group": group,
+                    "players": len(used),
+                    "spearman_grade_next_grade": _spearman(used["grade"], used["grade_next"]),
+                    "spearman_grade_next_epa": _spearman(used["grade"], used["epa_next"]),
+                    "spearman_epa_next_epa": _spearman(used["epa"], used["epa_next"]),
+                    "holdout": later == validation_season and season == validation_season - 1,
+                }
+            )
+    return pd.DataFrame(rows, columns=NEXT_SEASON_COLUMNS)
+
+
+def final_week_values(
+    snapshot: pd.DataFrame, values: pd.DataFrame, model: grade.GradeModel
+) -> pd.DataFrame:
+    """``athlete_id, grade, value_above_replacement`` at each source's final week."""
     scored = (
-        headline.score_players(final, final_values, fit)
+        final_week_grades(snapshot, model)
         .sort_values("games", ascending=False, kind="stable")
-        .drop_duplicates("athlete_id")[["athlete_id", "headline"]]
+        .drop_duplicates("athlete_id")[["athlete_id", "grade"]]
     )
-    v4 = final_values.drop_duplicates("athlete_id")[
-        ["athlete_id", "value_above_replacement"]
-    ]
+    final_values = values[values["week"].eq(values["week"].max())]
+    v4 = final_values.drop_duplicates("athlete_id")[["athlete_id", "value_above_replacement"]]
     return scored.merge(v4, on="athlete_id", how="outer")
 
 
 def draft_check(
     snapshots_by_season: dict[int, pd.DataFrame],
     values_by_season: dict[int, pd.DataFrame],
-    fit: headline.HeadlineFit,
+    model: grade.GradeModel,
 ) -> pd.DataFrame:
-    """Rank correlation of final-week headline and v4 value with draft pick and NFL snaps.
+    """Rank correlation of final-week grade and v4 value with draft pick and NFL snaps.
 
     Report-only: draft year ``y`` reads season ``y − 1``. Pick is negated so higher
     is better; NFL snaps count only for a mature (``observed``) outcome. Every
-    correlation uses the players with both a headline and a v4 value. Dev seasons
-    are scored in sample.
+    correlation uses the players with both a grade and a v4 value. Dev seasons are
+    scored in sample.
     """
     if not DRAFT_COHORT.exists():
         log.info("draft check skipped: %s is absent", DRAFT_COHORT)
@@ -799,14 +675,14 @@ def draft_check(
         season = int(year) - 1
         if season in snapshots_by_season:
             scores = final_week_values(
-                snapshots_by_season[season], values_by_season[season], fit
+                snapshots_by_season[season], values_by_season[season], model
             )
             parts.append(players.merge(scores, on="athlete_id", how="inner"))
     if not parts:
         log.info("draft check: no draft year has a season in the backtest")
         return pd.DataFrame(columns=DRAFT_COLUMNS)
     pooled = pd.concat(parts, ignore_index=True).dropna(
-        subset=["headline", "value_above_replacement"]
+        subset=["grade", "value_above_replacement"]
     )
     rows = []
     for group, frame in pooled.groupby("position_group"):
@@ -815,35 +691,17 @@ def draft_check(
             {
                 "position_group": group,
                 "players": len(frame),
-                "spearman_pick_v4": _spearman(
-                    frame["value_above_replacement"], -frame["pick"]
-                ),
-                "spearman_pick_headline": _spearman(frame["headline"], -frame["pick"]),
+                "spearman_pick_v4": _spearman(frame["value_above_replacement"], -frame["pick"]),
+                "spearman_pick_grade": _spearman(frame["grade"], -frame["pick"]),
                 "spearman_nfl_games_v4": _spearman(
-                    mature["value_above_replacement"],
-                    mature["nfl_first3_scrimmage_snaps"],
+                    mature["value_above_replacement"], mature["nfl_first3_scrimmage_snaps"]
                 ),
-                "spearman_nfl_games_headline": _spearman(
-                    mature["headline"], mature["nfl_first3_scrimmage_snaps"]
+                "spearman_nfl_games_grade": _spearman(
+                    mature["grade"], mature["nfl_first3_scrimmage_snaps"]
                 ),
             }
         )
     return pd.DataFrame(rows, columns=DRAFT_COLUMNS)
-
-
-def weights_table(fit: headline.HeadlineFit) -> pd.DataFrame:
-    kept = pd.DataFrame(
-        {
-            "feature": fit.weights.index,
-            "weight": fit.weights.to_numpy(),
-            "loso_sd": fit.loso_sd.to_numpy(),
-            "dropped": False,
-        }
-    )
-    dropped = pd.DataFrame(
-        {"feature": fit.dropped, "weight": np.nan, "loso_sd": np.nan, "dropped": True}
-    )
-    return pd.concat([kept, dropped], ignore_index=True)
 
 
 # The backtest
@@ -852,27 +710,26 @@ def weights_table(fit: headline.HeadlineFit) -> pd.DataFrame:
 @dataclass
 class BacktestResult:
     weights: pd.DataFrame
-    validation: pd.DataFrame
-    swap: pd.DataFrame
     reliability: pd.DataFrame
     portability: pd.DataFrame
-    target_coverage: pd.DataFrame
-    draft_check: pd.DataFrame
     portal: pd.DataFrame
-    anchors: pd.DataFrame
-    fit: headline.HeadlineFit
+    target_coverage: pd.DataFrame
+    next_season: pd.DataFrame
+    draft_check: pd.DataFrame
+    model: grade.GradeModel
     expectations: ExpectationTables
 
 
 def run_backtest(
     dev_seasons: list[int], validation_season: int, rebuild: bool = False
 ) -> BacktestResult:
-    """Fit the headline on ``dev_seasons`` and judge it on the later ``validation_season``.
+    """Set the grade's weights on ``dev_seasons`` and judge it on ``validation_season``.
 
-    The validation season's rows enter no fit, feature scale or reliability table;
-    they are only scored. ``rebuild`` rebuilds cached season artifacts. The result
-    also carries the serving expectation tables, fit on every play season through
-    ``validation_season``, for the weekly runner to score later seasons with.
+    Reliability, portability and orientation read the development seasons only; the
+    validation season enters no weight and no reliability curve, and is only scored.
+    ``rebuild`` rebuilds cached season artifacts. The result also carries the serving
+    expectation tables, fit on every play season through ``validation_season``, for
+    the weekly runner to score later seasons with.
     """
     dev_seasons = sorted({int(season) for season in dev_seasons})
     if validation_season <= max(dev_seasons):
@@ -887,93 +744,46 @@ def run_backtest(
             "snapshots": with_fbs(data["snapshots"], season),
             "values": player_values(season),
         }
-    # The team model's chronological pregame projection, an unpenalized regressor, so
-    # the traits fit the margin net of the opponent and home field as the team model
-    # sees them. A game without a projection is dropped and counted.
-    matrices = {
-        season: headline.design_matrix(
-            data["snapshots"],
-            data["values"],
-            load_weekly_games(season),
-            season,
-            anchors=projection_anchors(season),
-        )
-        for season, data in seasons.items()
-    }
-    anchors = pd.DataFrame(
-        [
-            {
-                "season": season,
-                "games": matrix.attrs["projection"]["games"],
-                "with_projection": matrix.attrs["projection"]["with_projection"],
-            }
-            for season, matrix in matrices.items()
-        ]
-    ).assign(without_projection=lambda f: f["games"] - f["with_projection"])[ANCHOR_COLUMNS]
-    dev_matrix = pd.concat(
-        [matrices[season] for season in dev_seasons], ignore_index=True
-    )
-    validation_rows = matrices[validation_season]
     dev = {season: seasons[season] for season in dev_seasons}
+    snapshots_by_season = {season: data["snapshots"] for season, data in seasons.items()}
 
-    fit = fit_on(dev_matrix, feature_columns(dev_matrix), dev_seasons)
-    v4_fit = fit_on(dev_matrix, epa_columns(dev_matrix), dev_seasons)
-    validation = pd.concat(
-        [
-            validation_mae(fit, validation_rows, "traits"),
-            validation_mae(v4_fit, validation_rows, "v4"),
-        ],
-        ignore_index=True,
-    )
-
-    headline_rows, v4_rows = paired_split_half(dev, fit, RELIABILITY_GAMES)
-    swap = swap_maes(
-        dev_matrix, validation_rows, dev_seasons, _mae(v4_fit, validation_rows)
-    )
-    swap = swap.merge(
-        _at_games(v4_rows, "reliability_6_v4"), on="position_group", how="left"
-    )
-    swap = swap.merge(
-        _at_games(headline_rows, "reliability_6_headline"),
-        on="position_group",
-        how="left",
-    )
-    swap = replacement_flags(swap)[SWAP_COLUMNS]
-    # A group whose every feature the main fit dropped has no headline to replace v4 with.
-    swap["replaces_value"] = swap["replaces_value"] & swap["position_group"].isin(
-        headline.headline_groups(fit)
-    )
-
-    fit.reliability = headline_rows.dropna(subset=["correlation"])[
-        headline.RELIABILITY_COLUMNS
-    ].reset_index(drop=True)
-    fit.replaces_value = {
-        group: bool(flag)
-        for group, flag in zip(swap["position_group"], swap["replaces_value"])
-    }
-    # For information only: served seasons decide their own mode.
-    fit.poor_coverage = poor_target_coverage(seasons[validation_season]["target_coverage"])
-    snapshots_by_season = {
-        season: data["snapshots"] for season, data in seasons.items()
-    }
+    pooled = pooled_trait_reliability(dev, (grade.WEIGHT_GAMES,))
     matched = matched_transfers(snapshots_by_season)
+    dev_portability = portability_table(
+        {season: snapshots_by_season[season] for season in dev_seasons},
+        {season: frame for season, frame in matched.items() if season in dev_seasons},
+    )
+    orientation = grade.orientations(final_week_rows(dev))
+    for row in orientation[orientation["sign_source"].eq("epa_spearman")].itertuples():
+        log.info(
+            "position grade: %s %s takes sign %+.0f (Spearman with v4 %.3f over %d players)",
+            row.position_group,
+            row.trait,
+            row.sign,
+            row.spearman_epa,
+            row.players,
+        )
+    weights = grade.trait_weights(pooled, dev_portability, orientation)
+    model = grade.GradeModel(weights=weights, dev_seasons=dev_seasons)
+    composite = composite_split_half(dev, model, RELIABILITY_GAMES)
+    model.reliability = composite.dropna(subset=["correlation"])[
+        grade.RELIABILITY_COLUMNS
+    ].reset_index(drop=True)
     return BacktestResult(
-        weights=weights_table(fit),
-        validation=validation,
-        swap=swap,
-        reliability=reliability_table(dev, headline_rows, v4_rows),
-        portability=portability_table(snapshots_by_season, matched),
+        weights=weights,
+        reliability=reliability_table(dev, pooled, composite),
+        portability=dev_portability,
+        portal=portal_match_table(snapshots_by_season, matched),
         target_coverage=pd.concat(
             [data["target_coverage"] for data in seasons.values()], ignore_index=True
         ),
+        next_season=next_season_table(seasons, model, validation_season),
         draft_check=draft_check(
             snapshots_by_season,
             {season: data["values"] for season, data in seasons.items()},
-            fit,
+            model,
         ),
-        portal=portal_match_table(snapshots_by_season, matched),
-        anchors=anchors,
-        fit=fit,
+        model=model,
         expectations=fit_tables_before(validation_season + 1),
     )
 
@@ -1034,17 +844,15 @@ def evaluation_frame(result: BacktestResult) -> pd.DataFrame:
     )
 
 
-def write_backtest(
-    result: BacktestResult, fit: headline.HeadlineFit, cutoff_season: int
-) -> Path:
-    """Save the fit JSON, the frozen serving expectation tables beside it and the long
-    evaluation frame, and print every table as Markdown."""
-    path = headline.save_headline_fit(fit, headline.headline_fit_path(cutoff_season))
+def write_backtest(result: BacktestResult, cutoff_season: int) -> Path:
+    """Save the grade model JSON, the frozen serving expectation tables beside it and
+    the long evaluation frame, and print every table as Markdown."""
+    path = grade.save_grade_model(result.model, grade.grade_model_path(cutoff_season))
     tables = save_expectation_tables(
         result.expectations, expectation_tables_path(path.parent, cutoff_season)
     )
     log.info(
-        "position trait expectation tables from %s written to %s",
+        "position grade expectation tables from %s written to %s",
         result.expectations.source_seasons,
         tables,
     )

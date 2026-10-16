@@ -13,7 +13,7 @@ import pandas as pd
 from backend.config import PROCESSED_DIR
 from backend.players import heisman
 from backend.players import value as player_value
-from backend.players.traits import expectations, headline
+from backend.players.traits import expectations, grade
 
 ARTIFACT_VERSION = 1
 EVALUATION_KIND = heisman.EVALUATION_KIND
@@ -148,52 +148,53 @@ def load_heisman_model(
 
 
 def _validate_trait_pair(
-    fit: headline.HeadlineFit,
+    model: grade.GradeModel,
     tables: expectations.ExpectationTables,
-    fit_cutoff: int,
+    model_cutoff: int,
     cutoff_season: int,
 ) -> None:
-    """The position trait fit and its expectation tables may only serve a later season."""
-    if fit_cutoff >= cutoff_season:
+    """The position grade model and its expectation tables may only serve a later season."""
+    if model_cutoff >= cutoff_season:
         raise ValueError(
-            f"position trait fit with cutoff {fit_cutoff} cannot serve {cutoff_season}"
+            f"position grade model with cutoff {model_cutoff} cannot serve {cutoff_season}"
         )
-    headline.validate_headline_fit(fit, cutoff_season)
+    grade.validate_grade_model(model, cutoff_season)
     if not tables.source_seasons or any(
         int(season) >= cutoff_season for season in tables.source_seasons
     ):
         raise ValueError(
-            f"position trait expectation tables from {tables.source_seasons} "
+            f"position grade expectation tables from {tables.source_seasons} "
             f"cannot serve {cutoff_season}"
         )
 
 
 def trait_model_paths(cutoff_season: int) -> list[Path]:
-    """The latest position trait fit before ``cutoff_season`` and its expectation tables,
-    validated, or ``[]`` when no fit exists. A fit without its tables is an error."""
+    """The latest position grade model before ``cutoff_season`` and its expectation
+    tables, validated, or ``[]`` when no model exists. A model without its tables is
+    an error."""
     models = PROCESSED_DIR / "players" / "models"
     try:
-        fit_path = headline.latest_fit_path(models, cutoff_season)
+        model_path = grade.latest_grade_model_path(models, cutoff_season)
     except FileNotFoundError:
         return []
-    fit_cutoff = headline.fit_cutoff(fit_path)
-    tables_path = expectations.expectation_tables_path(models, fit_cutoff)
+    model_cutoff = grade.grade_cutoff(model_path)
+    tables_path = expectations.expectation_tables_path(models, model_cutoff)
     if not tables_path.exists():
         raise FileNotFoundError(
-            f"{fit_path.name} has no {tables_path.name}; rerun position-traits-fit"
+            f"{model_path.name} has no {tables_path.name}; rerun position-traits-fit"
         )
     _validate_trait_pair(
-        headline.load_headline_fit(fit_path),
+        grade.load_grade_model(model_path),
         expectations.load_expectation_tables(tables_path),
-        fit_cutoff,
+        model_cutoff,
         cutoff_season,
     )
-    return [fit_path, tables_path]
+    return [model_path, tables_path]
 
 
 def export_runtime_bundle(cutoff_season: int, destination: Path) -> Path:
     """Package validated coefficients and existing frozen WPA parameters for CI, plus the
-    latest position trait fit and expectation tables before the season when they exist."""
+    latest position grade model and expectation tables before the season when they exist."""
     from backend.model.ingame import load_baseline_params
 
     load_heisman_model(cutoff_season)
@@ -210,28 +211,28 @@ def export_runtime_bundle(cutoff_season: int, destination: Path) -> Path:
 
 
 def _trait_members(extra: set[str]) -> tuple[str, str, int] | None:
-    """``(fit name, tables name, fit cutoff)`` when ``extra`` is exactly one trait pair."""
+    """``(model name, tables name, model cutoff)`` when ``extra`` is exactly one grade pair."""
     if not extra:
         return None
-    fits = [name for name in extra if name.startswith("players/models/")
-            and headline.FIT_NAME.fullmatch(name.removeprefix("players/models/"))]
-    if len(fits) != 1:
+    models = [name for name in extra if name.startswith("players/models/")
+              and grade.GRADE_NAME.fullmatch(name.removeprefix("players/models/"))]
+    if len(models) != 1:
         raise ValueError("player runtime bundle contains unexpected files")
-    fit_cutoff = headline.fit_cutoff(Path(fits[0]))
+    model_cutoff = grade.grade_cutoff(Path(models[0]))
     tables_name = "players/models/" + expectations.expectation_tables_path(
-        Path("."), fit_cutoff
+        Path("."), model_cutoff
     ).name
-    if extra != {fits[0], tables_name}:
+    if extra != {models[0], tables_name}:
         raise ValueError("player runtime bundle contains unexpected files")
-    return fits[0], tables_name, fit_cutoff
+    return models[0], tables_name, model_cutoff
 
 
 def install_runtime_bundle(bundle: bytes, cutoff_season: int) -> None:
     """Restore only the expected data files after validating every one.
 
     The Heisman model, the WPA baseline and the opponent prior are required. The
-    position trait fit and its expectation tables are optional but travel as a
-    pair whose fit cutoff and table seasons precede ``cutoff_season``.
+    position grade model and its expectation tables are optional but travel as a
+    pair whose model cutoff and table seasons precede ``cutoff_season``.
     """
     from backend.model.ingame import load_baseline_params
 
@@ -253,11 +254,11 @@ def install_runtime_bundle(bundle: bytes, cutoff_season: int) -> None:
         pd.read_parquet(BytesIO(members[prior_name])), cutoff_season
     )
     if traits:
-        fit_name, tables_name, fit_cutoff = traits
+        grade_name, tables_name, model_cutoff = traits
         _validate_trait_pair(
-            headline.headline_fit_from_payload(json.loads(members[fit_name])),
+            grade.grade_model_from_payload(json.loads(members[grade_name])),
             expectations.load_expectation_tables(BytesIO(members[tables_name])),
-            fit_cutoff,
+            model_cutoff,
             cutoff_season,
         )
     for name, data in members.items():
