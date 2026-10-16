@@ -9,9 +9,10 @@ measured, and traits that do not travel (portability at or below zero) get no
 weight and stay on the card as descriptive. A trait whose portability cannot be
 measured keeps its reliability weight. Weights sum to 1 within each position.
 
-A player's ``composite`` is the weighted sum of his oriented trait z-scores
-among qualified FBS players at the group that week, with a trait he has no
-value for counted at the position average (z = 0). He is graded only when he
+A player's ``composite`` is the weighted mean of his oriented, capped trait
+z-scores among qualified FBS players at the group that week, over the traits
+available at the group that week, with an available trait he has no value for
+counted at the position average (z = 0). He is graded only when he
 has his position's primary exposure trait and his traits cover at least
 ``MIN_WEIGHT_COVERAGE`` of the position's weight. The ``grade`` puts the
 composite on the 20 to 80 scale (mean 50, sd 10 among graded players). Nothing
@@ -59,6 +60,10 @@ MIN_WEIGHT_COVERAGE = 0.6
 # independence before any receiver has other-passer targets) then drop out for
 # everyone, while one player with an unusually thin profile still fails the bar.
 MIN_TRAIT_AVAILABILITY = 0.5
+# Trait z-scores are capped at this many sd before weighting: a guard against
+# single-game extremes and thin pools, not a tuned value. Snapshot values and
+# percentiles stay uncapped.
+Z_CAP = 3.0
 GRADE_MEAN, GRADE_SD, GRADE_MIN, GRADE_MAX = 50.0, 10.0, 20.0, 80.0
 WEIGHT_COLUMNS = [
     "position_group",
@@ -331,10 +336,13 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     ``snapshot_week`` holds trait snapshot rows of one week with ``team`` and an
     ``fbs`` boolean. The pool is qualified FBS players at the group. Each weighted
     trait is z-scored on the pool's mean and sd (ddof 1; 0 where sd is 0 or
-    missing) and multiplied by the model's sign. ``composite = Σ w_t z_t`` over the
-    group's weighted traits, with ``z = 0`` for a trait the player has no value for.
-    A trait is available at the group that week when at least
-    ``MIN_TRAIT_AVAILABILITY`` of the pool has a value for it. ``coverage`` is the
+    missing), multiplied by the model's sign and capped at ``±Z_CAP``. A trait is
+    available at the group that week when at least ``MIN_TRAIT_AVAILABILITY`` of the
+    pool has a value for it; an unavailable trait leaves the composite for everyone
+    that week, so every player at the group is graded on the same traits.
+    ``composite = Σ w_t z_t / Σ w_t`` over the available traits (the weights
+    renormalized for the week), with ``z = 0`` for an available trait the player has
+    no value for. ``coverage`` is the
     weight of the available traits he has a value for over the weight of every
     available trait; ``graded`` needs ``has_primary`` (a value for
     ``PRIMARY_TRAITS[group]``) and ``coverage`` of at least ``MIN_WEIGHT_COVERAGE``.
@@ -360,7 +368,7 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     )
     value = pool["value"].astype(float)
     z = _scaled(value, value, [pool["position_group"], pool["trait"]]) * pool["sign"]
-    pool = pool.assign(z=z)[z.notna()]
+    pool = pool.assign(z=z.clip(-Z_CAP, Z_CAP))[z.notna()]
     pool_size = players.groupby("position_group").size()
     share = pool.groupby(["position_group", "trait"])["athlete_id"].nunique().div(
         pool_size, level="position_group"
@@ -375,7 +383,7 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     in_available = pd.MultiIndex.from_frame(pool[["position_group", "trait"]]).isin(available)
     sums = (
         pool.assign(
-            weighted=pool["weight"] * pool["z"],
+            weighted=(pool["weight"] * pool["z"]).where(in_available, 0.0),
             covered=pool["weight"].where(in_available, 0.0),
         )
         .groupby(keys)[["weighted", "covered"]]
@@ -389,7 +397,8 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     denominator = players["position_group"].map(available_weight)
     players["coverage"] = sums["covered"].to_numpy() / denominator.where(denominator.gt(0))
     players["graded"] = players["has_primary"] & players["coverage"].ge(MIN_WEIGHT_COVERAGE)
-    players["composite"] = np.where(players["graded"], sums["weighted"].to_numpy(), np.nan)
+    composite = sums["weighted"].to_numpy() / denominator.where(denominator.gt(0)).to_numpy()
+    players["composite"] = np.where(players["graded"], composite, np.nan)
     return players[ELIGIBILITY_COLUMNS]
 
 
