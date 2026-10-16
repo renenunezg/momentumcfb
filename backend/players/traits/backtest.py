@@ -5,7 +5,8 @@ weekly snapshots, their split-half reliability and the target coverage.
 ``run_backtest`` fits the headline on chronological development seasons, scores a
 later validation season it never saw, and runs the per-group swap test that
 decides where the headline may replace the v4 value. ``write_backtest`` saves
-the fit and one long evaluation frame and prints every table as Markdown.
+the fit, the frozen expectation tables the weekly runner scores with, and one
+long evaluation frame, and prints every table as Markdown.
 """
 
 import logging
@@ -26,7 +27,12 @@ from backend.players.ingest import read_season_source, read_weekly
 from backend.players.traits import TRAITS, headline, snapshots
 from backend.players.traits.context import load_season_context
 from backend.players.traits.defense import defense_traits
-from backend.players.traits.expectations import fit_expectation_tables
+from backend.players.traits.expectations import (
+    ExpectationTables,
+    expectation_tables_path,
+    fit_expectation_tables,
+    save_expectation_tables,
+)
 from backend.players.traits.line import kicking_traits, line_traits
 from backend.players.traits.offense import (
     POOR_TARGET_COVERAGE,
@@ -48,6 +54,8 @@ FIRST_PLAY_SEASON = 2019
 FIRST_PORTAL_SEASON = 2021
 RELIABILITY_GAMES = (4, 6, 8, 12)
 REPLACEMENT_GAMES = 6
+# v4 has no rating (OL) or no usable reliability (K, P) to compare against.
+NEVER_REPLACES = ("OL", "K", "P")
 WEEK_BUCKETS = {"2-5": (2, 5), "6-9": (6, 9), "10+": (10, None)}
 VALUE_COLUMNS = [
     "week",
@@ -204,23 +212,36 @@ def _uncovered_share(coverage: pd.DataFrame) -> float:
     return float(coverage["uncovered"].sum() / incompletions) if incompletions else 0.0
 
 
-def build_season_traits(season: int) -> dict[str, pd.DataFrame]:
-    """Every trait frame, weekly snapshot and reliability table for ``season``.
-
-    Expectation tables are fit on every earlier season on disk from 2019. Writes
-    the snapshots (with ``exposure``), reliability and target coverage, plus the raw
-    frames and per-game credit the backtest pools for reliability.
-    """
-    started = time.perf_counter()
-    ctx = load_season_context(season)
-    earlier = earlier_play_seasons(season)
-    tables = fit_expectation_tables(
+def fit_tables_before(season: int) -> ExpectationTables:
+    """Expectation tables fit on every play season on disk from 2019 up to ``season`` − 1."""
+    return fit_expectation_tables(
         {
             earlier_season: classify_plays(store.read_season_pbp(earlier_season))
-            for earlier_season in earlier
+            for earlier_season in earlier_play_seasons(season)
         },
         before_season=season,
     )
+
+
+def build_season_traits(
+    season: int, tables: ExpectationTables | None = None
+) -> dict[str, pd.DataFrame]:
+    """Every trait frame, weekly snapshot and reliability table for ``season``.
+
+    With ``tables`` (the frozen serving tables) no expectation is refit; a table
+    whose source seasons include ``season`` or a later one is refused. Without it
+    the tables are fit on every earlier season on disk from 2019, as the backtest
+    does. Writes the snapshots (with ``exposure``), reliability and target coverage,
+    plus the raw frames and per-game credit the backtest pools for reliability.
+    """
+    started = time.perf_counter()
+    if tables is None:
+        tables = fit_tables_before(season)
+    elif any(int(source) >= season for source in tables.source_seasons):
+        raise ValueError(
+            f"expectation tables from {tables.source_seasons} cannot rate {season}"
+        )
+    ctx = load_season_context(season)
     recovered = recover_targets(
         ctx.plays, read_weekly(season, "play_stats"), ctx.roster
     )
@@ -229,7 +250,7 @@ def build_season_traits(season: int) -> dict[str, pd.DataFrame]:
     log.info(
         "position traits %s: expectations from %s, uncovered incompletions %.3f%s",
         season,
-        earlier,
+        tables.source_seasons,
         _uncovered_share(coverage),
         " (receptions mode)" if poor else "",
     )
@@ -406,14 +427,15 @@ def replacement_flags(swap: pd.DataFrame) -> pd.DataFrame:
     only when it improves the MAE and is at least as reliable at six games.
 
     Both reliabilities come from ``paired_split_half`` (same athletes, same games). A
-    NaN reliability compares False, so a group without a six-game v4 reliability
-    (OL, K and P in v1) never replaces v4.
+    NaN reliability compares False. The groups in ``NEVER_REPLACES`` (OL, K and P)
+    never replace v4 in v1, whatever their numbers, which are still returned.
     """
     improvement = swap["mae_v4_only"] - swap["mae_with_traits"]
     return swap.assign(
         improvement=improvement,
         replaces_value=improvement.gt(0)
-        & swap["reliability_6_headline"].ge(swap["reliability_6_v4"]),
+        & swap["reliability_6_headline"].ge(swap["reliability_6_v4"])
+        & ~swap["position_group"].isin(NEVER_REPLACES),
     )
 
 
@@ -748,6 +770,7 @@ class BacktestResult:
     target_coverage: pd.DataFrame
     draft_check: pd.DataFrame
     fit: headline.HeadlineFit
+    expectations: ExpectationTables
 
 
 def run_backtest(
@@ -756,7 +779,9 @@ def run_backtest(
     """Fit the headline on ``dev_seasons`` and judge it on the later ``validation_season``.
 
     The validation season's rows enter no fit, feature scale or reliability table;
-    they are only scored. ``rebuild`` rebuilds cached season artifacts.
+    they are only scored. ``rebuild`` rebuilds cached season artifacts. The result
+    also carries the serving expectation tables, fit on every play season through
+    ``validation_season``, for the weekly runner to score later seasons with.
     """
     dev_seasons = sorted({int(season) for season in dev_seasons})
     if validation_season <= max(dev_seasons):
@@ -830,6 +855,7 @@ def run_backtest(
             fit,
         ),
         fit=fit,
+        expectations=fit_tables_before(validation_season + 1),
     )
 
 
@@ -892,8 +918,17 @@ def evaluation_frame(result: BacktestResult) -> pd.DataFrame:
 def write_backtest(
     result: BacktestResult, fit: headline.HeadlineFit, cutoff_season: int
 ) -> Path:
-    """Save the fit JSON and the long evaluation frame, and print every table as Markdown."""
+    """Save the fit JSON, the frozen serving expectation tables beside it and the long
+    evaluation frame, and print every table as Markdown."""
     path = headline.save_headline_fit(fit, headline.headline_fit_path(cutoff_season))
+    tables = save_expectation_tables(
+        result.expectations, expectation_tables_path(path.parent, cutoff_season)
+    )
+    log.info(
+        "position trait expectation tables from %s written to %s",
+        result.expectations.source_seasons,
+        tables,
+    )
     store.write_processed(
         evaluation_frame(result), *traits_artifact(f"evaluation_{cutoff_season}")
     )

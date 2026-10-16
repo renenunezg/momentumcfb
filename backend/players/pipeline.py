@@ -14,8 +14,8 @@ from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.etl import store
 from backend.players import artifacts, heisman, value
 from backend.players.credit import DEFENSE_ROLES, OFFENSE_SHARES
-from backend.players.ingest import players_dir
-from backend.players.traits import MODEL_VERSION, backtest, headline
+from backend.players.ingest import players_dir, read_season_source
+from backend.players.traits import MODEL_VERSION, backtest, expectations, headline
 from backend.players.traits.snapshots import TRAIT_SNAPSHOT_COLUMNS
 
 log = logging.getLogger(__name__)
@@ -63,6 +63,7 @@ POSITION_TRAIT_COLUMNS = [
     "uncertainty",
     "replaces_value",
     "in_headline",
+    "fbs",
 ]
 HISTORY_ARTIFACT = ("players", "heisman_history.parquet")
 META_ARTIFACT = ("players", "player_model_meta.parquet")
@@ -78,6 +79,21 @@ def run_player_values(season: int, as_of: datetime) -> pd.DataFrame:
         outputs["reliability"], "players", "reliability", f"{season}.parquet"
     )
     return outputs["player_values"]
+
+
+def _fit_cutoff(path: Path) -> int:
+    return int(re.fullmatch(r"position_traits_(\d{4})\.json", path.name).group(1))
+
+
+def frozen_expectation_tables(fit_path: Path) -> expectations.ExpectationTables:
+    """The serving expectation tables saved with the fit at ``fit_path``."""
+    path = expectations.expectation_tables_path(fit_path.parent, _fit_cutoff(fit_path))
+    if not path.exists():
+        raise FileNotFoundError(
+            f"no frozen expectation tables {path.name} beside {fit_path.name} in "
+            f"{fit_path.parent}; run position-traits-fit and restore both artifacts"
+        )
+    return expectations.load_expectation_tables(path)
 
 
 def latest_headline_fit_path(season: int) -> Path:
@@ -131,12 +147,17 @@ def headline_rows(
 def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     """Score the season's weekly trait snapshots with the latest earlier headline fit.
 
-    The fit is frozen: it is only loaded, never refit, and a fit whose development
-    seasons include ``season`` is refused.
+    The fit and its expectation tables are frozen: they are only loaded, never refit,
+    and a fit whose development seasons include ``season`` is refused. Each row
+    carries ``fbs`` from the team's classification; only FBS rows are published.
     """
-    fit = headline.load_headline_fit(latest_headline_fit_path(season))
+    fit_path = latest_headline_fit_path(season)
+    fit = headline.load_headline_fit(fit_path)
     headline.validate_headline_fit(fit, season)
-    snapshot = backtest.build_season_traits(season)["snapshots"].astype({"athlete_id": str})
+    tables = frozen_expectation_tables(fit_path)
+    snapshot = backtest.build_season_traits(season, tables=tables)["snapshots"].astype(
+        {"athlete_id": str}
+    )
     values = backtest.player_values(season)
     scored = headline_rows(snapshot, values, fit)
     traits = snapshot[[*TRAIT_SNAPSHOT_COLUMNS, "exposure"]].assign(uncertainty=np.nan)
@@ -147,10 +168,13 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         [traits, scored[[*TRAIT_SNAPSHOT_COLUMNS, "uncertainty", "in_headline"]]],
         ignore_index=True,
     )
+    teams = read_season_source(season, "teams")
+    fbs_schools = set(teams.loc[teams["classification"].eq("fbs"), "school"])
     out = out.assign(
         replaces_value=out["position_group"].map(fit.replaces_value).eq(True),
         as_of=as_of.isoformat(),
         model_version=MODEL_VERSION,
+        fbs=out["team"].isin(fbs_schools),
     )[POSITION_TRAIT_COLUMNS]
     store.write_processed(out, *position_traits_artifact(season))
     log.info(
@@ -312,8 +336,15 @@ def read_player_artifacts(season: int) -> dict[str, pd.DataFrame]:
 
 
 def _latest_trait_week(season: int) -> pd.DataFrame:
-    """The newest weekly trait snapshot; the artifact keeps every week."""
+    """The newest weekly trait snapshot, FBS players only; the artifact keeps every week.
+
+    An artifact without the ``fbs`` flag predates the filter and is not published.
+    """
     if not PROCESSED_DIR.joinpath(*position_traits_artifact(season)).exists():
         return pd.DataFrame(columns=POSITION_TRAIT_COLUMNS)
     traits = store.read_processed(*position_traits_artifact(season))
-    return traits[traits["week"].eq(traits["week"].max())].reset_index(drop=True)
+    if "fbs" not in traits.columns:
+        log.warning(f"position traits {season}: artifact has no fbs flag, not published")
+        return pd.DataFrame(columns=POSITION_TRAIT_COLUMNS)
+    latest = traits["week"].eq(traits["week"].max()) & traits["fbs"].eq(True)
+    return traits[latest].reset_index(drop=True)
