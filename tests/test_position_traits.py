@@ -14,6 +14,7 @@ from backend.players.traits import (
     context,
     defense,
     expectations,
+    headline,
     line,
     offense,
     register,
@@ -1104,3 +1105,140 @@ def test_portability_without_final_week_only_pairs_the_same_week_across_seasons(
     last_week = transfers.portability({2021: before, 2022: after}, moved).iloc[0]
     assert (last_week["stayers"], last_week["movers"]) == (4, 10)
     assert last_week["stay_slope"] == pytest.approx(2.0)
+
+
+# Week 1 qualified QBs on qb.explosive: qa1 0.2 (A), qb1 0.1 (B), qc1 0.1 (C), qd1 0.0 (D);
+# qa2 (A, 0.0) is unqualified, so it is standardized but sets no scale. Mean 0.1,
+# sd (ddof 1) sqrt(0.02 / 3), so z(qa1) = sqrt(1.5) and z(qa2) = -sqrt(1.5). A's shares are
+# 30 / 40 and 10 / 40: aggregate 0.75 sqrt(1.5) - 0.25 sqrt(1.5) = sqrt(1.5) / 2. C's lone QB
+# has z 0, so the week-2 A-versus-C difference is sqrt(1.5) / 2 (0.6124). Week 2's own
+# snapshot (qa1 at 0.3) would give a different number.
+EXPECTED_WEEK1_Z_DIFFERENCE = np.sqrt(1.5) / 2
+
+
+def matrix_context():
+    """Weeks 1 to 3; A hosts B, then C, then D, and qa1's explosive rate rises each week."""
+    games = pd.DataFrame({
+        "game_id": [1, 2, 3, 4, 5, 6],
+        "season": 2024,
+        "model_week": [1, 1, 2, 2, 3, 3],
+        "completed": True,
+        "neutral_site": [False, False, False, True, False, False],
+        "home_team": ["A", "C", "A", "B", "A", "B"],
+        "away_team": ["B", "D", "C", "D", "D", "E"],
+        "home_classification": "fbs",
+        "away_classification": ["fbs", "fbs", "fbs", "fbs", "fbs", "fcs"],
+        "home_points": [21, 10, 28, 17, 35, 40],
+        "away_points": [14, 13, 20, 24, 7, 3],
+    })
+    rows = []
+    for week, qa1 in ((1, 0.2), (2, 0.3), (3, 0.4)):
+        for athlete, team, value, exposure, qualified in (
+            ("qa1", "A", qa1, 30.0 * week, True), ("qa2", "A", 0.0, 10.0 * week, False),
+            ("qb1", "B", 0.1, 40.0 * week, True), ("qc1", "C", 0.1, 40.0 * week, True),
+            ("qd1", "D", 0.0, 40.0 * week, True),
+        ):
+            rows.append({"season": 2024, "week": week, "athlete_id": athlete, "team": team, "position_group": "QB",
+                         "games": week, "trait": "qb.explosive", "value": value, "qualified": qualified,
+                         "exposure": exposure})
+    snaps = pd.DataFrame(rows)
+    values = pd.DataFrame({"season": 2024, "week": 1, "athlete_id": ["qa1", "qb1"], "team": ["A", "B"],
+                           "position_group": "QB", "games": 1, "shrunk_per_game": [1.0, -1.0]})
+    return snaps, values, games
+
+
+def synthetic_matrix(seed):
+    """Four dev seasons of 300 games; margin = 3 QB:qb.explosive + 2 home_field + N(0, 1).
+
+    RB:rb.breakaway and the other features have no effect, and one game in ten is neutral.
+    """
+    rng = np.random.default_rng(seed)
+    null_features = ["RB:rb.breakaway", "WR:rec.explosive", "DL:def.havoc", "QB:epa"]
+    parts = []
+    for season in (2020, 2021, 2022, 2023):
+        n = 300
+        frame = pd.DataFrame({
+            "game_id": season * 1000 + np.arange(n),
+            "season": season,
+            "model_week": rng.integers(2, 15, n),
+            "home_field": (rng.random(n) > 0.1).astype(float),
+            "QB:qb.explosive": rng.normal(size=n),
+        })
+        for name in null_features:
+            frame[name] = rng.normal(size=n)
+        frame["margin"] = 3 * frame["QB:qb.explosive"] + 2 * frame["home_field"] + rng.normal(size=n)
+        parts.append(frame)
+    return pd.concat(parts, ignore_index=True)
+
+
+def test_design_matrix_uses_the_prior_week_snapshot_and_skips_week_one():
+    snaps, values, games = matrix_context()  # 3 weeks, home QB explosive rises each week
+    m = headline.design_matrix(snaps, values, games, 2024)
+    assert m["model_week"].min() == 2
+    row = m[m["game_id"].eq(games.loc[games["model_week"].eq(2), "game_id"].iloc[0])].iloc[0]
+    assert row["QB:qb.explosive"] == pytest.approx(EXPECTED_WEEK1_Z_DIFFERENCE)
+    assert (row["margin"], row["home_field"]) == (8, 1)
+    # the FCS opponent's game is not a row; B-D was neutral; every registered trait is a column
+    assert sorted(m["game_id"]) == [3, 4, 5]
+    assert m.set_index("game_id").loc[4, "home_field"] == 0
+    assert {"QB:qb.floor", "WR:rec.target_share", "TE:rec.target_share", "OL:ol.protection", "QB:epa"} <= set(m.columns)
+    # v4 epa week 1: qa1 +1, qb1 -1 (mean 0, sd sqrt(2)); A's share of qa1 is 0.75, C has no v4 row
+    assert row["QB:epa"] == pytest.approx(0.75 / np.sqrt(2))
+    with pytest.raises(ValueError, match="exposure"):
+        headline.design_matrix(snaps.drop(columns="exposure"), values, games, 2024)
+
+
+def test_fit_headline_recovers_a_planted_weight_and_drops_noise():
+    m = synthetic_matrix(seed=0)  # margin = 3*QB:qb.explosive + 2*home_field + noise, plus a pure-noise column RB:rb.breakaway
+    fit = headline.fit_headline(m, dev_seasons=[2020, 2021, 2022, 2023])
+    assert fit.weights["QB:qb.explosive"] == pytest.approx(3.0, abs=0.3)
+    assert "RB:rb.breakaway" in fit.dropped
+    assert fit.dropped_reason["RB:rb.breakaway"] == "insignificant"
+    assert fit.penalty > 0
+
+
+def test_headline_fit_refuses_to_score_its_own_seasons(tmp_path):
+    fit = headline.fit_headline(synthetic_matrix(seed=1), dev_seasons=[2020, 2021, 2022, 2023])
+    headline.save_headline_fit(fit, tmp_path / "fit.json")
+    loaded = headline.load_headline_fit(tmp_path / "fit.json")
+    headline.validate_headline_fit(loaded, 2025)
+    pd.testing.assert_series_equal(loaded.analytic_se, fit.analytic_se)
+    assert loaded.dropped_reason == fit.dropped_reason
+    with pytest.raises(ValueError):
+        headline.validate_headline_fit(loaded, 2023)
+
+
+def test_score_players_uses_the_fit_scale_replacement_and_reliability():
+    snapshot = pd.DataFrame({
+        "week": 6, "athlete_id": ["q1", "q2", "q3", "q4", "q5"], "team": "A", "position_group": "QB",
+        "games": [2, 4, 6, 12, 1], "trait": "qb.explosive", "value": [0.0, 0.1, 0.2, 0.3, 0.9],
+        "qualified": [True, True, True, True, False],
+    })
+    legs = snapshot.assign(trait="qb.legs", value=[5.0, 0.0, 0.0, 0.0, 0.0])  # dropped: weight 0
+    snapshot = pd.concat([snapshot, legs], ignore_index=True)
+    values = pd.DataFrame({"week": 6, "athlete_id": ["q1", "q4"], "position_group": "QB", "games": 4,
+                           "shrunk_per_game": [-1.0, 1.0]})
+    features = ["QB:qb.explosive", "QB:epa"]
+    fit = headline.HeadlineFit(
+        weights=pd.Series({"QB:qb.explosive": 2.0, "QB:epa": 1.0, "home_field": 3.0, "intercept": 0.0}),
+        penalty=1.0, loso_sd=pd.Series(0.1, index=features), jackknife_sd=pd.Series(0.15, index=features),
+        analytic_se=pd.Series(0.12, index=features), dropped=["QB:qb.legs"],
+        dropped_reason={"QB:qb.legs": "insignificant"}, dev_seasons=[2022, 2023],
+        model_version=headline.MODEL_VERSION,
+        feature_scale=pd.DataFrame({"feature": features, "mean": 0.0, "sd": [0.5, 1.0]}),
+        reliability=pd.DataFrame({"position_group": "QB", "games": [4, 8], "correlation": [0.5, 0.7]}),
+        replaces_value={"QB": True},
+    )
+    out = headline.score_players(snapshot, values, fit).set_index("athlete_id")
+    # qualified mean 0.15, sd sqrt(0.05 / 3); q5 is standardized on that scale but sets none of it
+    z = (np.array([0.0, 0.1, 0.2, 0.3, 0.9]) - 0.15) / np.sqrt(0.05 / 3)
+    epa = np.array([-1, 0, 0, 1, 0]) / np.sqrt(2)
+    raw = 2.0 * z / 0.5 + 1.0 * epa / 1.0
+    assert out["raw_score"].to_numpy() == pytest.approx(raw)
+    assert out["headline"].to_numpy() == pytest.approx(raw - np.quantile(raw[:4], 0.3))
+    assert out["headline_percentile"].tolist()[:4] == pytest.approx([0.0, 100 / 3, 200 / 3, 100.0])
+    assert np.isnan(out.loc["q5", "headline_percentile"])
+    # r(2) = 0.25 from r(0) = 0, r(6) = 0.6 between 4 and 8, flat at 0.7 beyond 8
+    r = np.array([0.25, 0.5, 0.6, 0.7, 0.125])
+    assert out["uncertainty"].to_numpy() == pytest.approx(np.std(raw[:4], ddof=1) * np.sqrt(1 - r))
+    assert out["replaces_value"].all()
