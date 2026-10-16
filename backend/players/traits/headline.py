@@ -13,6 +13,7 @@ the same sum, in points per game above the group's replacement level.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -390,8 +391,35 @@ def score_players(
     return players[OUTPUT_COLUMNS]
 
 
+FIT_NAME = re.compile(r"position_traits_(\d{4})\.json")
+
+
 def headline_fit_path(cutoff_season: int) -> Path:
     return PROCESSED_DIR / "players" / "models" / f"position_traits_{cutoff_season}.json"
+
+
+def fit_cutoff(path: Path) -> int:
+    """The cutoff season in a ``position_traits_<cutoff>.json`` file name."""
+    match = FIT_NAME.fullmatch(Path(path).name)
+    if not match:
+        raise ValueError(f"{path} is not a position trait fit")
+    return int(match.group(1))
+
+
+def latest_fit_path(models_dir: Path, season: int) -> Path:
+    """The fit in ``models_dir`` with the greatest cutoff before ``season``."""
+    cutoffs = {
+        int(match.group(1)): path
+        for path in Path(models_dir).glob("position_traits_*.json")
+        if (match := FIT_NAME.fullmatch(path.name))
+    }
+    earlier = [cutoff for cutoff in cutoffs if cutoff < season]
+    if not earlier:
+        raise FileNotFoundError(
+            f"no position trait headline fit with a cutoff before {season} in {models_dir}; "
+            "run position-traits-fit first"
+        )
+    return cutoffs[max(earlier)]
 
 
 def _floats(series: pd.Series) -> dict[str, float]:
@@ -426,7 +454,10 @@ def save_headline_fit(fit: HeadlineFit, path: Path) -> Path:
 
 
 def load_headline_fit(path: Path) -> HeadlineFit:
-    payload = json.loads(Path(path).read_text())
+    return headline_fit_from_payload(json.loads(Path(path).read_text()))
+
+
+def headline_fit_from_payload(payload: dict) -> HeadlineFit:
     return HeadlineFit(
         weights=pd.Series(payload["weights"], dtype=float),
         penalty=float(payload["penalty"]),

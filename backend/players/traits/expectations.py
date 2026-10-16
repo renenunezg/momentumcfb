@@ -162,11 +162,12 @@ def save_expectation_tables(tables: ExpectationTables, path: Path) -> Path:
     return path
 
 
-def load_expectation_tables(path: Path) -> ExpectationTables:
-    table = pq.read_table(path)
+def load_expectation_tables(source) -> ExpectationTables:
+    """Tables from a path or a binary file object written by ``save_expectation_tables``."""
+    table = pq.read_table(source)
     metadata = table.schema.metadata or {}
     if SOURCE_SEASONS not in metadata:
-        raise ValueError(f"{path} has no source_seasons metadata")
+        raise ValueError("expectation tables have no source_seasons metadata")
     frame = _typed(table.to_pandas())
     parts = {
         name: frame.loc[frame["table"].eq(name), [*keys, "expected", "plays"]].reset_index(drop=True)
