@@ -299,9 +299,14 @@ jobs:
         run: |
           poetry run python -m backend ingest-players --seasons "$SEASON" --max-calls "$CFBD_MAX_CALLS"
           poetry run python -m backend player-values --seasons "$SEASON"
-          poetry run python -m backend position-traits --seasons "$SEASON"
           poetry run python -m backend heisman --season "$SEASON"
+          # A trait failure must not block the Heisman publish; the job still fails after it.
+          if ! poetry run python -m backend position-traits --seasons "$SEASON"; then
+            trait_status=1
+            echo "position traits failed"
+          fi
           poetry run python -m backend publish-players --season "$SEASON"
+          exit "${trait_status:-0}"
 
       - name: Preserve player checkpoints even after partial failure
         if: always() && steps.player-cache.outcome == 'success'

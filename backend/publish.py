@@ -812,6 +812,23 @@ def publish_grading(season: int) -> dict[str, int]:
         }
 
 
+def _publish_position_traits(conn, traits: pd.DataFrame, season: int) -> bool:
+    """Whether ``cfb.position_traits`` takes part in this player publish.
+
+    It is skipped, with one log line and never an error, when the season has no
+    trait artifact or the table has not been migrated yet.
+    """
+    if traits.empty:
+        log.info(f"position traits {season}: no artifact, skipping cfb.position_traits")
+        return False
+    if not _table_exists(conn, "position_traits"):
+        log.info(
+            f"position traits {season}: {CFB_SCHEMA}.position_traits is absent, skipping it"
+        )
+        return False
+    return True
+
+
 def publish_players(season: int) -> dict[str, int]:
     """Publish player values, the Heisman board, its history, and model meta."""
     from backend.db import engine
@@ -820,12 +837,12 @@ def publish_players(season: int) -> dict[str, int]:
     artifacts = read_player_artifacts(season)
     by_season = ("player_values", "heisman_board")
     full_refresh = ("heisman_history", "player_model_meta")
-    # Traits are optional: a missing artifact must not block the Heisman publish.
-    if artifacts["position_traits"].empty:
-        log.info(f"position traits {season}: no artifact, skipping cfb.position_traits")
-    else:
-        by_season = (*by_season, "position_traits")
     with engine.begin() as conn:
+        # Traits are optional: a missing artifact or table must not block the Heisman publish.
+        if _publish_position_traits(
+            conn, artifacts.get("position_traits", pd.DataFrame()), season
+        ):
+            by_season = (*by_season, "position_traits")
         required_evaluation = {
             "heisman_evaluation_kind",
             "heisman_evaluation_week",

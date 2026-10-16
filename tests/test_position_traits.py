@@ -1725,6 +1725,66 @@ def test_player_artifacts_tolerate_a_missing_trait_artifact(monkeypatch, tmp_pat
     assert set(artifacts) >= {"player_values", "heisman_board", "heisman_history", "player_model_meta"}
 
 
+def _fake_publish_connection(statements, regclass):
+    """A connection whose schema checks pass and whose ``to_regclass`` returns ``regclass``."""
+    from types import SimpleNamespace
+
+    def execute(statement, params=None):
+        text = str(statement)
+        statements.append((text, params))
+        if "to_regclass" in text:
+            return SimpleNamespace(scalar=lambda: regclass)
+        if "count(*)" in text:
+            return SimpleNamespace(scalar=lambda: 0)
+        return SimpleNamespace(scalar=lambda: "YES")
+
+    return SimpleNamespace(execute=execute)
+
+
+def test_player_publish_skips_an_unmigrated_trait_table_and_still_publishes_heisman(monkeypatch, caplog):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from backend import db, publish
+
+    statements = []
+    connection = _fake_publish_connection(statements, regclass=None)
+    monkeypatch.setitem(
+        db.__dict__,
+        "engine",
+        SimpleNamespace(begin=lambda: nullcontext(connection), connect=lambda: nullcontext(connection)),
+    )
+    artifacts = {
+        name: pd.DataFrame()
+        for name in ("player_values", "heisman_board", "heisman_history", "player_model_meta")
+    }
+    artifacts["position_traits"] = _two_week_traits()
+    monkeypatch.setattr(pipeline, "read_player_artifacts", lambda season: artifacts)
+    evaluation = {
+        "heisman_evaluation_kind", "heisman_evaluation_week", "heisman_evaluation_seasons",
+        "heisman_winner_pool_coverage", "heisman_ballot_share_covered",
+    }
+    monkeypatch.setattr(publish, "_table_columns", lambda connection, table: evaluation)
+    with caplog.at_level("INFO", logger=publish.log.name):
+        counts = publish.publish_players(2026)
+    assert set(counts) == {"player_values", "heisman_board", "heisman_history", "player_model_meta"}
+    deleted = [text for text, _ in statements if text.startswith("DELETE")]
+    assert len(deleted) == 2 and not any("position_traits" in text for text in deleted)
+    assert any("position_traits is absent" in message for message in caplog.messages)
+
+    # A migrated table joins the season refresh.
+    statements.clear()
+    connection = _fake_publish_connection(statements, regclass="cfb.position_traits")
+    monkeypatch.setitem(
+        db.__dict__,
+        "engine",
+        SimpleNamespace(begin=lambda: nullcontext(connection), connect=lambda: nullcontext(connection)),
+    )
+    monkeypatch.setattr(pd.DataFrame, "to_sql", lambda frame, *args, **kwargs: None)
+    assert "position_traits" in publish.publish_players(2026)
+    assert any(text.startswith("DELETE FROM cfb.position_traits") for text, _ in statements)
+
+
 def test_migration_declares_the_trait_table_contract():
     sql = next(Path("sql").glob("*_position_traits.sql")).read_text()
     for column in ("replaces_value boolean", "in_headline boolean", "uncertainty double precision"):
