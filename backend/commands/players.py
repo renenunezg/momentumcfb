@@ -133,8 +133,8 @@ def handle_position_traits_fit(args: Namespace) -> None:
     from backend.players.traits.backtest import run_backtest, write_backtest
 
     result = run_backtest(args.dev_seasons, args.validate, rebuild=args.rebuild)
-    path = write_backtest(result, result.fit, max(args.dev_seasons))
-    log.info("position trait headline fit written to %s", path)
+    path = write_backtest(result, max(args.dev_seasons))
+    log.info("position grade model written to %s", path)
 
 
 def handle_position_traits(args: Namespace) -> None:

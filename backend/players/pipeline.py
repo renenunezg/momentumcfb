@@ -14,7 +14,7 @@ from backend.etl import store
 from backend.players import artifacts, heisman, value
 from backend.players.credit import DEFENSE_ROLES, OFFENSE_SHARES
 from backend.players.ingest import players_dir, read_season_source
-from backend.players.traits import MODEL_VERSION, backtest, expectations, headline
+from backend.players.traits import MODEL_VERSION, backtest, expectations, grade
 from backend.players.traits.snapshots import TRAIT_SNAPSHOT_COLUMNS
 
 log = logging.getLogger(__name__)
@@ -58,10 +58,8 @@ def heisman_board_artifact(season: int, week: int) -> tuple[str, ...]:
 
 POSITION_TRAIT_COLUMNS = [
     *TRAIT_SNAPSHOT_COLUMNS,
-    "exposure",
     "uncertainty",
-    "replaces_value",
-    "in_headline",
+    "in_grade",
     "fbs",
     "poor_coverage",
 ]
@@ -81,108 +79,94 @@ def run_player_values(season: int, as_of: datetime) -> pd.DataFrame:
     return outputs["player_values"]
 
 
-def frozen_expectation_tables(fit_path: Path) -> expectations.ExpectationTables:
-    """The serving expectation tables saved with the fit at ``fit_path``."""
-    path = expectations.expectation_tables_path(fit_path.parent, headline.fit_cutoff(fit_path))
+def frozen_expectation_tables(model_path: Path) -> expectations.ExpectationTables:
+    """The serving expectation tables saved with the grade model at ``model_path``."""
+    path = expectations.expectation_tables_path(model_path.parent, grade.grade_cutoff(model_path))
     if not path.exists():
         raise FileNotFoundError(
-            f"no frozen expectation tables {path.name} beside {fit_path.name} in "
-            f"{fit_path.parent}; run position-traits-fit and restore both artifacts"
+            f"no frozen expectation tables {path.name} beside {model_path.name} in "
+            f"{model_path.parent}; run position-traits-fit and restore both artifacts"
         )
     return expectations.load_expectation_tables(path)
 
 
-def latest_headline_fit_path(season: int) -> Path:
-    """The frozen headline fit with the greatest cutoff before ``season``."""
-    return headline.latest_fit_path(store.PROCESSED_DIR / "players" / "models", season)
+def latest_grade_model_path(season: int) -> Path:
+    """The frozen grade model with the greatest cutoff before ``season``."""
+    return grade.latest_grade_model_path(store.PROCESSED_DIR / "players" / "models", season)
 
 
-def headline_rows(
-    snapshot: pd.DataFrame, player_values: pd.DataFrame, fit: headline.HeadlineFit
-) -> pd.DataFrame:
-    """One ``trait = "headline"`` snapshot-shaped row per scored player-week."""
+def grade_rows(snapshot: pd.DataFrame, model: grade.GradeModel) -> pd.DataFrame:
+    """One ``trait = "grade"`` snapshot-shaped row per qualified FBS player-week."""
+    weeks = sorted(snapshot["week"].unique())
     scored = pd.concat(
         [
-            headline.score_players(
-                snapshot[snapshot["week"].eq(week)],
-                player_values[player_values["week"].eq(week)],
-                fit,
-            ).assign(week=week)
-            for week in sorted(snapshot["week"].unique())
+            grade.score_grades(snapshot[snapshot["week"].eq(week)], model).assign(week=week)
+            for week in weeks
         ],
         ignore_index=True,
     )
     keys = ["week", "athlete_id", "position_group"]
-    players = snapshot.groupby(keys, as_index=False).agg(
-        qualified=("qualified", lambda flags: bool(flags.eq(True).any()))
-    )
     identity = snapshot.drop_duplicates(keys)[
         [*keys, "season", "athlete_name", "team", "team_id"]
     ]
-    rows = scored.merge(players, on=keys).merge(identity, on=keys)
+    rows = scored.merge(identity, on=keys)
     return rows.assign(
-        trait="headline",
-        value=rows["headline"],
-        percentile=rows["headline_percentile"],
-        kind="fitted",
+        trait="grade",
+        value=rows["grade"],
+        percentile=rows["grade_percentile"],
+        kind="graded",
+        qualified=True,
     )
 
 
 def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
-    """Score the season's weekly trait snapshots with the latest earlier headline fit.
+    """Score the season's weekly trait snapshots with the latest earlier grade model.
 
-    The fit and its expectation tables are frozen: they are only loaded, never refit,
-    and a fit whose development seasons include ``season`` is refused. The season
-    decides its own receptions-or-targets mode from its own target coverage; every
-    row records it in ``poor_coverage``, which the table does not publish. Each row
-    carries ``fbs`` from the team's classification; headline rows exist for qualified
-    FBS players only, and only FBS rows are published.
+    The model and its expectation tables are frozen: they are only loaded, never
+    refit, and a model whose development seasons include ``season`` is refused. The
+    season decides its own receptions-or-targets mode from its own target coverage;
+    every row records it in ``poor_coverage``, which the table does not publish. Each
+    row carries ``fbs`` from the team's classification; grade rows exist for
+    qualified FBS players only, and only FBS rows are published. ``in_grade`` marks
+    trait rows whose trait has positive weight at the group, and every grade row.
     """
-    fit_path = latest_headline_fit_path(season)
-    fit = headline.load_headline_fit(fit_path)
-    headline.validate_headline_fit(fit, season)
-    tables = frozen_expectation_tables(fit_path)
+    model_path = latest_grade_model_path(season)
+    model = grade.load_grade_model(model_path)
+    grade.validate_grade_model(model, season)
+    tables = frozen_expectation_tables(model_path)
     teams = read_season_source(season, "teams")
     fbs_schools = set(teams.loc[teams["classification"].eq("fbs"), "school"])
     built = backtest.build_season_traits(season, tables=tables)
     coverage = built["target_coverage"]
     poor = backtest.poor_target_coverage(coverage)
     snapshot = built["snapshots"].astype({"athlete_id": str})
-    # The headline pool is qualified FBS players, so the flag precedes scoring.
+    # The grade pool is qualified FBS players, so the flag precedes scoring.
     snapshot = snapshot.assign(fbs=snapshot["team"].isin(fbs_schools))
-    values = backtest.player_values(season)
-    scored = headline_rows(snapshot, values, fit)
-    with_headline = headline.headline_groups(fit)
-    traits = snapshot[[*TRAIT_SNAPSHOT_COLUMNS, "exposure"]].assign(uncertainty=np.nan)
-    feature = traits["position_group"] + ":" + traits["trait"]
-    traits["in_headline"] = (
-        feature.isin(fit.weights.index)
-        & ~feature.isin(fit.dropped)
-        & traits["position_group"].isin(with_headline)
-    )
-    scored = scored.assign(in_headline=True, as_of=None, model_version=None)
+    scored = grade_rows(snapshot, model)
+    weighted = model.weights[model.weights["weight"].gt(0)]
+    weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
+    traits = snapshot[TRAIT_SNAPSHOT_COLUMNS].assign(uncertainty=np.nan)
+    traits["in_grade"] = [
+        (group, trait) in weighted_keys
+        for group, trait in zip(traits["position_group"], traits["trait"])
+    ]
+    scored = scored.assign(in_grade=True, as_of=None, model_version=None)
     out = pd.concat(
-        [traits, scored[[*TRAIT_SNAPSHOT_COLUMNS, "uncertainty", "in_headline"]]],
+        [traits, scored[[*TRAIT_SNAPSHOT_COLUMNS, "uncertainty", "in_grade"]]],
         ignore_index=True,
     )
-    replaces = {
-        group: bool(flag) and group in with_headline
-        for group, flag in fit.replaces_value.items()
-    }
     out = out.assign(
-        replaces_value=out["position_group"].map(replaces).eq(True),
         as_of=as_of.isoformat(),
         model_version=MODEL_VERSION,
         fbs=out["team"].isin(fbs_schools),
         poor_coverage=poor,
     )[POSITION_TRAIT_COLUMNS]
     store.write_processed(out, *position_traits_artifact(season))
-    without = [group for group in headline.GROUPS if group not in with_headline]
+    graded = sorted(grade.graded_groups(model))
     log.info(
         f"position traits {season}: {scored['athlete_id'].nunique()} qualified FBS players "
-        f"scored over {scored['week'].nunique()} weeks with the fit through "
-        f"{max(fit.dev_seasons)}; {sum(replaces.values())} groups replace v4; "
-        f"no headline (every feature dropped) at {', '.join(without) or 'no group'}; "
+        f"graded over {scored['week'].nunique()} weeks with the model through "
+        f"{max(model.dev_seasons)}; graded groups {', '.join(graded) or 'none'}; "
         f"{'receptions' if poor else 'targets'} mode, uncovered incompletions "
         f"{backtest.uncovered_share(coverage):.3f}"
     )

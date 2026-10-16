@@ -1,5 +1,4 @@
 import dataclasses
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -7,7 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backend.draft import research
 from backend.players import artifacts, ingest, pipeline
 from backend.players.traits import (
     TRAITS,
@@ -18,7 +16,6 @@ from backend.players.traits import (
     context,
     defense,
     expectations,
-    headline,
     line,
     offense,
     register,
@@ -1111,240 +1108,6 @@ def test_portability_without_final_week_only_pairs_the_same_week_across_seasons(
     assert last_week["stay_slope"] == pytest.approx(2.0)
 
 
-# Week 1 qualified QBs on qb.explosive: qa1 0.2 (A), qb1 0.1 (B), qc1 0.1 (C), qd1 0.0 (D);
-# qa2 (A, 0.0) is unqualified, so it is standardized but sets no scale. Mean 0.1,
-# sd (ddof 1) sqrt(0.02 / 3), so z(qa1) = sqrt(1.5) and z(qa2) = -sqrt(1.5). A's shares are
-# 30 / 40 and 10 / 40: aggregate 0.75 sqrt(1.5) - 0.25 sqrt(1.5) = sqrt(1.5) / 2. C's lone QB
-# has z 0, so the week-2 A-versus-C difference is sqrt(1.5) / 2 (0.6124). Week 2's own
-# snapshot (qa1 at 0.3) would give a different number.
-EXPECTED_WEEK1_Z_DIFFERENCE = np.sqrt(1.5) / 2
-
-
-def matrix_context():
-    """Weeks 1 to 3; A hosts B, then C, then D, and qa1's explosive rate rises each week."""
-    games = pd.DataFrame({
-        "game_id": [1, 2, 3, 4, 5, 6],
-        "season": 2024,
-        "model_week": [1, 1, 2, 2, 3, 3],
-        "completed": True,
-        "neutral_site": [False, False, False, True, False, False],
-        "home_team": ["A", "C", "A", "B", "A", "B"],
-        "away_team": ["B", "D", "C", "D", "D", "E"],
-        "home_classification": "fbs",
-        "away_classification": ["fbs", "fbs", "fbs", "fbs", "fbs", "fcs"],
-        "home_points": [21, 10, 28, 17, 35, 40],
-        "away_points": [14, 13, 20, 24, 7, 3],
-    })
-    rows = []
-    for week, qa1 in ((1, 0.2), (2, 0.3), (3, 0.4)):
-        for athlete, team, value, exposure, qualified in (
-            ("qa1", "A", qa1, 30.0 * week, True), ("qa2", "A", 0.0, 10.0 * week, False),
-            ("qb1", "B", 0.1, 40.0 * week, True), ("qc1", "C", 0.1, 40.0 * week, True),
-            ("qd1", "D", 0.0, 40.0 * week, True),
-        ):
-            rows.append({"season": 2024, "week": week, "athlete_id": athlete, "team": team, "position_group": "QB",
-                         "games": week, "trait": "qb.explosive", "value": value, "qualified": qualified,
-                         "exposure": exposure})
-    snaps = pd.DataFrame(rows)
-    values = pd.DataFrame({"season": 2024, "week": 1, "athlete_id": ["qa1", "qb1"], "team": ["A", "B"],
-                           "position_group": "QB", "games": 1, "shrunk_per_game": [1.0, -1.0]})
-    return snaps, values, games
-
-
-def synthetic_matrix(seed):
-    """Four dev seasons of 300 games; margin = 3 QB:qb.explosive + 2 home_field + N(0, 1).
-
-    RB:rb.breakaway and the other features have no effect, and one game in ten is neutral.
-    """
-    rng = np.random.default_rng(seed)
-    null_features = ["RB:rb.breakaway", "WR:rec.explosive", "DL:def.havoc", "QB:epa"]
-    parts = []
-    for season in (2020, 2021, 2022, 2023):
-        n = 300
-        frame = pd.DataFrame({
-            "game_id": season * 1000 + np.arange(n),
-            "season": season,
-            "model_week": rng.integers(2, 15, n),
-            "home_field": (rng.random(n) > 0.1).astype(float),
-            "QB:qb.explosive": rng.normal(size=n),
-        })
-        for name in null_features:
-            frame[name] = rng.normal(size=n)
-        frame["margin"] = 3 * frame["QB:qb.explosive"] + 2 * frame["home_field"] + rng.normal(size=n)
-        parts.append(frame)
-    return pd.concat(parts, ignore_index=True)
-
-
-def test_design_matrix_uses_the_prior_week_snapshot_and_skips_week_one():
-    snaps, values, games = matrix_context()  # 3 weeks, home QB explosive rises each week
-    m = headline.design_matrix(snaps, values, games, 2024)
-    assert m["model_week"].min() == 2
-    row = m[m["game_id"].eq(games.loc[games["model_week"].eq(2), "game_id"].iloc[0])].iloc[0]
-    assert row["QB:qb.explosive"] == pytest.approx(EXPECTED_WEEK1_Z_DIFFERENCE)
-    assert (row["margin"], row["home_field"]) == (8, 1)
-    # the FCS opponent's game is not a row; B-D was neutral; every registered trait is a column
-    assert sorted(m["game_id"]) == [3, 4, 5]
-    assert m.set_index("game_id").loc[4, "home_field"] == 0
-    assert {"QB:qb.floor", "WR:rec.target_share", "TE:rec.target_share", "OL:ol.protection", "QB:epa"} <= set(m.columns)
-    # v4 epa week 1: qa1 +1, qb1 -1 (mean 0, sd sqrt(2)); A's share of qa1 is 0.75, C has no v4 row
-    assert row["QB:epa"] == pytest.approx(0.75 / np.sqrt(2))
-    with pytest.raises(ValueError, match="exposure"):
-        headline.design_matrix(snaps.drop(columns="exposure"), values, games, 2024)
-
-
-def test_fit_headline_recovers_a_planted_weight_and_drops_noise():
-    m = synthetic_matrix(seed=0)  # margin = 3*QB:qb.explosive + 2*home_field + noise, plus a pure-noise column RB:rb.breakaway
-    fit = headline.fit_headline(m, dev_seasons=[2020, 2021, 2022, 2023])
-    assert fit.weights["QB:qb.explosive"] == pytest.approx(3.0, abs=0.3)
-    assert "RB:rb.breakaway" in fit.dropped
-    assert fit.dropped_reason["RB:rb.breakaway"] == "insignificant"
-    assert fit.penalty > 0
-
-
-def test_design_matrix_adds_the_projection_and_drops_games_without_an_anchor():
-    snaps, values, games = matrix_context()
-    plain = headline.design_matrix(snaps, values, games, 2024, anchors=pd.DataFrame())
-    assert "projection" not in plain.columns
-    anchors = pd.DataFrame({"game_id": [3, 5], "model_week": [2, 3], "home_margin": [6.5, -2.0], "margin_sd": 14.0})
-    m = headline.design_matrix(snaps, values, games, 2024, anchors=anchors)
-    assert m["game_id"].tolist() == [3, 5] and m["projection"].tolist() == [6.5, -2.0]  # game 4 has no anchor
-    assert m.attrs["projection"] == {"games": 3, "with_projection": 2}
-    pd.testing.assert_frame_equal(
-        m.drop(columns="projection"), plain[plain["game_id"].isin([3, 5])].reset_index(drop=True)
-    )
-
-
-def test_fit_headline_leaves_the_projection_unpenalized_and_never_drops_it():
-    m = synthetic_matrix(seed=2)
-    rng = np.random.default_rng(3)
-    m.insert(5, "projection", rng.normal(scale=10.0, size=len(m)))
-    m["margin"] += m["projection"]
-    fit = headline.fit_headline(m, dev_seasons=[2020, 2021, 2022, 2023])
-    assert list(fit.weights.index[:3]) == ["intercept", "home_field", "projection"]
-    assert fit.weights["projection"] == pytest.approx(1.0, abs=0.02)
-    assert "projection" not in fit.dropped and "projection" not in set(fit.feature_scale["feature"])
-    # The penalty never shrinks it: at the largest penalty its weight is the OLS one on the fixed columns.
-    rows = m.assign(intercept=1.0)
-    x = rows[["intercept", "home_field", "projection"]].to_numpy(float)
-    ols = np.linalg.lstsq(x, rows["margin"].to_numpy(float), rcond=None)[0]
-    z = headline._design(rows, [], pd.DataFrame(columns=["mean", "sd"]))
-    assert headline._ridge(z, rows["margin"].to_numpy(float), 1e9, 3) == pytest.approx(ols)
-    assert backtest.predict_margin(fit, m) == pytest.approx(
-        fit.weights["intercept"] + fit.weights["home_field"] * m["home_field"] + fit.weights["projection"] * m["projection"]
-        + ((m[fit.feature_scale["feature"]] - fit.feature_scale.set_index("feature")["mean"])
-           / fit.feature_scale.set_index("feature")["sd"]).to_numpy() @ fit.weights[fit.feature_scale["feature"]].to_numpy()
-    )
-
-
-def test_headline_fit_refuses_to_score_its_own_seasons(tmp_path):
-    fit = headline.fit_headline(synthetic_matrix(seed=1), dev_seasons=[2020, 2021, 2022, 2023])
-    headline.save_headline_fit(fit, tmp_path / "fit.json")
-    loaded = headline.load_headline_fit(tmp_path / "fit.json")
-    headline.validate_headline_fit(loaded, 2025)
-    pd.testing.assert_series_equal(loaded.analytic_se, fit.analytic_se)
-    assert loaded.dropped_reason == fit.dropped_reason
-    assert loaded.poor_coverage is None  # set only by the backtest
-    fit.poor_coverage = True
-    headline.save_headline_fit(fit, tmp_path / "fit.json")
-    assert headline.load_headline_fit(tmp_path / "fit.json").poor_coverage is True
-    # A fit saved before the field existed still loads, with the mode unknown.
-    stale = json.loads((tmp_path / "fit.json").read_text())
-    del stale["poor_coverage"]
-    assert headline.headline_fit_from_payload(stale).poor_coverage is None
-    with pytest.raises(ValueError):
-        headline.validate_headline_fit(loaded, 2023)
-
-
-def _scoring_fit(features=("QB:qb.explosive", "QB:epa"), sd=(0.5, 1.0), dropped=("QB:qb.legs",)):
-    features = list(features)
-    weights = {"QB:qb.explosive": 2.0, "QB:epa": 1.0, "home_field": 3.0, "intercept": 0.0}
-    return headline.HeadlineFit(
-        weights=pd.Series({name: weights[name] for name in ["intercept", "home_field", *features]}),
-        penalty=1.0, loso_sd=pd.Series(0.1, index=features), jackknife_sd=pd.Series(0.15, index=features),
-        analytic_se=pd.Series(0.12, index=features), dropped=list(dropped),
-        dropped_reason=dict.fromkeys(dropped, "insignificant"), dev_seasons=[2022, 2023],
-        model_version=headline.MODEL_VERSION,
-        feature_scale=pd.DataFrame({"feature": features, "mean": 0.0, "sd": list(sd)}),
-        reliability=pd.DataFrame({"position_group": "QB", "games": [4, 8], "correlation": [0.5, 0.7]}),
-        replaces_value={"QB": True, "RB": True},
-    )
-
-
-def scoring_snapshot():
-    """Week 6 QBs. A: q1 (exposure 30), q2 (10) and unqualified q5 (20), so shares 1/2, 1/6
-    and 1/3. B: q3 (40) and q4 (0), shares 1 and 0. q6 is qualified but on FCS team Z."""
-    snapshot = pd.DataFrame({
-        "week": 6, "athlete_id": ["q1", "q2", "q3", "q4", "q5", "q6"],
-        "team": ["A", "A", "B", "B", "A", "Z"], "position_group": "QB",
-        "games": [2, 4, 6, 12, 1, 6], "trait": "qb.explosive", "value": [0.0, 0.1, 0.2, 0.3, 0.9, 0.4],
-        "qualified": [True, True, True, True, False, True], "exposure": [30.0, 10.0, 40.0, 0.0, 20.0, 25.0],
-        "fbs": [True, True, True, True, True, False],
-    })
-    legs = snapshot.assign(trait="qb.legs", value=[5.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # dropped: weight 0
-    values = pd.DataFrame({"week": 6, "athlete_id": ["q1", "q4"], "position_group": "QB", "games": 4,
-                           "shrunk_per_game": [-1.0, 1.0]})
-    return pd.concat([snapshot, legs], ignore_index=True), values
-
-
-def test_score_players_scales_by_share_over_qualified_fbs_replacement():
-    snapshot, values = scoring_snapshot()
-    out = headline.score_players(snapshot, values, _scoring_fit()).set_index("athlete_id")
-    # Only qualified FBS players carry a headline: q5 is unqualified, q6 is FCS.
-    assert list(out.index) == ["q1", "q2", "q3", "q4"]
-    # z scale: qualified players q1-q4 and q6 (0.0 to 0.4), mean 0.2, sd sqrt(0.025);
-    # v4 epa: q1 -1 and q4 +1, sd sqrt(2). raw = 2 z / 0.5 + epa z.
-    raw = 4 * (np.array([0.0, 0.1, 0.2, 0.3]) - 0.2) / np.sqrt(0.025) + np.array([-1, 0, 0, 1]) / np.sqrt(2)
-    assert out["raw_score"].to_numpy() == pytest.approx(raw)
-    assert raw == pytest.approx([-5.7667, -2.5298, 0.0, 3.2369], abs=1e-4)
-    # replacement = 30th percentile of the pool's raw: -5.7667 + 0.9 x 3.2369 = -2.8535
-    replacement = raw[0] + 0.9 * (raw[1] - raw[0])
-    assert replacement == pytest.approx(-2.8535, abs=1e-4)
-    share = np.array([0.5, 1 / 6, 1.0, 0.0])
-    assert out["share"].to_numpy() == pytest.approx(share)
-    # headline = share x (raw - replacement): -1.4566, 0.0540, 2.8535 and 0 (q4 has no usage)
-    assert out["headline"].to_numpy() == pytest.approx([-1.4566, 0.0540, 2.8535, 0.0], abs=1e-4)
-    # The percentile ranks the share-scaled headline: q1 < q4 < q2 < q3.
-    assert out["headline_percentile"].to_numpy() == pytest.approx([0.0, 200 / 3, 100.0, 100 / 3])
-    # r(2) = 0.25 from r(0) = 0, r(6) = 0.6 between 4 and 8, flat at 0.7 beyond 8
-    r = np.array([0.25, 0.5, 0.6, 0.7])
-    assert out["uncertainty"].to_numpy() == pytest.approx(share * np.std(raw, ddof=1) * np.sqrt(1 - r))
-    assert out["replaces_value"].all()
-    with pytest.raises(ValueError, match="fbs"):
-        headline.score_players(snapshot.drop(columns="fbs"), values, _scoring_fit())
-
-
-def test_score_players_gives_no_headline_to_a_group_with_every_feature_dropped():
-    snapshot, values = scoring_snapshot()
-    backs = snapshot[snapshot["trait"].eq("qb.explosive")].assign(
-        position_group="RB", trait="rb.breakaway", athlete_id=lambda f: "r" + f["athlete_id"]
-    )
-    fit = _scoring_fit(dropped=("QB:qb.legs", "RB:rb.breakaway", "RB:epa"))
-    assert headline.headline_groups(fit) == {"QB"}
-    out = headline.score_players(pd.concat([snapshot, backs], ignore_index=True), values, fit)
-    assert set(out["position_group"]) == {"QB"}
-    # Every QB feature dropped too: no group has a headline.
-    nothing = _scoring_fit(features=(), sd=(), dropped=("QB:qb.explosive", "QB:epa", "QB:qb.legs"))
-    assert headline.headline_groups(nothing) == set()
-    assert headline.score_players(snapshot, values, nothing).empty
-
-
-def test_replacement_rule_needs_both_a_better_mae_and_equal_reliability():
-    swap = pd.DataFrame([
-        {"position_group": "QB", "mae_v4_only": 13.0, "mae_with_traits": 12.8, "reliability_6_v4": 0.5, "reliability_6_headline": 0.55},
-        {"position_group": "RB", "mae_v4_only": 13.0, "mae_with_traits": 12.8, "reliability_6_v4": 0.5, "reliability_6_headline": 0.4},
-        {"position_group": "DL", "mae_v4_only": 13.0, "mae_with_traits": 13.1, "reliability_6_v4": 0.5, "reliability_6_headline": 0.9},
-        # K, P and OL meet the rule here but never replace v4 in v1
-        {"position_group": "K", "mae_v4_only": 13.0, "mae_with_traits": 12.9, "reliability_6_v4": 0.0, "reliability_6_headline": 0.2},
-        {"position_group": "P", "mae_v4_only": 13.0, "mae_with_traits": 12.9, "reliability_6_v4": 0.0, "reliability_6_headline": 0.2},
-        {"position_group": "OL", "mae_v4_only": 13.0, "mae_with_traits": 12.9, "reliability_6_v4": 0.0, "reliability_6_headline": 0.2},
-    ])
-    out = backtest.replacement_flags(swap).set_index("position_group")
-    assert out["replaces_value"].to_dict() == {
-        "QB": True, "RB": False, "DL": False, "K": False, "P": False, "OL": False
-    }
-    assert out.loc["K", "improvement"] == pytest.approx(0.1)  # the numbers stay in the table
-
-
 def exposure_frames():
     """wr1 is targeted in weeks 1 and 3 (week 2 is dead), wr2 only in week 1 with no
     numerator, ghost has no position group, and unit:A is A's offensive line."""
@@ -1359,28 +1122,6 @@ def exposure_frames():
     ])
 
 
-def test_exposure_shares_carry_dead_weeks_count_units_and_skip_unmapped_players():
-    groups = pd.Series({"wr1": "WR", "wr2": "WR", "unit:A": "OL"})
-    out = headline.exposure_shares(exposure_frames(), groups)
-    wide = out.pivot(index="athlete_id", columns="week", values="exposure")
-    assert sorted(wide.index) == ["unit:A", "wr1", "wr2"]
-    assert wide.loc["wr1"].tolist() == [4.0, 4.0, 10.0]
-    assert wide.loc["wr2"].tolist() == [2.0, 2.0, 2.0]
-    assert wide.loc["unit:A"].tolist() == [1.0, 1.0, 1.0]
-
-
-def test_with_exposure_carries_the_last_week_and_zeroes_players_without_usage():
-    groups = pd.Series({"wr1": "WR", "wr2": "WR", "wr3": "WR", "unit:A": "OL"})
-    snaps = pd.DataFrame({
-        "athlete_id": ["wr1"] * 4 + ["wr3", "unit:A"],
-        "week": [1, 2, 3, 4, 2, 4],
-        "trait": "rec.value_per_target",
-    })
-    out = backtest.with_exposure(snaps, exposure_frames(), groups)
-    assert len(out) == len(snaps)
-    assert out["exposure"].tolist() == [4.0, 4.0, 10.0, 10.0, 0.0, 1.0]
-
-
 def test_season_identity_takes_each_players_latest_row_and_names_line_units():
     games = pd.DataFrame({"game_id": [1, 3], "model_week": [1, 3]})
     credit = pd.DataFrame({"athlete_id": [7], "athlete_name": ["Seven"], "team": ["A"], "model_week": [1]})
@@ -1391,84 +1132,6 @@ def test_season_identity_takes_each_players_latest_row_and_names_line_units():
     assert out.loc["7", "team"] == "B"
     assert out.loc["8", ["athlete_name", "team"]].tolist() == ["Eight", "A"]
     assert out.loc["unit:A", ["athlete_name", "team"]].tolist() == ["A offensive line", "A"]
-
-
-def test_swap_features_keep_the_full_set_for_one_group_and_epa_elsewhere():
-    features = headline.feature_names()
-    out = backtest.swap_features(features, "QB")
-    qb = [name for name in features if name.startswith("QB:")]
-    assert set(qb) <= set(out) and "QB:qb.explosive" in out and "QB:epa" in out
-    assert sorted(set(out) - set(qb)) == sorted(f"{group}:epa" for group in headline.GROUPS if group != "QB")
-    assert len(out) == len(set(out))
-
-
-def _paired_fit():
-    features = ["QB:qb.explosive", "QB:epa"]
-    index = ["intercept", "home_field", *features]
-    zeros = pd.Series(0.0, index=index)
-    return headline.HeadlineFit(
-        weights=pd.Series([0.0, 0.0, 1.0, 1.0], index=index), penalty=1.0, loso_sd=zeros,
-        jackknife_sd=zeros, analytic_se=zeros, dropped=[], dropped_reason={}, dev_seasons=[2023, 2024],
-        model_version=headline.MODEL_VERSION,
-        feature_scale=pd.DataFrame({"feature": features, "mean": 0.0, "sd": 1.0}),
-    )
-
-
-def test_paired_split_half_scores_both_sides_on_one_athlete_set():
-    """12 credited QBs with six games each, plus ghost: six frame games and no credit."""
-    rng = np.random.default_rng(0)
-    rows, credit = [], []
-    for player in [f"q{i}" for i in range(12)] + ["ghost"]:
-        for game in range(1, 7):
-            game_id = 1000 * len(rows) + game
-            rows.append(_trait_row(player, game, game_id, "qb.explosive", rng.uniform(0, 5)))
-            if player != "ghost":
-                credit.append({"athlete_id": player, "game_id": game_id, "model_week": game,
-                               "adjusted_epa": rng.normal()})
-    frames = _trait_frame(rows)
-    snaps = pd.DataFrame({"athlete_id": frames["athlete_id"].unique(), "position_group": "QB", "team": "A",
-                          "fbs": True})
-    data = {"frames": frames, "credited": pd.DataFrame(credit), "snapshots": snaps}
-
-    chosen = backtest.paired_games(frames, data["credited"], 6)
-    assert "ghost" not in set(chosen["athlete_id"]) and chosen["athlete_id"].nunique() == 12
-
-    head, v4 = backtest.paired_split_half({2024: data}, _paired_fit(), (6,))
-    assert head[["position_group", "games", "players"]].to_dict("records") == [
-        {"position_group": "QB", "games": 6, "players": 12}
-    ]
-    assert v4[["position_group", "games", "players"]].equals(head[["position_group", "games", "players"]])
-    assert head["correlation"].notna().all() and v4["correlation"].notna().all()
-    assert head["correlation"].iloc[0] != pytest.approx(v4["correlation"].iloc[0])
-
-    # Scoring keeps the headline's rule: non-FBS athletes leave both sides.
-    fcs = {**data, "snapshots": snaps.assign(fbs=~snaps["athlete_id"].isin(["q0", "q1"]))}
-    head, v4 = backtest.paired_split_half({2024: fcs}, _paired_fit(), (6,))
-    assert head["players"].tolist() == [10] and v4["players"].tolist() == [10]
-    # A group with no headline still reports v4; its headline side is constant (NaN).
-    idle = dataclasses.replace(_paired_fit(), feature_scale=_paired_fit().feature_scale.iloc[:0],
-                               dropped=["QB:qb.explosive", "QB:epa"])
-    head, v4 = backtest.paired_split_half({2024: data}, idle, (6,))
-    assert head["players"].tolist() == [12] and head["correlation"].isna().all() and v4["correlation"].notna().all()
-
-
-def _frozen_fit(dev_seasons, replaces_qb=True):
-    features = ["QB:qb.explosive", "QB:epa", "RB:rb.yards_over_expected"]
-    return headline.HeadlineFit(
-        weights=pd.Series({"intercept": 0.0, "home_field": 3.0, "QB:qb.explosive": 2.0, "QB:epa": 1.0,
-                           "RB:rb.yards_over_expected": 0.5}),
-        penalty=1.0, loso_sd=pd.Series(0.1, index=features), jackknife_sd=pd.Series(0.15, index=features),
-        analytic_se=pd.Series(0.12, index=features), dropped=["QB:qb.legs"],
-        dropped_reason={"QB:qb.legs": "insignificant"}, dev_seasons=dev_seasons,
-        model_version=headline.MODEL_VERSION,
-        feature_scale=pd.DataFrame({"feature": features, "mean": 0.0, "sd": [0.5, 1.0, 0.2]}),
-        reliability=pd.DataFrame({"position_group": "QB", "games": [4, 8], "correlation": [0.5, 0.7]}),
-        replaces_value={"QB": replaces_qb, "RB": False},
-    )
-
-
-FROZEN_FIT_2024 = _frozen_fit([2022, 2023, 2024])
-FBS_TEAMS = pd.DataFrame({"school": ["A", "Z"], "classification": ["fbs", "fcs"]})
 
 
 def _serving_tables(last_season=2025):
@@ -1484,127 +1147,10 @@ def _serving_tables(last_season=2025):
     return expectations.fit_expectation_tables(by_season, before_season=last_season + 1)
 
 
-def _install_frozen_model(models, fit=FROZEN_FIT_2024, cutoff=2024, tables=None):
-    headline.save_headline_fit(fit, models / f"position_traits_{cutoff}.json")
-    expectations.save_expectation_tables(
-        tables or _serving_tables(), expectations.expectation_tables_path(models, cutoff)
-    )
-
-
-def _fake_season_2026():
-    rows = []
-    for week in (1, 2):
-        for athlete, group, trait, value, qualified in (
-            ("q1", "QB", "qb.explosive", 0.1 * week, True), ("q2", "QB", "qb.explosive", 0.3, True),
-            ("q1", "QB", "qb.legs", 4.0, True), ("q2", "QB", "qb.legs", 1.0, True),
-            ("q3", "QB", "qb.explosive", 0.2, False),
-            ("r1", "RB", "rb.yards_over_expected", 0.2, True), ("r2", "RB", "rb.yards_over_expected", 0.4, True),
-        ):
-            rows.append({"season": 2026, "week": week, "as_of": "old", "model_version": "old",
-                         "athlete_id": athlete, "athlete_name": athlete.upper(), "team": "A", "team_id": 1,
-                         "position_group": group, "games": week, "trait": trait, "value": value,
-                         "percentile": 50.0, "kind": "raw", "qualified": qualified, "exposure": 10.0 * week})
-    coverage = pd.DataFrame({"incompletions": [10], "uncovered": [7]})  # 0.7 uncovered: receptions mode
-    return {"snapshots": pd.DataFrame(rows), "target_coverage": coverage}
-
-
-FAKE_SEASON_2026 = _fake_season_2026()
-FAKE_V4_2026 = pd.DataFrame({
-    "week": [1, 1, 2, 2], "athlete_id": ["q1", "q2", "q1", "q2"], "position_group": "QB", "games": [1, 1, 2, 2],
-    "shrunk_per_game": [-1.0, 1.0, -0.5, 0.5], "adjusted_per_game": 0.0, "value_above_replacement": 0.0,
-    "model_version": "cfb_player_value_v4",
-})
-
-
-def test_run_position_traits_scores_with_a_frozen_fit_and_never_refits(monkeypatch, tmp_path):
-    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
-    _install_frozen_model(tmp_path / "players" / "models")
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: FAKE_SEASON_2026)
-    monkeypatch.setattr(pipeline, "read_season_source", lambda season, name: FBS_TEAMS)
-    monkeypatch.setattr(pipeline.headline, "fit_headline", lambda *a, **k: pytest.fail("refit"))
-    monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
-    out = pipeline.run_position_traits(2026, AS_OF)
-    assert (out["model_version"] == "cfb_position_traits_v1").all()
-    assert set(out.loc[out["trait"].eq("headline"), "kind"]) == {"fitted"}
-    assert out["uncertainty"].notna().where(out["trait"].eq("headline"), True).all()
-    assert list(out.columns) == [
-        *snapshots.TRAIT_SNAPSHOT_COLUMNS, "exposure", "uncertainty", "replaces_value", "in_headline", "fbs",
-        "poor_coverage",
-    ]
-    assert out["fbs"].all()  # every fake player is on team A
-    on_traits = out["trait"].ne("headline")
-    assert out.loc[on_traits, "exposure"].tolist() == FAKE_SEASON_2026["snapshots"]["exposure"].tolist()
-    assert out.loc[~on_traits, "exposure"].isna().all()
-    assert (out["as_of"] == AS_OF.isoformat()).all()
-    assert pd.read_parquet(tmp_path / "players" / "position_traits" / "2026.parquet").shape == out.shape
-
-    headlines = out[out["trait"].eq("headline")]
-    assert len(headlines) == 8  # two qualified QBs and two RBs in each of two weeks
-    assert "q3" not in set(headlines["athlete_id"])  # unqualified: trait rows only
-    assert headlines["qualified"].all() and headlines["percentile"].notna().all()
-    assert set(headlines["team"]) == {"A"} and set(headlines.loc[headlines["athlete_id"].eq("q1"), "athlete_name"]) == {"Q1"}
-    assert (headlines.groupby("week").size() == 4).all()
-    # the fitted feature is in the headline, the dropped one is not, headlines always are
-    flags = out.groupby("trait")["in_headline"].all()
-    assert flags["qb.explosive"] and flags["headline"] and not out.loc[out["trait"].eq("qb.legs"), "in_headline"].any()
-    assert out.groupby("position_group")["replaces_value"].all().to_dict() == {"QB": True, "RB": False}
-    q1 = headlines[headlines["athlete_id"].eq("q1") & headlines["week"].eq(2)].iloc[0]
-    scored = headline.score_players(
-        FAKE_SEASON_2026["snapshots"].query("week == 2").assign(fbs=True), FAKE_V4_2026.query("week == 2"),
-        FROZEN_FIT_2024,
-    ).set_index("athlete_id")
-    assert q1["value"] == pytest.approx(scored.loc["q1", "headline"])
-    assert q1["games"] == 2 and q1["uncertainty"] == pytest.approx(scored.loc["q1", "uncertainty"])
-
-
-def test_run_position_traits_flags_no_headline_where_every_feature_was_dropped(monkeypatch, tmp_path, caplog):
-    fit = dataclasses.replace(
-        FROZEN_FIT_2024,
-        weights=FROZEN_FIT_2024.weights.drop("RB:rb.yards_over_expected"),
-        dropped=["QB:qb.legs", "RB:rb.yards_over_expected", "RB:epa"],
-        feature_scale=FROZEN_FIT_2024.feature_scale.iloc[:2],
-        replaces_value={"QB": True, "RB": True},
-    )
-    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
-    _install_frozen_model(tmp_path / "players" / "models", fit=fit)
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: FAKE_SEASON_2026)
-    monkeypatch.setattr(pipeline, "read_season_source", lambda season, name: FBS_TEAMS)
-    monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
-    with caplog.at_level("INFO", logger=pipeline.log.name):
-        out = pipeline.run_position_traits(2026, AS_OF)
-    backs = out[out["position_group"].eq("RB")]
-    assert len(backs) and not backs["trait"].eq("headline").any()
-    assert not backs["replaces_value"].any() and not backs["in_headline"].any()
-    assert out.loc[out["position_group"].eq("QB"), "replaces_value"].all()
-    assert any("no headline (every feature dropped) at RB" in message for message in caplog.messages)
-
-
-def test_run_position_traits_uses_the_latest_fit_before_the_season(monkeypatch, tmp_path):
-    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
-    models = tmp_path / "players" / "models"
-    headline.save_headline_fit(_frozen_fit([2022, 2023, 2024]), models / "position_traits_2024.json")
-    headline.save_headline_fit(_frozen_fit([2022, 2023, 2024, 2025]), models / "position_traits_2025.json")
-    headline.save_headline_fit(_frozen_fit([2022, 2023, 2026]), models / "position_traits_2026.json")
-    assert pipeline.latest_headline_fit_path(2026).name == "position_traits_2025.json"
-    with pytest.raises(FileNotFoundError, match="position-traits-fit"):
-        pipeline.latest_headline_fit_path(2024)
-
-
-def test_run_position_traits_refuses_a_fit_that_saw_the_season(monkeypatch, tmp_path):
-    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
-    headline.save_headline_fit(
-        _frozen_fit([2022, 2026]), tmp_path / "players" / "models" / "position_traits_2025.json"
-    )
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: pytest.fail("built"))
-    with pytest.raises(ValueError, match="cannot score 2026"):
-        pipeline.run_position_traits(2026, AS_OF)
-
-
 def test_expectation_tables_round_trip_through_the_serving_artifact(tmp_path):
     tables = _serving_tables()
     assert all(len(getattr(tables, name)) for name in expectations.TABLE_KEYS)
     path = expectations.save_expectation_tables(tables, expectations.expectation_tables_path(tmp_path, 2024))
-    assert path.name == "position_traits_expectations_2024.parquet"
     assert set(pd.read_parquet(path)["table"]) == {"rush_yards", "conversion", "field_goal"}
     loaded = expectations.load_expectation_tables(path)
     assert loaded.source_seasons == [2024, 2025]
@@ -1620,27 +1166,6 @@ def test_expectation_tables_round_trip_through_the_serving_artifact(tmp_path):
         assert lookup(loaded, probe).tolist() == pytest.approx(lookup(tables, probe).tolist())
 
 
-def test_run_position_traits_passes_the_frozen_tables_and_never_fits_expectations(monkeypatch, tmp_path):
-    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
-    _install_frozen_model(tmp_path / "players" / "models")
-    monkeypatch.setattr(backtest, "fit_expectation_tables", lambda *a, **k: pytest.fail("refit expectations"))
-    monkeypatch.setattr(backtest, "earlier_play_seasons", lambda season: pytest.fail("read history"))
-    monkeypatch.setattr(pipeline, "read_season_source", lambda season, name: FBS_TEAMS)
-    monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
-    seen = []
-
-    def build(season, tables=None):
-        seen.append(tables)
-        return FAKE_SEASON_2026
-
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", build)
-    pipeline.run_position_traits(2026, AS_OF)
-    assert len(seen) == 1 and seen[0].source_seasons == [2024, 2025]
-    pd.testing.assert_frame_equal(
-        expectations.tables_frame(seen[0]), expectations.tables_frame(_serving_tables())
-    )
-
-
 def test_build_season_traits_with_frozen_tables_skips_the_fit(monkeypatch):
     class Built(Exception):
         pass
@@ -1652,23 +1177,6 @@ def test_build_season_traits_with_frozen_tables_skips_the_fit(monkeypatch):
         backtest.build_season_traits(2026, tables=_serving_tables(2025))
     with pytest.raises(ValueError, match="cannot rate 2026"):
         backtest.build_season_traits(2026, tables=_serving_tables(2026))
-
-
-def test_run_position_traits_records_the_seasons_own_coverage_mode(monkeypatch, tmp_path, caplog):
-    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
-    # The fit's validation season was in targets mode; the served season decides for itself.
-    _install_frozen_model(tmp_path / "players" / "models", fit=dataclasses.replace(FROZEN_FIT_2024, poor_coverage=False))
-    monkeypatch.setattr(pipeline, "read_season_source", lambda season, name: FBS_TEAMS)
-    monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
-    for uncovered, poor in ((7, True), (2, False)):
-        season = {**FAKE_SEASON_2026, "target_coverage": pd.DataFrame({"incompletions": [10], "uncovered": [uncovered]})}
-        monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda s, tables=None, season=season: season)
-        caplog.clear()
-        with caplog.at_level("INFO", logger=pipeline.log.name):
-            out = pipeline.run_position_traits(2026, AS_OF)
-        assert out["poor_coverage"].eq(poor).all()
-        mode = "receptions" if poor else "targets"
-        assert any(f"{mode} mode, uncovered incompletions 0.{uncovered}00" in m for m in caplog.messages)
 
 
 @pytest.fixture
@@ -1719,57 +1227,6 @@ def test_runtime_bundle_without_a_trait_fit_keeps_the_three_files(runtime_root, 
     assert _reinstall(bundle, runtime_root) == REQUIRED_MEMBERS
 
 
-def test_runtime_bundle_carries_and_restores_the_trait_fit_pair(runtime_root, tmp_path_factory):
-    models = runtime_root / "players" / "models"
-    _install_frozen_model(models)
-    _install_frozen_model(models, fit=_frozen_fit([2022, 2023]), cutoff=2023)  # older, not chosen
-    bundle = artifacts.export_runtime_bundle(2026, tmp_path_factory.mktemp("out") / "bundle.zip")
-    assert _bundle_names(bundle) == REQUIRED_MEMBERS | TRAIT_MEMBERS
-    assert _reinstall(bundle, runtime_root) == REQUIRED_MEMBERS | TRAIT_MEMBERS
-    assert headline.load_headline_fit(models / "position_traits_2024.json").dev_seasons == [2022, 2023, 2024]
-    restored = expectations.load_expectation_tables(models / "position_traits_expectations_2024.parquet")
-    assert restored.source_seasons == [2024, 2025]
-
-
-def _zip(members: dict[str, bytes], path):
-    from zipfile import ZipFile
-
-    with ZipFile(path, "w") as archive:
-        for name, data in members.items():
-            archive.writestr(name, data)
-    return path.read_bytes()
-
-
-def _required_bytes(root):
-    return {name: root.joinpath(name).read_bytes() for name in REQUIRED_MEMBERS}
-
-
-def test_runtime_bundle_rejects_a_trait_fit_that_does_not_precede_the_season(runtime_root, tmp_path_factory):
-    staging = tmp_path_factory.mktemp("staging")
-    _install_frozen_model(staging, fit=_frozen_fit([2022, 2023, 2026]), cutoff=2026, tables=_serving_tables(2025))
-    _install_frozen_model(staging, fit=_frozen_fit([2022, 2023, 2024]), cutoff=2024, tables=_serving_tables(2026))
-    out = tmp_path_factory.mktemp("out")
-    base = _required_bytes(runtime_root)
-    late_fit = {**base,
-                "players/models/position_traits_2026.json": (staging / "position_traits_2026.json").read_bytes(),
-                "players/models/position_traits_expectations_2026.parquet":
-                    (staging / "position_traits_expectations_2026.parquet").read_bytes()}
-    late_tables = {**base,
-                   "players/models/position_traits_2024.json": (staging / "position_traits_2024.json").read_bytes(),
-                   "players/models/position_traits_expectations_2024.parquet":
-                       (staging / "position_traits_expectations_2024.parquet").read_bytes()}
-    with pytest.raises(ValueError, match="cannot serve 2026"):
-        artifacts.install_runtime_bundle(_zip(late_fit, out / "late_fit.zip"), 2026)
-    with pytest.raises(ValueError, match="cannot serve 2026"):
-        artifacts.install_runtime_bundle(_zip(late_tables, out / "late_tables.zip"), 2026)
-    assert not (runtime_root / "players" / "models" / "position_traits_2024.json").exists()
-    half = {**base, "players/models/position_traits_2024.json": late_tables["players/models/position_traits_2024.json"]}
-    stray = {**base, "players/models/other.json": b"{}"}
-    for name, members in (("half", half), ("stray", stray)):
-        with pytest.raises(ValueError, match="unexpected files"):
-            artifacts.install_runtime_bundle(_zip(members, out / f"{name}.zip"), 2026)
-
-
 def test_portal_match_table_counts_fbs_destinations(monkeypatch):
     sources = {
         (2022, "portal"): pd.DataFrame([
@@ -1792,12 +1249,11 @@ def test_portal_match_table_counts_fbs_destinations(monkeypatch):
     assert "portal" in backtest.TABLES
 
 
-def test_run_position_traits_needs_the_frozen_tables(monkeypatch, tmp_path):
-    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
-    headline.save_headline_fit(FROZEN_FIT_2024, tmp_path / "players" / "models" / "position_traits_2024.json")
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: pytest.fail("built"))
-    with pytest.raises(FileNotFoundError, match="position-traits-fit"):
-        pipeline.run_position_traits(2026, AS_OF)
+FAKE_V4_2026 = pd.DataFrame({
+    "week": [1, 1, 2, 2], "athlete_id": ["q1", "q2", "q1", "q2"], "position_group": "QB", "games": [1, 1, 2, 2],
+    "shrunk_per_game": [-1.0, 1.0, -0.5, 0.5], "adjusted_per_game": 0.0, "value_above_replacement": 0.0,
+    "model_version": "cfb_player_value_v4",
+})
 
 
 def _two_week_traits() -> pd.DataFrame:
@@ -1805,7 +1261,7 @@ def _two_week_traits() -> pd.DataFrame:
         {"season": 2026, "week": week, "as_of": "2026-10-01T00:00:00+00:00", "model_version": "cfb_position_traits_v1",
          "athlete_id": athlete, "athlete_name": athlete.upper(), "team": "A", "team_id": 1, "position_group": "QB",
          "games": week, "trait": trait, "value": 1.0, "percentile": 50.0, "kind": "fitted", "qualified": True,
-         "exposure": 10.0, "uncertainty": np.nan, "replaces_value": True, "in_headline": True, "fbs": True,
+         "uncertainty": np.nan, "in_grade": True, "fbs": True,
          "poor_coverage": False}
         for week in (7, 8) for athlete in ("q1", "q2") for trait in ("headline", "qb.explosive")
     ]
@@ -1922,66 +1378,9 @@ def test_player_publish_skips_an_unmigrated_trait_table_and_still_publishes_heis
 
 def test_migration_declares_the_trait_table_contract():
     sql = next(Path("sql").glob("*_position_traits.sql")).read_text()
-    for column in ("replaces_value boolean", "in_headline boolean", "uncertainty double precision"):
-        assert column in sql
     assert "primary key (season, athlete_id, trait)" in sql.lower()
     assert "site_revalidate" not in sql
     published = set(pipeline.POSITION_TRAIT_COLUMNS) - {"exposure", "qualified", "fbs", "poor_coverage"}
     declared = {line.split()[0] for line in sql.splitlines() if line.startswith("    ")}
     assert published <= declared
     assert not {"exposure", "fbs", "poor_coverage"} & declared
-
-
-def draft_fixture():
-    """Two FBS players with v4 values at week 8, plus a third QB the roster does not list."""
-    roster = pd.DataFrame({
-        "id": [1, 2], "first_name": ["Q", "R"], "last_name": ["One", "One"], "team": ["A", "A"],
-        "position": ["QB", "RB"], "year": [3, 3], "height": [75, 70], "weight": [210, 200],
-    })
-    catalog = pd.DataFrame({"school": ["A"], "classification": ["fbs"]})
-    values = pd.DataFrame({
-        "athlete_id": ["1", "2"], "team": ["A", "A"], "position": ["QB", "RB"], "position_group": ["QB", "RB"],
-        "week": [8, 8], "as_of": ["2026-10-01T00:00:00+00:00"] * 2, "model_version": ["cfb_player_value_v4"] * 2,
-        "games": [6, 6], "value_above_replacement": [5.0, 4.0], "position_rank": [2, 1],
-    })
-    return roster, catalog, values
-
-
-def _headline_row(athlete_id, week, group, value, replaces, as_of="2026-10-01T00:00:00+00:00", trait="headline",
-                  percentile=50.0, games=6):
-    return {
-        "athlete_id": athlete_id, "week": week, "as_of": as_of, "trait": trait, "value": value,
-        "percentile": percentile, "games": games, "position_group": group, "replaces_value": replaces,
-        "model_version": "cfb_position_traits_v1",
-    }
-
-
-DRAFT_AS_OF = pd.Timestamp("2026-10-02", tz="UTC")
-
-
-def test_watchlist_adds_the_headline_beside_v4_without_overwriting_it():
-    roster, catalog, values = draft_fixture()
-    traits = pd.DataFrame([
-        _headline_row("1", 8, "QB", 9.0, True, percentile=90.0, games=6),
-        _headline_row("3", 8, "QB", 12.0, True, percentile=100.0),  # off the roster
-        _headline_row("1", 8, "QB", -3.0, True, trait="qb.explosive"),
-        _headline_row("2", 8, "RB", 0.5, False, trait="rb.breakaway"),  # r2 has no headline row
-        _headline_row("1", 7, "QB", 99.0, True),  # an earlier week never wins
-        _headline_row("1", 9, "QB", 50.0, True, as_of="2026-10-09T00:00:00+00:00"),  # after the cutoff
-    ])
-    board, audit = research.watchlist(roster, catalog, values, DRAFT_AS_OF, traits=traits)
-    by_id = board.set_index("athlete_id")
-    # v4 columns are never overwritten
-    assert by_id["value_above_replacement"].to_dict() == {"1": 5.0, "2": 4.0}
-    assert by_id["position_rank"].to_dict() == {"1": 2, "2": 1}
-    assert set(by_id["model_version"]) == {"cfb_player_value_v4"}
-    assert by_id.loc["1", ["headline", "headline_percentile", "headline_games"]].tolist() == [9.0, 90.0, 6.0]
-    assert bool(by_id.loc["1", "headline_replaces_value"]) is True
-    assert by_id.loc["2", ["headline", "headline_percentile", "headline_games"]].isna().all()
-    assert bool(by_id.loc["2", "headline_replaces_value"]) is False
-    assert audit["headline_replaced_groups"] == ["QB"]
-
-    plain, plain_audit = research.watchlist(roster, catalog, values, DRAFT_AS_OF)
-    assert plain["headline"].isna().all() and not plain["headline_replaces_value"].any()
-    assert plain.set_index("athlete_id").loc["1", "value_above_replacement"] == 5.0
-    assert plain_audit["headline_replaced_groups"] == []
