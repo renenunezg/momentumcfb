@@ -8,9 +8,11 @@ Every FBS player gets a set of named traits at his position and two numbers.
   mean 50 and sd 10 among qualified FBS players at his position that week.
   It says how good his profile is, not how many points he added.
 - The **impact** is player value v4 (`cfb_player_value_v4`, published in
-  `cfb.player_values`): points per game above positional replacement from
-  his credited plays, opponent adjusted, with win probability added beside
-  it. It is not refit here.
+  `cfb.player_values`): points above positional replacement from his
+  credited plays, opponent adjusted. The trait table carries it as **wins
+  above replacement** (WAR), the same points weighted by how much a point
+  was worth in each game he played (see Wins above replacement). v4 is not
+  refit here.
 
 A trait is a per-game rate built from tagged plays or box score counts,
 adjusted for the opponent where the data allows, and turned into a position
@@ -32,7 +34,7 @@ evaluation is
 `backend/data/processed/players/position_traits/evaluation_2024.parquet`,
 and every table below is copied from those two files and from the run log of
 `position-traits-fit --dev-seasons 2020 2021 2022 2023 2024 --validate 2025`
-on 2026-10-16 (`output/position-grade-fit-202610162142.log`). Player values
+on 2026-10-16 (`output/position-grade-fit-202610162151.log`). Player values
 for 2020 through 2025 are all `cfb_player_value_v4`, so the EPA baseline is
 one model.
 
@@ -61,10 +63,11 @@ Each trait gets a status:
 | --- | --- | --- |
 | weighted | reliability at least 0.10, portability measured and positive | reliability x portability, normalized |
 | unmeasured | reliability at least 0.10, portability not measurable | reliability, normalized |
-| noise | reliability under 0.10, or no per-game values to measure it | 0 |
+| noise | reliability under 0.10 | 0 |
+| unmeasured_reliability | reliability cannot be measured: too few players, or no per-game values | 0 |
 | team-driven | portability measured and at or below zero | 0 |
 
-Noise and team-driven traits stay on the card, dimmed, as descriptive.
+Traits with no weight stay on the card, dimmed, as descriptive.
 
 Orientation: a trait registered higher-is-better enters as is, one
 registered lower-is-better is negated, and one with no registered direction
@@ -110,7 +113,7 @@ clipped portable share. Weights sum to 1 within each position.
 | DL | def.finishing | 0.073 | 1.000 | 0 | noise |
 | DL | def.run_stop | 0.179 | 0.346 | 0.110 | weighted |
 | DL | def.every_week | 0.270 | 0.545 | 0.261 | weighted |
-| DL | def.impact |  |  | 0 | noise |
+| DL | def.impact |  |  | 0 | unmeasured_reliability |
 | LB | def.havoc | 0.424 | 0.596 | 0.171 | weighted |
 | LB | def.pass_rush | 0.138 | 0.808 | 0.075 | weighted |
 | LB | def.finishing | 0.141 | 1.000 | 0.095 | weighted |
@@ -118,13 +121,13 @@ clipped portable share. Weights sum to 1 within each position.
 | LB | def.every_week | 0.360 | 0.635 | 0.154 | weighted |
 | LB | def.tackle_share | 0.771 | 0.643 | 0.335 | weighted |
 | LB | def.coverage | 0.188 | 0.529 | 0.067 | weighted |
-| LB | def.impact |  | 1.000 | 0 | noise |
+| LB | def.impact |  | 1.000 | 0 | unmeasured_reliability |
 | DB | def.havoc | 0.290 | 0.495 | 0.239 | weighted |
 | DB | def.every_week | 0.259 | 0.593 | 0.256 | weighted |
 | DB | def.ball_production | 0.262 | 0.504 | 0.220 | weighted |
 | DB | def.run_support | 0.485 | 0.353 | 0.285 | weighted |
-| DB | def.impact |  | 0.000 | 0 | noise |
-| DB | def.pass_impact |  | 0.000 | 0 | noise |
+| DB | def.impact |  | 0.000 | 0 | unmeasured_reliability |
+| DB | def.pass_impact |  | 0.000 | 0 | unmeasured_reliability |
 | OL | ol.protection | 0.311 |  | 0.337 | unmeasured |
 | OL | ol.stuff_rate | 0.253 |  | 0.274 | unmeasured |
 | OL | ol.short_yardage | 0.024 |  | 0 | noise |
@@ -147,12 +150,12 @@ What the table says:
   the smallest QB weight (0.063).
 - `qb.receiver_independence` carries the largest QB weight (0.328) on a
   reliability measured over 36 players and no portability (12 movers). It
-  exists for few QBs, and most QBs are graded without it.
-- The with-without impacts (`def.impact`, `def.pass_impact`) are noise:
-  they have no per-game values, so their reliability cannot be measured,
-  and at DB their portability is at or below zero as well.
-- No trait was marked team-driven by portability alone: every trait with a
-  non-positive portable share was already noise by reliability.
+  exists for few QBs; a QB without it counts as average on it.
+- The with-without impacts (`def.impact`, `def.pass_impact`) carry no
+  weight: they have no per-game values, so their reliability cannot be
+  measured, and at DB their portability is at or below zero as well.
+- No trait was marked team-driven: every trait with a non-positive portable
+  share already had no measurable reliability.
 - K has no grade: `k.field_goal` is not reliable (0.036). P is graded on
   punt average alone.
 - OL units never move, so the three OL traits that pass the reliability
@@ -164,17 +167,52 @@ For one week, among qualified FBS players at the position:
 
 - each weighted trait is z-scored on the pool's mean and sd and multiplied
   by its sign (a trait with no spread gives everyone 0);
-- `composite = sum(w_t z_t) / sum(w_t)` over the weighted traits the player
-  has a value for;
-- `grade = 50 + 10 x (composite - mean) / sd` over the pool, clipped to
-  [20, 80];
-- `grade_percentile` ranks the composite within the pool, 0 to 100;
+- `composite = sum(w_t z_t)` over every weighted trait at the position,
+  with z = 0 (the position average) for a trait the player has no value
+  for, so a thin profile is pulled toward average instead of being judged
+  on the few traits it has;
+- a player is graded only if he has a value for his position's primary
+  exposure trait and the traits he has values for carry at least 0.6 of
+  the position's weight (`PRIMARY_TRAITS` and `MIN_WEIGHT_COVERAGE` in
+  `backend/players/traits/grade.py`);
+- `grade = 50 + 10 x (composite - mean) / sd` over the graded players,
+  clipped to [20, 80];
+- `grade_percentile` ranks the composite among them, 0 to 100;
 - `uncertainty = 10 x sqrt(1 - r)`, with `r` the composite's split-half
   reliability at the player's game count, read off the curve below (linear
   from r = 0 at zero games, flat past 12 games).
 
-Only qualified FBS players get a grade row; unqualified and non-FBS players
-keep their trait rows.
+| Group | Primary trait |
+| --- | --- |
+| QB | qb.explosive (dropbacks) |
+| RB | rb.yards_over_expected (carries) |
+| WR, TE | rec.value_per_target (targets) |
+| DL, LB, DB | def.every_week (games) |
+| OL | ol.line_yards |
+| K | k.field_goal |
+| P | p.punt_average |
+
+Unqualified and non-FBS players, and qualified players who fail the
+coverage rule, keep their trait rows and get no grade row.
+
+Players who lose the grade to the rule at the final week of 2025, from the
+evaluation file's `grade_coverage` table (every season is there):
+
+| Group | Qualified FBS | Graded | No primary trait | Coverage under 0.6 |
+| --- | --- | --- | --- | --- |
+| QB | 172 | 165 | 2 | 5 |
+| RB | 403 | 403 | 0 | 0 |
+| WR | 660 | 659 | 1 | 0 |
+| TE | 248 | 248 | 0 | 0 |
+| DL | 1050 | 1050 | 0 | 0 |
+| LB | 716 | 716 | 0 | 0 |
+| DB | 1168 | 1168 | 0 | 0 |
+| OL | 136 | 136 | 0 | 0 |
+| P | 136 | 136 | 0 | 0 |
+
+At the end of a season the rule removes a handful of QBs and almost no one
+else (1 to 7 QBs per development season). Early in a season it removes far
+more, because `qb.floor` needs four games: see Scoring 2026.
 
 ## Composite reliability
 
@@ -183,17 +221,22 @@ seasons. Each player's games alternate between two halves in week order,
 each half is scored as its own snapshot week with the frozen weights, and
 the two composites are correlated. This curve sets the uncertainty band.
 
-| Group | 4 games | 6 games | 8 games | 12 games | Players at 6 | Players at 12 |
-| --- | --- | --- | --- | --- | --- | --- |
-| QB | 0.101 | 0.237 | 0.333 | 0.408 | 763 | 260 |
-| RB | 0.063 | 0.084 | 0.119 | 0.089 | 1793 | 592 |
-| WR | 0.207 | 0.262 | 0.258 | 0.272 | 2729 | 717 |
-| TE | 0.167 | 0.214 | 0.271 | 0.152 | 850 | 115 |
-| DL | 0.218 | 0.290 | 0.351 | 0.417 | 4454 | 1018 |
-| LB | 0.525 | 0.582 | 0.606 | 0.614 | 3404 | 1157 |
-| DB | 0.338 | 0.362 | 0.381 | 0.341 | 5084 | 1468 |
-| OL | 0.200 | 0.315 | 0.349 | 0.413 | 640 | 496 |
-| P | 0.258 | 0.336 | 0.440 | 0.502 | 607 | 386 |
+| Group | 4 games | 6 games | 8 games | 12 games | Players at 4 | Players at 6 | Players at 8 | Players at 12 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| QB | 0.164 | 0.232 | 0.293 | 0.381 | 207 | 187 | 494 | 253 |
+| RB | 0.075 | 0.084 | 0.119 | 0.097 | 2101 | 1771 | 1430 | 592 |
+| WR | 0.165 | 0.222 | 0.234 | 0.267 | 3310 | 2698 | 2101 | 717 |
+| TE | 0.130 | 0.166 | 0.207 | 0.151 | 1153 | 838 | 585 | 115 |
+| DL | 0.218 | 0.290 | 0.351 | 0.417 | 5375 | 4454 | 3500 | 1018 |
+| LB | 0.521 | 0.577 | 0.602 | 0.611 | 4155 | 3404 | 2711 | 1157 |
+| DB | 0.338 | 0.362 | 0.381 | 0.341 | 6247 | 5084 | 4012 | 1468 |
+| OL | 0.202 | 0.315 | 0.349 | 0.413 | 653 | 640 | 612 | 496 |
+| P | 0.258 | 0.336 | 0.440 | 0.502 | 655 | 607 | 557 | 386 |
+
+Each half is graded under the same coverage rule. At 4 and 6 games a half
+has two or three games, too few for `qb.floor`, so only QBs with receiver
+independence clear 0.6 of the weight: the QB rows at 4 and 6 games rest on
+207 and 187 players against 494 at 8.
 
 The RB composite is barely reliable: 0.119 at 8 games, lower than three of
 its five weighted traits alone. The band for a back stays near the full
@@ -289,36 +332,36 @@ empty.
 
 | Group | Seasons | Players | Grade to next grade | Grade to next EPA | EPA to next EPA | Holdout |
 | --- | --- | --- | --- | --- | --- | --- |
-| QB | 2020-2021 | 62 | 0.255 | 0.292 | 0.374 |  |
-| QB | 2021-2022 | 89 | 0.165 | 0.305 | 0.518 |  |
-| QB | 2022-2023 | 83 | 0.327 | 0.239 | 0.408 |  |
-| QB | 2023-2024 | 82 | 0.406 | 0.387 | 0.390 |  |
-| QB | 2024-2025 | 82 | 0.219 | 0.319 | 0.546 | yes |
-| RB | 2020-2021 | 167 | 0.291 | 0.343 | 0.328 |  |
-| RB | 2021-2022 | 197 | 0.211 | 0.224 | 0.340 |  |
-| RB | 2022-2023 | 225 | 0.283 | 0.280 | 0.373 |  |
-| RB | 2023-2024 | 199 | 0.255 | 0.257 | 0.417 |  |
-| RB | 2024-2025 | 178 | 0.181 | 0.242 | 0.256 | yes |
-| WR | 2020-2021 | 250 | 0.118 | 0.186 | 0.382 |  |
-| WR | 2021-2022 | 307 | 0.202 | 0.281 | 0.377 |  |
-| WR | 2022-2023 | 305 | 0.156 | 0.163 | 0.322 |  |
-| WR | 2023-2024 | 292 | 0.309 | 0.262 | 0.372 |  |
-| WR | 2024-2025 | 271 | 0.211 | 0.224 | 0.399 | yes |
-| TE | 2020-2021 | 67 | 0.153 | 0.262 | 0.329 |  |
-| TE | 2021-2022 | 85 | 0.107 | 0.135 | 0.337 |  |
-| TE | 2022-2023 | 80 | 0.307 | 0.341 | 0.469 |  |
-| TE | 2023-2024 | 90 | 0.245 | 0.318 | 0.287 |  |
-| TE | 2024-2025 | 83 | 0.273 | 0.336 | 0.274 | yes |
+| QB | 2020-2021 | 58 | 0.207 | 0.226 | 0.364 |  |
+| QB | 2021-2022 | 87 | 0.123 | 0.251 | 0.521 |  |
+| QB | 2022-2023 | 81 | 0.326 | 0.234 | 0.426 |  |
+| QB | 2023-2024 | 79 | 0.389 | 0.372 | 0.374 |  |
+| QB | 2024-2025 | 80 | 0.252 | 0.357 | 0.514 | yes |
+| RB | 2020-2021 | 166 | 0.304 | 0.348 | 0.328 |  |
+| RB | 2021-2022 | 197 | 0.201 | 0.220 | 0.340 |  |
+| RB | 2022-2023 | 224 | 0.283 | 0.278 | 0.373 |  |
+| RB | 2023-2024 | 199 | 0.260 | 0.261 | 0.417 |  |
+| RB | 2024-2025 | 178 | 0.177 | 0.244 | 0.256 | yes |
+| WR | 2020-2021 | 248 | 0.106 | 0.204 | 0.395 |  |
+| WR | 2021-2022 | 305 | 0.197 | 0.286 | 0.383 |  |
+| WR | 2022-2023 | 304 | 0.149 | 0.155 | 0.316 |  |
+| WR | 2023-2024 | 292 | 0.308 | 0.261 | 0.372 |  |
+| WR | 2024-2025 | 270 | 0.206 | 0.215 | 0.397 | yes |
+| TE | 2020-2021 | 67 | 0.150 | 0.260 | 0.329 |  |
+| TE | 2021-2022 | 85 | 0.110 | 0.135 | 0.337 |  |
+| TE | 2022-2023 | 79 | 0.317 | 0.327 | 0.473 |  |
+| TE | 2023-2024 | 89 | 0.211 | 0.292 | 0.275 |  |
+| TE | 2024-2025 | 81 | 0.238 | 0.286 | 0.294 | yes |
 | DL | 2020-2021 | 344 | 0.433 | 0.299 | 0.142 |  |
 | DL | 2021-2022 | 492 | 0.449 | 0.250 | 0.122 |  |
 | DL | 2022-2023 | 562 | 0.384 | 0.196 | 0.129 |  |
 | DL | 2023-2024 | 540 | 0.430 | 0.251 | 0.153 |  |
 | DL | 2024-2025 | 453 | 0.384 | 0.125 | 0.106 | yes |
-| LB | 2020-2021 | 306 | 0.491 | 0.174 | 0.169 |  |
-| LB | 2021-2022 | 360 | 0.477 | 0.147 | 0.185 |  |
-| LB | 2022-2023 | 358 | 0.427 | 0.262 | 0.109 |  |
+| LB | 2020-2021 | 306 | 0.490 | 0.175 | 0.169 |  |
+| LB | 2021-2022 | 360 | 0.478 | 0.148 | 0.185 |  |
+| LB | 2022-2023 | 358 | 0.423 | 0.261 | 0.109 |  |
 | LB | 2023-2024 | 374 | 0.361 | 0.167 | 0.060 |  |
-| LB | 2024-2025 | 341 | 0.409 | 0.197 | 0.103 | yes |
+| LB | 2024-2025 | 341 | 0.409 | 0.199 | 0.103 | yes |
 | DB | 2020-2021 | 450 | 0.286 | 0.098 | 0.032 |  |
 | DB | 2021-2022 | 554 | 0.316 | 0.109 | 0.106 |  |
 | DB | 2022-2023 | 566 | 0.349 | 0.124 | 0.095 |  |
@@ -342,12 +385,12 @@ Holdout, grade to next EPA against EPA to next EPA:
 
 | Group | Grade to next EPA | EPA to next EPA | Better |
 | --- | --- | --- | --- |
-| QB | 0.319 | 0.546 | EPA |
-| RB | 0.242 | 0.256 | EPA |
-| WR | 0.224 | 0.399 | EPA |
-| TE | 0.336 | 0.274 | grade |
+| QB | 0.357 | 0.514 | EPA |
+| RB | 0.244 | 0.256 | EPA |
+| WR | 0.215 | 0.397 | EPA |
+| TE | 0.286 | 0.294 | EPA |
 | DL | 0.125 | 0.106 | grade |
-| LB | 0.197 | 0.103 | grade |
+| LB | 0.199 | 0.103 | grade |
 | DB | 0.137 | 0.085 | grade |
 
 ## Draft check
@@ -363,19 +406,19 @@ reported for the draft board and were never used to set a weight.
 
 | Group | Players | Pick, v4 | Pick, grade | NFL snaps, v4 | NFL snaps, grade |
 | --- | --- | --- | --- | --- | --- |
-| QB | 61 | 0.418 | 0.338 | 0.032 | -0.098 |
-| RB | 109 | 0.417 | 0.344 | 0.386 | 0.303 |
-| WR | 179 | 0.433 | 0.223 | 0.268 | 0.070 |
-| TE | 82 | 0.388 | 0.352 | 0.148 | 0.176 |
+| QB | 61 | 0.418 | 0.344 | 0.032 | -0.063 |
+| RB | 109 | 0.417 | 0.344 | 0.386 | 0.302 |
+| WR | 179 | 0.433 | 0.218 | 0.268 | 0.059 |
+| TE | 82 | 0.388 | 0.361 | 0.148 | 0.175 |
 | DL | 253 | 0.212 | 0.287 | 0.037 | 0.149 |
-| LB | 146 | 0.078 | 0.054 | 0.064 | 0.120 |
-| DB | 285 | 0.251 | 0.176 | 0.211 | 0.186 |
+| LB | 146 | 0.077 | 0.055 | 0.064 | 0.121 |
+| DB | 285 | 0.250 | 0.176 | 0.210 | 0.186 |
 | P | 1 |  |  |  |  |
 
 The grade ranks the draft better than v4 only at DL (0.287 against 0.212 on
 slot, 0.149 against 0.037 on snaps). It is ahead on NFL snaps at LB and TE
-and behind everywhere else. At WR it is well behind on both (0.223 against
-0.433 on slot, 0.070 against 0.268 on snaps). OL units have no v4 value and
+and behind everywhere else. At WR it is well behind on both (0.218 against
+0.433 on slot, 0.059 against 0.268 on snaps). OL units have no v4 value and
 do not enter.
 
 ## Data coverage
@@ -419,21 +462,46 @@ are matched and counted here but feed no weight.
 ## Scoring 2026 and serving
 
 `position-traits --seasons 2026` scores with the frozen model (log
-`output/position-grade-2026-20261016.log`). Local raw data for 2026 ends at
-week 1, so the artifact holds weeks 0 and 1: 65,295 rows, with 4,913
-qualified FBS players graded at QB, RB, WR, TE, DL, LB, DB, OL and P. It ran
-in receptions mode and used the frozen expectation tables, reading no
-earlier play-by-play season.
+`output/position-grade-2026-202610162151.log`). Local raw data for 2026 ends
+at week 1, so the artifact holds weeks 0 and 1: 67,812 rows, with 4,552
+qualified FBS players graded and 2,914 war rows. It ran in receptions mode
+and used the frozen expectation tables, reading no earlier play-by-play
+season. There is no calibration replay for 2026, so the WAR leverage came
+from the stored weekly serving anchors for weeks 0 and 1.
+
+The coverage rule bites hard in week 1:
+
+| Group | Qualified FBS | Graded | No primary trait | Coverage under 0.6 |
+| --- | --- | --- | --- | --- |
+| QB | 179 | 0 | 17 | 162 |
+| RB | 391 | 350 | 10 | 31 |
+| WR | 613 | 512 | 101 | 0 |
+| TE | 239 | 199 | 40 | 0 |
+| DL | 1100 | 1100 | 0 | 0 |
+| LB | 840 | 840 | 0 | 0 |
+| DB | 1288 | 1288 | 0 | 0 |
+| OL | 137 | 137 | 0 | 0 |
+| P | 126 | 126 | 0 | 0 |
+
+No QB is graded after one game. `qb.floor` needs four games and
+`qb.receiver_independence` exists for few QBs; without both, a QB's other
+traits carry at most 0.562 of the weight, under the 0.6 bar. The QB grade
+therefore appears only from a QB's fourth game, unless he has receiver
+independence. In receptions mode many receivers have no value per target
+yet, which is why 101 WRs and 40 TEs lack the primary trait.
 
 Each artifact row carries the trait snapshot columns plus `uncertainty`
 (empty on trait rows), `in_grade` (true on a trait row whose trait has
-positive weight at the position, and on every grade row), `fbs` and
-`poor_coverage`. Grade rows have `trait = "grade"`, the grade as `value`,
-its percentile as `percentile` and `kind = "graded"`. The publisher keeps
+positive weight at the position, and on every grade row),
+`points_above_replacement` (only on war rows), `fbs` and `poor_coverage`.
+Grade rows have `trait = "grade"`, the grade as `value`, its percentile as
+`percentile` and `kind = "graded"`. War rows have `trait = "war"`, wins
+above replacement as `value`, its percentile among qualified FBS players
+at the position that week, and `kind = "measured"`. The publisher keeps
 only the latest week and only FBS rows; the table has no `fbs` or
 `poor_coverage` column, and the migration
 `sql/20261016200339_position_traits.sql` (not yet applied) declares
-`in_grade` and `uncertainty`.
+`in_grade`, `uncertainty` and `points_above_replacement`.
 
 The frozen model is two files in `backend/data/processed/players/models/`:
 `position_grade_2024.json` (weights, signs, statuses and the composite
@@ -451,6 +519,53 @@ The draft research watchlist reads the trait artifact and adds `grade`,
 lists `graded_groups`. It never overwrites v4's value, rank or model
 version.
 
+## Wins above replacement
+
+v4 measures a player's points above positional replacement through week w:
+`points_above_replacement = games x (shrunk_per_game - replacement_per_game)`,
+its `value_above_replacement`. A point is worth more in a close game than in
+a rout, so WAR weights each game the player appeared in by the win
+probability a point buys at the team model's pregame projection:
+
+- `leverage_g = phi(home_margin_g / margin_sd_g) / margin_sd_g`, the normal
+  density of the projected margin over its sd, divided by the sd: the slope
+  of win probability per point at the projection;
+- `wins_above_replacement = (shrunk_per_game - replacement_per_game) x
+  sum(leverage_g)` over his credited games through week w.
+
+The projection is the calibration replay
+(`backend.serving.anchors.load_serving_anchors`), each game projected only
+from earlier games; a game without a projection takes the season's mean
+leverage. When a season has no replay (2026), the stored weekly serving
+anchors stand in. Nothing is fitted.
+
+The 2025 leaders at the final week (week 17), qualified FBS players at any
+position, from the fit log:
+
+| Rank | Player | Team | Group | Games | Points | Wins |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | Diego Pavia | Vanderbilt | QB | 13 | 101.1 | 2.08 |
+| 2 | Trinidad Chambliss | Ole Miss | QB | 15 | 90.1 | 1.88 |
+| 3 | Brad Jackson | Texas State | QB | 13 | 76.7 | 1.59 |
+| 4 | Darian Mensah | Duke | QB | 14 | 70.5 | 1.57 |
+| 5 | Haynes King | Georgia Tech | QB | 12 | 78.2 | 1.53 |
+| 6 | Fernando Mendoza | Indiana | QB | 16 | 85.4 | 1.50 |
+| 7 | Taylen Green | Arkansas | QB | 12 | 64.9 | 1.46 |
+| 8 | Anthony Colandrea | UNLV | QB | 14 | 69.4 | 1.45 |
+| 9 | Gunner Stockton | Georgia | QB | 14 | 69.3 | 1.44 |
+| 10 | Brendan Sorsby | Cincinnati | QB | 12 | 69.0 | 1.44 |
+
+Every leader is a quarterback. That is v4's credit, which gives passers the
+largest share of every pass. Leverage reorders players with similar points:
+Mendoza has more points than King (85.4 against 78.2) but fewer wins
+(1.50 against 1.53), because Indiana was projected to win its games by
+more.
+
+Defensive credit in v4 covers only tagged disruptions (sacks,
+interceptions, breakups and forced and recovered fumbles on plays, plus box
+score tackles for loss and passes defended), so defensive WAR is undercounted and a defender without
+credited plays has no war row. OL units have no v4 value and no WAR.
+
 ## Limits
 
 There are no tackle attributions on plays, no snap counts, no pressures and
@@ -462,10 +577,11 @@ starts in 2020. Targets are missing for most incompletions in 2023, 2024
 and 2026, which ran in receptions mode. Win probability is missing for
 games with an FCS side.
 
-The grade has no volume term. A player with one weighted trait is graded on
-that trait alone, at full scale, so a thinly measured player can sit at the
-top of his position; the uncertainty band reads only games, not how many
-traits he has. Two of the development seasons are in receptions mode. The
+The grade has no volume term beyond the coverage rule: a missing trait
+counts as average, and a player needs his primary trait and 0.6 of the
+weight. That rule leaves QBs ungraded until their fourth game unless they
+have receiver independence (see Scoring 2026). The uncertainty band reads
+only games, not how many traits a player has. Two of the development seasons are in receptions mode. The
 weights are as precise as split-half correlations on hundreds to thousands
 of players allow, which is about two decimals; the QB receiver independence
 weight rests on 36 players and should be read as rough. 2026 was never used
@@ -477,26 +593,29 @@ Plainly, against EPA credit alone on the 2024 to 2025 holdout:
 
 - **Defense: the grade wins.** At DL, LB and DB a player's grade predicts
   next season's EPA credit better than his EPA credit does (DL 0.125
-  against 0.106, LB 0.197 against 0.103, DB 0.137 against 0.085). The same
+  against 0.106, LB 0.199 against 0.103, DB 0.137 against 0.085). The same
   holds in every development pair at DL and DB and in three of four at LB.
   Defensive EPA credit barely persists (0.085 to 0.106 on the holdout); the
   box score traits do. The grade also persists far better than defensive
   EPA (DL 0.384, LB 0.409, DB 0.272 grade to grade), and at DL it ranks the
   draft better than v4.
-- **QB and WR: EPA credit wins clearly.** QB 0.319 against 0.546, WR 0.224
-  against 0.399, and EPA wins in every development pair at WR and in all
-  four at QB. At WR the grade is also far behind v4 on the draft. For
-  passers and receivers the traits do not yet add up to what the credited
-  plays already say.
-- **RB: EPA credit wins narrowly** (0.242 against 0.256), and the RB grade
-  is the least reliable composite (0.084 at 6 games). It should not be
-  shown as a ranking without its band.
-- **TE: the grade wins on the holdout** (0.336 against 0.274) but lost in
-  three of four development pairs, so the holdout win is not a pattern yet.
+- **QB and WR: EPA credit wins clearly.** QB 0.357 against 0.514, WR 0.215
+  against 0.397, and EPA wins in every development pair at both. At WR the
+  grade is also far behind v4 on the draft. For passers and receivers the
+  traits do not yet add up to what the credited plays already say.
+- **RB and TE: EPA credit wins narrowly** (RB 0.244 against 0.256, TE 0.286
+  against 0.294). With missing traits counted as average, TE no longer
+  wins the holdout; the grade won one of four development pairs at TE and
+  one of four at RB. The RB grade is the least reliable composite (0.084 at
+  6 games) and should not be shown as a ranking without its band.
 - **OL and P** have a grade that persists (OL 0.328, P 0.557 grade to grade
   on the holdout) and no EPA baseline to compare with. K has no grade.
+- **WAR is a QB list.** All ten 2025 leaders are quarterbacks, because v4
+  credits passers with the largest share of every pass and defenders only
+  for tagged disruptions. WAR compares players within a position; across
+  positions it mostly reflects the credit rules.
 
 The grade is not EPA per play with a new name: it is built from traits
 only, and on defense it carries information EPA credit does not. On
 offense it is a descriptive profile that predicts less than EPA credit, and
-the card should lead with impact there.
+the card should lead with impact (WAR) there.
