@@ -11,6 +11,7 @@ from backend.players.traits import (
     TraitSpec,
     absence,
     adjust,
+    backtest,
     context,
     defense,
     expectations,
@@ -1242,3 +1243,77 @@ def test_score_players_uses_the_fit_scale_replacement_and_reliability():
     r = np.array([0.25, 0.5, 0.6, 0.7, 0.125])
     assert out["uncertainty"].to_numpy() == pytest.approx(np.std(raw[:4], ddof=1) * np.sqrt(1 - r))
     assert out["replaces_value"].all()
+
+
+def test_replacement_rule_needs_both_a_better_mae_and_equal_reliability():
+    swap = pd.DataFrame([
+        {"position_group": "QB", "mae_v4_only": 13.0, "mae_with_traits": 12.8, "reliability_6_v4": 0.5, "reliability_6_headline": 0.55},
+        {"position_group": "RB", "mae_v4_only": 13.0, "mae_with_traits": 12.8, "reliability_6_v4": 0.5, "reliability_6_headline": 0.4},
+        {"position_group": "DL", "mae_v4_only": 13.0, "mae_with_traits": 13.1, "reliability_6_v4": 0.5, "reliability_6_headline": 0.9},
+    ])
+    out = backtest.replacement_flags(swap).set_index("position_group")["replaces_value"]
+    assert out.to_dict() == {"QB": True, "RB": False, "DL": False}
+
+
+def exposure_frames():
+    """wr1 is targeted in weeks 1 and 3 (week 2 is dead), wr2 only in week 1 with no
+    numerator, ghost has no position group, and unit:A is A's offensive line."""
+    return _trait_frame([
+        _trait_row("wr1", 1, 1, "rec.value_per_target", 1.0, denominator=4.0),
+        _trait_row("wr1", 1, 1, "rec.explosive", 1.0, denominator=99.0),
+        _trait_row("wr1", 3, 3, "rec.value_per_target", 2.0, denominator=6.0),
+        _trait_row("wr2", 1, 1, "rec.value_per_target", np.nan, denominator=2.0),
+        _trait_row("ghost", 1, 1, "rec.value_per_target", 1.0, denominator=5.0),
+        _trait_row("unit:A", 1, 1, "ol.stuff_rate", 3.0),
+        _trait_row("unit:A", 3, 3, "ol.stuff_rate", 2.0),
+    ])
+
+
+def test_exposure_shares_carry_dead_weeks_count_units_and_skip_unmapped_players():
+    groups = pd.Series({"wr1": "WR", "wr2": "WR", "unit:A": "OL"})
+    out = headline.exposure_shares(exposure_frames(), groups)
+    wide = out.pivot(index="athlete_id", columns="week", values="exposure")
+    assert sorted(wide.index) == ["unit:A", "wr1", "wr2"]
+    assert wide.loc["wr1"].tolist() == [4.0, 4.0, 10.0]
+    assert wide.loc["wr2"].tolist() == [2.0, 2.0, 2.0]
+    assert wide.loc["unit:A"].tolist() == [1.0, 1.0, 1.0]
+
+
+def test_with_exposure_carries_the_last_week_and_zeroes_players_without_usage():
+    groups = pd.Series({"wr1": "WR", "wr2": "WR", "wr3": "WR", "unit:A": "OL"})
+    snaps = pd.DataFrame({
+        "athlete_id": ["wr1"] * 4 + ["wr3", "unit:A"],
+        "week": [1, 2, 3, 4, 2, 4],
+        "trait": "rec.value_per_target",
+    })
+    out = backtest.with_exposure(snaps, exposure_frames(), groups)
+    assert len(out) == len(snaps)
+    assert out["exposure"].tolist() == [4.0, 4.0, 10.0, 10.0, 0.0, 1.0]
+
+
+def test_season_identity_takes_each_players_latest_row_and_names_line_units():
+    games = pd.DataFrame({"game_id": [1, 3], "model_week": [1, 3]})
+    credit = pd.DataFrame({"athlete_id": [7], "athlete_name": ["Seven"], "team": ["A"], "model_week": [1]})
+    box = pd.DataFrame({"game_id": [3, 1], "athlete_id": ["7", "8"], "athlete_name": ["Seven", "Eight"],
+                        "team": ["B", "A"]})
+    out = backtest.season_identity(credit, box, games, exposure_frames()).set_index("athlete_id")
+    assert sorted(out.index) == ["7", "8", "unit:A"]
+    assert out.loc["7", "team"] == "B"
+    assert out.loc["8", ["athlete_name", "team"]].tolist() == ["Eight", "A"]
+    assert out.loc["unit:A", ["athlete_name", "team"]].tolist() == ["A offensive line", "A"]
+
+
+def test_split_half_correlation_uses_each_halfs_first_games_and_needs_enough_games():
+    rows = []
+    for player in range(12):
+        for game in range(1, 8):  # game 7 is past the six games and must be ignored
+            value = 100.0 * (-1) ** player if game == 7 else float(player)
+            rows.append({"athlete_id": f"p{player}", "game_id": 100 * player + game, "model_week": game,
+                         "value": value})
+    rows += [{"athlete_id": "short", "game_id": 9000 + game, "model_week": game, "value": 50.0 * game}
+             for game in range(1, 6)]
+    groups = pd.Series({**{f"p{player}": "QB" for player in range(12)}, "short": "QB"})
+    out = backtest.split_half_correlation(pd.DataFrame(rows), groups, games_at=(6, 8))
+    assert out.to_dict("records") == [
+        {"position_group": "QB", "games": 6, "players": 12, "correlation": pytest.approx(1.0)}
+    ]

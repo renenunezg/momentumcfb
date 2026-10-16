@@ -450,6 +450,18 @@ def _add_publish_commands(sub) -> None:
     )
     publish_players.add_argument("--season", type=int, required=True)
 
+    traits_fit = sub.add_parser(
+        "position-traits-fit",
+        help="backtest the position trait headline offline and save its fit",
+    )
+    traits_fit.add_argument("--dev-seasons", type=int, nargs="+", required=True)
+    traits_fit.add_argument("--validate", type=int, required=True)
+    traits_fit.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="rebuild each season's trait artifacts even when they are cached",
+    )
+
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="backend")

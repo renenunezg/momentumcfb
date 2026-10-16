@@ -38,6 +38,7 @@ from backend.commands.players import (
     handle_ingest_portal,
     handle_player_prior,
     handle_player_values,
+    handle_position_traits_fit,
     handle_publish_players,
     handle_qb_starters,
 )
@@ -104,6 +105,7 @@ HANDLERS: dict[str, Handler] = {
     "heisman": handle_heisman,
     "heisman-train": handle_heisman_train,
     "publish-players": handle_publish_players,
+    "position-traits-fit": handle_position_traits_fit,
 }
 
 
