@@ -26,7 +26,7 @@ from backend.etl import store
 from backend.features.possessions import classify_plays
 from backend.players import pipeline
 from backend.players.ingest import read_season_source, read_weekly
-from backend.players.traits import TRAITS, grade, snapshots
+from backend.players.traits import TRAITS, grade, snapshots, war
 from backend.players.traits.context import load_season_context
 from backend.players.traits.defense import defense_traits
 from backend.players.traits.expectations import (
@@ -62,7 +62,8 @@ VALUE_COLUMNS = [
     "games",
     "shrunk_per_game",
     "adjusted_per_game",
-    "value_above_replacement",  # read only by the report-only draft check
+    "replacement_per_game",
+    "value_above_replacement",  # the draft check and wins above replacement
 ]
 CREDITED_GAME_COLUMNS = ["athlete_id", "game_id", "model_week", "adjusted_epa"]
 IDENTITY_COLUMNS = ["athlete_id", "athlete_name", "team"]
@@ -98,6 +99,7 @@ SEASON_ARTIFACTS = {
 }
 TABLES = (
     "weights",
+    "grade_coverage",
     "reliability",
     "portability",
     "portal",
@@ -704,12 +706,55 @@ def draft_check(
     return pd.DataFrame(rows, columns=DRAFT_COLUMNS)
 
 
+def grade_coverage_table(
+    seasons: dict[int, dict[str, pd.DataFrame]], model: grade.GradeModel
+) -> pd.DataFrame:
+    """``grade.coverage_losses`` at each season's final week, with a ``season`` column."""
+    parts = []
+    for season, data in seasons.items():
+        snapshot = data["snapshots"]
+        final = snapshot[snapshot["week"].eq(snapshot["week"].max())]
+        parts.append(
+            grade.coverage_losses(grade.grade_eligibility(final, model)).assign(season=season)
+        )
+    out = pd.concat(parts, ignore_index=True)
+    return out[["season", *grade.COVERAGE_LOSS_COLUMNS]]
+
+
+def log_war_leaders(data: dict[str, pd.DataFrame], season: int, top: int = 10) -> None:
+    """Log the season's final-week wins above replacement leaders among qualified
+    FBS players, scored the way the weekly runner scores them."""
+    snapshot = data["snapshots"].astype({"athlete_id": str})
+    final = snapshot[snapshot["week"].eq(snapshot["week"].max())]
+    values = data["values"]
+    measured = pipeline.war_rows(
+        final,
+        values,
+        war.wins_above_replacement(values, data["credited"], war.season_projections(season)),
+    )
+    leaders = measured.sort_values("value", ascending=False).head(top)
+    for rank, row in enumerate(leaders.itertuples(), start=1):
+        log.info(
+            "wins above replacement %s week %s #%d: %s (%s, %s) %.2f wins, %.1f points, %d games",
+            season,
+            row.week,
+            rank,
+            row.athlete_name,
+            row.team,
+            row.position_group,
+            row.value,
+            row.points_above_replacement,
+            row.games,
+        )
+
+
 # The backtest
 
 
 @dataclass
 class BacktestResult:
     weights: pd.DataFrame
+    grade_coverage: pd.DataFrame
     reliability: pd.DataFrame
     portability: pd.DataFrame
     portal: pd.DataFrame
@@ -769,8 +814,10 @@ def run_backtest(
     model.reliability = composite.dropna(subset=["correlation"])[
         grade.RELIABILITY_COLUMNS
     ].reset_index(drop=True)
+    log_war_leaders(seasons[validation_season], validation_season)
     return BacktestResult(
         weights=weights,
+        grade_coverage=grade_coverage_table(seasons, model),
         reliability=reliability_table(dev, pooled, composite),
         portability=dev_portability,
         portal=portal_match_table(snapshots_by_season, matched),

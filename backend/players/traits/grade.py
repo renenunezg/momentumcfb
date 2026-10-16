@@ -4,15 +4,18 @@ Each trait's weight at a position comes from player-level evidence on the
 development seasons only: its split-half reliability at 8 games (how well a
 player's odd games predict his even games) times its portability (the share of
 its year-over-year persistence that survives a transfer). Unreliable traits
-(reliability under ``NOISE_RELIABILITY``) and traits that do not travel
-(portability at or below zero) get no weight and stay on the card as
-descriptive. A trait whose portability cannot be measured keeps its reliability
-weight. Weights are normalized to sum to 1 within each position group.
+(reliability under ``NOISE_RELIABILITY``), traits whose reliability cannot be
+measured, and traits that do not travel (portability at or below zero) get no
+weight and stay on the card as descriptive. A trait whose portability cannot be
+measured keeps its reliability weight. Weights sum to 1 within each position.
 
-A player's ``composite`` is the weighted mean of his oriented trait z-scores
-among qualified FBS players at the group that week, over the weighted traits he
-has a value for. The ``grade`` puts the composite on the 20 to 80 scale (mean 50,
-sd 10 in the same pool). Nothing is fitted to team margins or to any outcome.
+A player's ``composite`` is the weighted sum of his oriented trait z-scores
+among qualified FBS players at the group that week, with a trait he has no
+value for counted at the position average (z = 0). He is graded only when he
+has his position's primary exposure trait and his traits cover at least
+``MIN_WEIGHT_COVERAGE`` of the position's weight. The ``grade`` puts the
+composite on the 20 to 80 scale (mean 50, sd 10 among graded players). Nothing
+is fitted to team margins or to any outcome.
 """
 
 import json
@@ -28,6 +31,25 @@ from backend.players.traits import MODEL_VERSION, TRAITS
 
 NOISE_RELIABILITY = 0.10
 WEIGHT_GAMES = 8
+# The trait whose denominator measures a player's usage at the position. Without
+# it the player has no measured role there (a wildcat snap, a trick play), so he
+# is not graded however extreme his other values are.
+PRIMARY_TRAITS = {
+    "QB": "qb.explosive",
+    "RB": "rb.yards_over_expected",
+    "WR": "rec.value_per_target",
+    "TE": "rec.value_per_target",
+    "DL": "def.every_week",
+    "LB": "def.every_week",
+    "DB": "def.every_week",
+    "OL": "ol.line_yards",
+    "K": "k.field_goal",
+    "P": "p.punt_average",
+}
+# The least share of the position's total trait weight a player's measured traits
+# must carry for a grade. Missing traits count as average (z = 0), so below this
+# the composite would be mostly the average standing in for him.
+MIN_WEIGHT_COVERAGE = 0.6
 GRADE_MEAN, GRADE_SD, GRADE_MIN, GRADE_MAX = 50.0, 10.0, 20.0, 80.0
 WEIGHT_COLUMNS = [
     "position_group",
@@ -38,6 +60,15 @@ WEIGHT_COLUMNS = [
     "portability",
     "weight",
     "status",
+]
+ELIGIBILITY_COLUMNS = [
+    "athlete_id",
+    "position_group",
+    "games",
+    "has_primary",
+    "coverage",
+    "graded",
+    "composite",
 ]
 ORIENTATION_COLUMNS = ["position_group", "trait", "sign", "sign_source", "spearman_epa", "players"]
 RELIABILITY_COLUMNS = ["position_group", "games", "players", "correlation"]
@@ -115,10 +146,12 @@ def trait_weights(
     ``portability`` is ``transfers.portability`` output, whose ``portable_share`` is
     clipped to [0, 1] and is unmeasured where NaN; ``orientation`` is
     ``orientations`` output. ``weight = max(reliability, 0) × (portability or 1)``,
-    normalized within the group over weighted traits. ``status`` is ``noise`` when
-    reliability is under ``NOISE_RELIABILITY`` or missing (``latest`` traits have no
-    per-game values), ``team-driven`` when portability is measured and at or below
-    zero, ``unmeasured`` when weighted without a portability, else ``weighted``.
+    normalized within the group over weighted traits. ``status`` is
+    ``unmeasured_reliability`` when no reliability could be measured (too few
+    players, or a ``latest`` trait with no per-game values), ``noise`` when it is
+    under ``NOISE_RELIABILITY``, ``team-driven`` when portability is measured and at
+    or below zero, ``unmeasured`` when weighted without a portability, else
+    ``weighted``. Only ``weighted`` and ``unmeasured`` traits carry weight.
     """
     rel = reliability
     if "games" in rel.columns:
@@ -133,11 +166,15 @@ def trait_weights(
     raw_share = port["portable_share"].reindex(keys).to_numpy(float)
     out["portability"] = np.clip(raw_share, 0.0, 1.0)
 
-    noise = ~(out["reliability"] >= NOISE_RELIABILITY)
+    unmeasured_reliability = out["reliability"].isna()
+    noise = ~unmeasured_reliability & out["reliability"].lt(NOISE_RELIABILITY)
     measured = out["portability"].notna()
-    team_driven = ~noise & measured & (raw_share <= 0)
+    usable = ~unmeasured_reliability & ~noise
+    team_driven = usable & measured & (raw_share <= 0)
     out["status"] = np.select(
-        [noise, team_driven, ~measured], ["noise", "team-driven", "unmeasured"], "weighted"
+        [unmeasured_reliability, noise, team_driven, ~measured],
+        ["unmeasured_reliability", "noise", "team-driven", "unmeasured"],
+        "weighted",
     )
     raw = out["reliability"].clip(lower=0.0) * out["portability"].fillna(1.0)
     raw = raw.where(out["status"].isin(["weighted", "unmeasured"]), 0.0).fillna(0.0)
@@ -262,18 +299,17 @@ def graded_groups(model: GradeModel) -> set[str]:
     return set(model.weights.loc[model.weights["weight"].gt(0), "position_group"])
 
 
-def score_grades(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame:
-    """Each qualified FBS player's grade from one snapshot week.
+def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame:
+    """Every qualified FBS player at a graded group in one snapshot week, graded or not.
 
     ``snapshot_week`` holds trait snapshot rows of one week with ``team`` and an
-    ``fbs`` boolean. The pool is qualified FBS players at the group. Each trait is
-    z-scored on the pool's mean and sd (ddof 1; 0 where sd is 0 or missing) and
-    multiplied by the model's sign. ``composite = Σ w_t z_t / Σ w_t`` over the
-    positive-weight traits the player has a value for; a player with none has no
-    grade. ``grade = 50 + 10 × (composite − mean) / sd`` over the graded pool at the
-    group, clipped to [20, 80]; ``grade_percentile`` ranks the composite (0 to 100,
-    100 for a lone player); ``uncertainty = 10 × sqrt(1 − r)`` with ``r`` the model's
-    composite reliability at the player's games.
+    ``fbs`` boolean. The pool is qualified FBS players at the group. Each weighted
+    trait is z-scored on the pool's mean and sd (ddof 1; 0 where sd is 0 or
+    missing) and multiplied by the model's sign. ``composite = Σ w_t z_t`` over the
+    group's weighted traits, with ``z = 0`` for a trait the player has no value for.
+    ``coverage`` is the weight of the traits he has a value for; ``graded`` needs
+    ``has_primary`` (a value for ``PRIMARY_TRAITS[group]``) and ``coverage`` of at
+    least ``MIN_WEIGHT_COVERAGE``. ``composite`` is NaN where he is not graded.
     """
     missing = {"team", "fbs"} - set(snapshot_week.columns)
     if missing:
@@ -284,7 +320,11 @@ def score_grades(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame
     players = rows.groupby(keys, as_index=False).agg(
         games=("games", "max"), qualified=("qualified", "any"), fbs=("fbs", "any")
     )
-    players = players[players["qualified"] & players["fbs"]][[*keys, "games"]]
+    players = players[
+        players["qualified"]
+        & players["fbs"]
+        & players["position_group"].isin(graded_groups(model))
+    ][[*keys, "games"]].reset_index(drop=True)
     weights = model.weights[model.weights["weight"].gt(0)]
     pool = rows.merge(players[keys], on=keys).merge(
         weights[["position_group", "trait", "sign", "weight"]], on=["position_group", "trait"]
@@ -296,10 +336,50 @@ def score_grades(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame
         pool.assign(weighted=pool["weight"] * pool["z"])
         .groupby(keys)[["weighted", "weight"]]
         .sum()
+        .reindex(pd.MultiIndex.from_frame(players[keys]))
+        .fillna(0.0)
     )
-    composite = (sums["weighted"] / sums["weight"].where(sums["weight"].gt(0))).rename("composite")
-    out = players.merge(composite.reset_index(), on=keys).dropna(subset=["composite"])
-    out = out.reset_index(drop=True)
+    primary = pool[pool["trait"].eq(pool["position_group"].map(PRIMARY_TRAITS))]
+    primary_keys = set(zip(primary["athlete_id"], primary["position_group"]))
+    players["has_primary"] = [key in primary_keys for key in zip(players["athlete_id"], players["position_group"])]
+    players["coverage"] = sums["weight"].to_numpy()
+    players["graded"] = players["has_primary"] & players["coverage"].ge(MIN_WEIGHT_COVERAGE)
+    players["composite"] = np.where(players["graded"], sums["weighted"].to_numpy(), np.nan)
+    return players[ELIGIBILITY_COLUMNS]
+
+
+COVERAGE_LOSS_COLUMNS = ["position_group", "qualified", "graded", "no_primary", "low_coverage"]
+
+
+def coverage_losses(eligibility: pd.DataFrame) -> pd.DataFrame:
+    """Per group: qualified FBS players, how many are graded, and how many lose the
+    grade for lacking the primary trait or, with it, for coverage under
+    ``MIN_WEIGHT_COVERAGE``."""
+    frame = eligibility.assign(
+        no_primary=~eligibility["has_primary"],
+        low_coverage=eligibility["has_primary"] & ~eligibility["graded"],
+    )
+    out = frame.groupby("position_group").agg(
+        qualified=("athlete_id", "size"),
+        graded=("graded", "sum"),
+        no_primary=("no_primary", "sum"),
+        low_coverage=("low_coverage", "sum"),
+    )
+    return out.reset_index()[COVERAGE_LOSS_COLUMNS].astype(
+        {name: int for name in COVERAGE_LOSS_COLUMNS[1:]}
+    )
+
+
+def score_grades(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame:
+    """Each graded player's grade from one snapshot week (see ``grade_eligibility``).
+
+    ``grade = 50 + 10 × (composite − mean) / sd`` over the graded players at the
+    group, clipped to [20, 80]; ``grade_percentile`` ranks the composite (0 to 100,
+    100 for a lone player); ``uncertainty = 10 × sqrt(1 − r)`` with ``r`` the model's
+    composite reliability at the player's games.
+    """
+    out = grade_eligibility(snapshot_week, model)
+    out = out[out["graded"]].reset_index(drop=True)
     if out.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 

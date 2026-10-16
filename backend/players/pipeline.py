@@ -14,7 +14,7 @@ from backend.etl import store
 from backend.players import artifacts, heisman, value
 from backend.players.credit import DEFENSE_ROLES, OFFENSE_SHARES
 from backend.players.ingest import players_dir, read_season_source
-from backend.players.traits import MODEL_VERSION, backtest, expectations, grade
+from backend.players.traits import MODEL_VERSION, backtest, expectations, grade, war
 from backend.players.traits.snapshots import TRAIT_SNAPSHOT_COLUMNS
 
 log = logging.getLogger(__name__)
@@ -60,6 +60,7 @@ POSITION_TRAIT_COLUMNS = [
     *TRAIT_SNAPSHOT_COLUMNS,
     "uncertainty",
     "in_grade",
+    "points_above_replacement",
     "fbs",
     "poor_coverage",
 ]
@@ -119,6 +120,47 @@ def grade_rows(snapshot: pd.DataFrame, model: grade.GradeModel) -> pd.DataFrame:
     )
 
 
+def war_rows(
+    snapshot: pd.DataFrame, values: pd.DataFrame, war_frame: pd.DataFrame
+) -> pd.DataFrame:
+    """One ``trait = "war"`` row per qualified FBS player-week with a v4 value.
+
+    A snapshot week reads the latest v4 week at or before it (a week without games
+    has no v4 row of its own). The row takes the player's v4 position group and
+    games, ``value`` is his wins above replacement, ``points_above_replacement`` his
+    v4 points, and ``percentile`` ranks wins among the week's rows at the group.
+    """
+    flags = snapshot.assign(
+        pool=snapshot["qualified"].eq(True) & snapshot["fbs"].eq(True)
+    ).groupby(["week", "athlete_id"])["pool"].any()
+    pool = flags[flags].reset_index()[["week", "athlete_id"]]
+    v4_weeks = np.array(sorted(values["week"].astype(int).unique()))
+    if pool.empty or not len(v4_weeks):
+        return pd.DataFrame(columns=[*TRAIT_SNAPSHOT_COLUMNS, "points_above_replacement"])
+    position = np.searchsorted(v4_weeks, pool["week"].astype(int).to_numpy(), side="right") - 1
+    pool = pool[position >= 0].assign(value_week=v4_weeks[position[position >= 0]])
+    measured = values[["week", "athlete_id", "position_group", "games"]].astype(
+        {"athlete_id": str}
+    ).merge(war_frame.astype({"athlete_id": str}), on=["athlete_id", "week"])
+    rows = pool.merge(
+        measured.rename(columns={"week": "value_week"}), on=["athlete_id", "value_week"]
+    ).dropna(subset=["wins_above_replacement"])
+    identity = snapshot.drop_duplicates(["week", "athlete_id"])[
+        ["week", "athlete_id", "season", "athlete_name", "team", "team_id"]
+    ]
+    rows = rows.merge(identity, on=["week", "athlete_id"])
+    by_group = rows.groupby(["week", "position_group"])["wins_above_replacement"]
+    rank = by_group.rank(method="average")
+    n = by_group.transform("size")
+    return rows.assign(
+        trait="war",
+        value=rows["wins_above_replacement"],
+        percentile=(100 * (rank - 1) / (n - 1)).where(n.gt(1), 100.0),
+        kind="measured",
+        qualified=True,
+    )
+
+
 def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     """Score the season's weekly trait snapshots with the latest earlier grade model.
 
@@ -126,9 +168,11 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     refit, and a model whose development seasons include ``season`` is refused. The
     season decides its own receptions-or-targets mode from its own target coverage;
     every row records it in ``poor_coverage``, which the table does not publish. Each
-    row carries ``fbs`` from the team's classification; grade rows exist for
+    row carries ``fbs`` from the team's classification; grade and war rows exist for
     qualified FBS players only, and only FBS rows are published. ``in_grade`` marks
     trait rows whose trait has positive weight at the group, and every grade row.
+    War rows carry v4's wins above replacement (``war.wins_above_replacement``) and
+    ``points_above_replacement``.
     """
     model_path = latest_grade_model_path(season)
     model = grade.load_grade_model(model_path)
@@ -143,6 +187,12 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     # The grade pool is qualified FBS players, so the flag precedes scoring.
     snapshot = snapshot.assign(fbs=snapshot["team"].isin(fbs_schools))
     scored = grade_rows(snapshot, model)
+    values = backtest.player_values(season)
+    measured = war_rows(
+        snapshot,
+        values,
+        war.wins_above_replacement(values, built["credited"], war.season_projections(season)),
+    )
     weighted = model.weights[model.weights["weight"].gt(0)]
     weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
     traits = snapshot[TRAIT_SNAPSHOT_COLUMNS].assign(uncertainty=np.nan)
@@ -151,8 +201,16 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         for group, trait in zip(traits["position_group"], traits["trait"])
     ]
     scored = scored.assign(in_grade=True, as_of=None, model_version=None)
+    measured = measured.assign(
+        in_grade=False, uncertainty=np.nan, as_of=None, model_version=None
+    )
+    columns = [*TRAIT_SNAPSHOT_COLUMNS, "uncertainty", "in_grade"]
     out = pd.concat(
-        [traits, scored[[*TRAIT_SNAPSHOT_COLUMNS, "uncertainty", "in_grade"]]],
+        [
+            traits.assign(points_above_replacement=np.nan),
+            scored[columns].assign(points_above_replacement=np.nan),
+            measured[[*columns, "points_above_replacement"]],
+        ],
         ignore_index=True,
     )
     out = out.assign(
@@ -163,10 +221,22 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     )[POSITION_TRAIT_COLUMNS]
     store.write_processed(out, *position_traits_artifact(season))
     graded = sorted(grade.graded_groups(model))
+    latest = snapshot["week"].max()
+    losses = grade.coverage_losses(
+        grade.grade_eligibility(snapshot[snapshot["week"].eq(latest)], model)
+    )
+    for row in losses.itertuples():
+        log.info(
+            f"position grade {season} week {latest} {row.position_group}: "
+            f"{row.graded} of {row.qualified} qualified FBS players graded; "
+            f"{row.no_primary} lack the primary trait, {row.low_coverage} cover under "
+            f"{grade.MIN_WEIGHT_COVERAGE} of the weight"
+        )
     log.info(
         f"position traits {season}: {scored['athlete_id'].nunique()} qualified FBS players "
         f"graded over {scored['week'].nunique()} weeks with the model through "
         f"{max(model.dev_seasons)}; graded groups {', '.join(graded) or 'none'}; "
+        f"{len(measured)} war rows; "
         f"{'receptions' if poor else 'targets'} mode, uncovered incompletions "
         f"{backtest.uncovered_share(coverage):.3f}"
     )
