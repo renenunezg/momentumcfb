@@ -126,3 +126,60 @@ def test_expectation_tables_use_only_earlier_seasons_and_fall_back_to_the_mean()
     assert expected.iloc[1] == pytest.approx(3.0)  # unseen bucket: global mean of 2, 6, 1
     with pytest.raises(ValueError):
         expectations.fit_expectation_tables({2022: current}, before_season=2022)
+
+
+def test_buckets_field_goal_labels_and_conversion_table():
+    edges = pd.DataFrame({
+        "down": [1, 2, 3, 4, 1, 1, 1, 1, 1, 1, 1],
+        "distance": [0, 2, 3, 6, 7, 10, 11, 5, 5, 5, 5],
+        "yards_to_goal": [80, 79, 40, 39, 20, 19, 99, 1, 50, 60, 70],
+    })
+    got = expectations.bucket(edges)
+    assert got["distance_bucket"].tolist()[:7] == ["1-2", "1-2", "3-6", "3-6", "7-10", "7-10", "11+"]
+    assert got["field_bucket"].tolist()[:7] == ["own", "mid", "mid", "plus", "plus", "red", "own"]
+    assert got["down_bucket"].tolist()[:4] == [1, 2, 3, 4]
+    assert "fg_bucket" not in got  # no play_text, no field goal bucket
+
+    kicks = [
+        ("Field Goal Good", "A B 49 yd FG GOOD"),
+        ("Field Goal Missed", "A B 46 yard field goal MISSED"),
+        ("Blocked Field Goal", "A B 47 Yd Field Goal BLOCKED"),
+        ("Field Goal Good", "A B 50 yd FG GOOD"),
+        ("Blocked Field Goal Touchdown", "C D 70 Yd Return of Blocked Field Goal (E F Kick)"),
+        ("Field Goal Good", "no distance in this text"),
+    ]
+    # first-and-10 in the middle: two successes in three competitive plays, then one failed second down;
+    # the last play is a success that is not competitive and must stay out
+    scrimmage = [True, True, False, False, True]
+    prior = pd.DataFrame({
+        "season": 2021,
+        "down": [4] * len(kicks) + [1, 1, 1, 2, 1],
+        "distance": [5] * len(kicks) + [10] * 5,
+        "yards_to_goal": [30] * len(kicks) + [60] * 5,
+        "is_rush": False,
+        "is_competitive": [False] * len(kicks) + [True, True, True, True, False],
+        "yards_gained": 0.0,
+        "is_success": [False] * len(kicks) + scrimmage,
+        "play_type": [kind for kind, _ in kicks] + ["Pass Reception"] * 5,
+        "play_text": [text for _, text in kicks] + [""] * 5,
+    })
+    tables = expectations.fit_expectation_tables({2021: prior}, before_season=2022)
+
+    fg = tables.field_goal.set_index("fg_bucket")
+    assert fg["expected"].to_dict() == {45: pytest.approx(1 / 3), 50: 1.0}
+    assert fg["plays"].to_dict() == {45: 3, 50: 1}  # the return TD and the unparsed kick are out
+
+    probe = pd.DataFrame({"play_text": ["Z 49 yd FG", "Z 52 yard field goal", "Z 61 yd FG", "no distance"]}, index=[10, 11, 12, 13])
+    expected = expectations.expected_field_goal(tables, probe)  # bucket() is called here: no bucket columns on probe
+    assert expected.index.tolist() == [10, 11, 12, 13]
+    assert expected.iloc[0] == pytest.approx(1 / 3)
+    assert expected.iloc[1] == pytest.approx(1.0)  # 52 falls in the 50 bin
+    assert expected.iloc[2] == pytest.approx(0.5)  # unseen 60 bin: mean of the four fitted kicks
+    assert expected.iloc[3] == pytest.approx(0.5)  # unparsed distance
+
+    conversion = tables.conversion
+    assert conversion["plays"].sum() == 4  # the non-competitive play and the kicks are excluded
+    situation = pd.DataFrame({"down": [1, 3], "distance": [10, 10], "yards_to_goal": [60, 60]}, index=[5, 6])
+    got = expectations.expected_conversion(tables, situation)
+    assert got.loc[5] == pytest.approx(2 / 3)
+    assert got.loc[6] == pytest.approx(0.5)  # unseen third down: global mean of the four plays
