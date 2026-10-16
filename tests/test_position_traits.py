@@ -1,4 +1,5 @@
 import dataclasses
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1207,6 +1208,14 @@ def test_headline_fit_refuses_to_score_its_own_seasons(tmp_path):
     headline.validate_headline_fit(loaded, 2025)
     pd.testing.assert_series_equal(loaded.analytic_se, fit.analytic_se)
     assert loaded.dropped_reason == fit.dropped_reason
+    assert loaded.poor_coverage is False
+    fit.poor_coverage = True
+    headline.save_headline_fit(fit, tmp_path / "fit.json")
+    assert headline.load_headline_fit(tmp_path / "fit.json").poor_coverage is True
+    stale = json.loads((tmp_path / "fit.json").read_text())
+    del stale["poor_coverage"]
+    with pytest.raises(ValueError, match="poor_coverage"):
+        headline.headline_fit_from_payload(stale)
     with pytest.raises(ValueError):
         headline.validate_headline_fit(loaded, 2023)
 
@@ -1474,7 +1483,7 @@ FAKE_V4_2026 = pd.DataFrame({
 def test_run_position_traits_scores_with_a_frozen_fit_and_never_refits(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
     _install_frozen_model(tmp_path / "players" / "models")
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: FAKE_SEASON_2026)
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None, poor_coverage=None: FAKE_SEASON_2026)
     monkeypatch.setattr(pipeline, "read_season_source", lambda season, name: FBS_TEAMS)
     monkeypatch.setattr(pipeline.headline, "fit_headline", lambda *a, **k: pytest.fail("refit"))
     monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
@@ -1521,7 +1530,7 @@ def test_run_position_traits_flags_no_headline_where_every_feature_was_dropped(m
     )
     monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
     _install_frozen_model(tmp_path / "players" / "models", fit=fit)
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: FAKE_SEASON_2026)
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None, poor_coverage=None: FAKE_SEASON_2026)
     monkeypatch.setattr(pipeline, "read_season_source", lambda season, name: FBS_TEAMS)
     monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
     with caplog.at_level("INFO", logger=pipeline.log.name):
@@ -1549,7 +1558,7 @@ def test_run_position_traits_refuses_a_fit_that_saw_the_season(monkeypatch, tmp_
     headline.save_headline_fit(
         _frozen_fit([2022, 2026]), tmp_path / "players" / "models" / "position_traits_2025.json"
     )
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: pytest.fail("built"))
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None, poor_coverage=None: pytest.fail("built"))
     with pytest.raises(ValueError, match="cannot score 2026"):
         pipeline.run_position_traits(2026, AS_OF)
 
@@ -1583,13 +1592,18 @@ def test_run_position_traits_passes_the_frozen_tables_and_never_fits_expectation
     monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
     seen = []
 
-    def build(season, tables=None):
-        seen.append(tables)
+    def build(season, tables=None, poor_coverage=None):
+        seen.append((tables, poor_coverage))
         return FAKE_SEASON_2026
 
     monkeypatch.setattr(pipeline.backtest, "build_season_traits", build)
     pipeline.run_position_traits(2026, AS_OF)
-    assert len(seen) == 1 and seen[0].source_seasons == [2024, 2025]
+    assert len(seen) == 1 and seen[0][0].source_seasons == [2024, 2025]
+    assert seen[0][1] is False  # the frozen fit's coverage mode, never None
+    _install_frozen_model(tmp_path / "players" / "models", fit=dataclasses.replace(FROZEN_FIT_2024, poor_coverage=True))
+    pipeline.run_position_traits(2026, AS_OF)
+    assert seen[1][1] is True
+    seen = [tables for tables, _ in seen]
     pd.testing.assert_frame_equal(
         expectations.tables_frame(seen[0]), expectations.tables_frame(_serving_tables())
     )
@@ -1606,6 +1620,29 @@ def test_build_season_traits_with_frozen_tables_skips_the_fit(monkeypatch):
         backtest.build_season_traits(2026, tables=_serving_tables(2025))
     with pytest.raises(ValueError, match="cannot rate 2026"):
         backtest.build_season_traits(2026, tables=_serving_tables(2026))
+
+
+def test_build_season_traits_uses_the_frozen_coverage_mode_over_the_measured_one(monkeypatch):
+    from types import SimpleNamespace
+
+    class Built(Exception):
+        pass
+
+    def qb_traits(ctx, tables, recovered, poor_coverage):
+        raise Built(poor_coverage)
+
+    monkeypatch.setattr(backtest, "load_season_context", lambda season: SimpleNamespace(plays=None, roster=None))
+    monkeypatch.setattr(backtest, "read_weekly", lambda season, name: None)
+    monkeypatch.setattr(backtest, "recover_targets", lambda *a: None)
+    # One uncovered incompletion in ten: the season's own coverage is good (targets mode).
+    monkeypatch.setattr(backtest, "target_coverage", lambda *a: pd.DataFrame({"incompletions": [10], "uncovered": [1]}))
+    monkeypatch.setattr(backtest, "qb_traits", qb_traits)
+    modes = []
+    for frozen in (None, True, False):
+        with pytest.raises(Built) as caught:
+            backtest.build_season_traits(2026, tables=_serving_tables(2025), poor_coverage=frozen)
+        modes.append(caught.value.args[0])
+    assert modes == [False, True, False]
 
 
 @pytest.fixture
@@ -1732,7 +1769,7 @@ def test_portal_match_table_counts_fbs_destinations(monkeypatch):
 def test_run_position_traits_needs_the_frozen_tables(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
     headline.save_headline_fit(FROZEN_FIT_2024, tmp_path / "players" / "models" / "position_traits_2024.json")
-    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: pytest.fail("built"))
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None, poor_coverage=None: pytest.fail("built"))
     with pytest.raises(FileNotFoundError, match="position-traits-fit"):
         pipeline.run_position_traits(2026, AS_OF)
 
