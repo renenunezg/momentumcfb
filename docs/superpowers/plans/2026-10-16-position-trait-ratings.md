@@ -75,7 +75,7 @@ Shared frame contract, used by every trait builder and consumed by Tasks 11 onwa
 | `denominator` | float | exposure for this game (dropbacks, carries, targets, games = 1.0), FCS-weighted |
 | `kind` | str | `counted` or `inferred` |
 
-A trait's cumulative value through week w is `sum(numerator) / sum(denominator)` over `model_week <= w` (aggregate `rate`), except traits that declare an `aggregate` of `quantile20` (floor), `share_of_games` (every week) or `latest` (with-without impact: the row with the greatest `model_week <= w`), which Task 11 handles by name. The registry in `__init__.py` is `TRAITS: dict[str, TraitSpec]` with `TraitSpec(name, position_group, kind, aggregate, higher_is_better)`.
+A trait's cumulative value through week w is `sum(numerator) / sum(denominator)` over `model_week <= w` (aggregate `rate`), except traits that declare an `aggregate` of `quantile20` (floor), `share_of_games` (every week) or `latest` (with-without impact: the row with the greatest `model_week <= w`), which Task 11 handles by name. The registry in `__init__.py` is `TRAITS: dict[str, TraitSpec]` keyed by trait name, with `TraitSpec(name, position_groups: tuple[str, ...], kind, aggregate, higher_is_better)`; a trait shared by several groups (e.g. `def.havoc`) is one spec listing every group.
 
 ---
 
@@ -426,7 +426,7 @@ Build a fixture `qb_context()` in the test module: two games, two teams, one QB 
 def test_qb_traits_cover_every_registered_qb_trait_once_per_game():
     ctx, tables = qb_context()
     out = offense.qb_traits(ctx, tables, recovered_targets=pd.DataFrame(columns=["play_id", "athlete_id", "source"]))
-    expected = {name for name, spec in TRAITS.items() if spec.position_group == "QB"}
+    expected = {name for name, spec in TRAITS.items() if "QB" in spec.position_groups}
     assert set(out["trait"]) == expected
     assert not out.duplicated(["athlete_id", "game_id", "trait"]).any()
 
