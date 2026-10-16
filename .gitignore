@@ -38,3 +38,6 @@ backend/data/
 
 # OS
 .DS_Store
+
+# Brainstorm mockups (superpowers visual companion)
+.superpowers/
