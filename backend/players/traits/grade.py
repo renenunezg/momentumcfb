@@ -30,6 +30,9 @@ from backend.config import PROCESSED_DIR
 from backend.players.traits import MODEL_VERSION, TRAITS
 
 NOISE_RELIABILITY = 0.10
+# The fewest players a pooled split-half reliability may rest on before it counts.
+# A sample floor, not a tuned value.
+MIN_RELIABILITY_PLAYERS = 30
 WEIGHT_GAMES = 8
 # The trait whose denominator measures a player's usage at the position. Without
 # it the player has no measured role there (a wildcat snap, a trick play), so he
@@ -64,6 +67,7 @@ WEIGHT_COLUMNS = [
     "sign_source",
     "reliability",
     "portability",
+    "portability_imputed",
     "weight",
     "status",
 ]
@@ -151,17 +155,29 @@ def trait_weights(
     correlation`` and optionally ``games``, of which only ``WEIGHT_GAMES`` is read);
     ``portability`` is ``transfers.portability`` output, whose ``portable_share`` is
     clipped to [0, 1] and is unmeasured where NaN; ``orientation`` is
-    ``orientations`` output. ``weight = max(reliability, 0) × (portability or 1)``,
+    ``orientations`` output.
+
+    A reliability resting on fewer than ``MIN_RELIABILITY_PLAYERS`` players (when
+    ``reliability`` has a ``players`` column) is treated as unmeasured; 30 is a
+    sample floor, not a tuned value. An unmeasured portability is imputed as the
+    mean measured (clipped) portability over the group's traits, or over every
+    group's traits when the group has none, and flagged ``portability_imputed``; an
+    unmeasured trait is so weighted like a typical trait at the position, not like a
+    perfectly portable one. ``weight = max(reliability, 0) × portability``,
     normalized within the group over weighted traits. ``status`` is
     ``unmeasured_reliability`` when no reliability could be measured (too few
     players, or a ``latest`` trait with no per-game values), ``noise`` when it is
     under ``NOISE_RELIABILITY``, ``team-driven`` when portability is measured and at
-    or below zero, ``unmeasured`` when weighted without a portability, else
+    or below zero, ``unmeasured`` when weighted on an imputed portability, else
     ``weighted``. Only ``weighted`` and ``unmeasured`` traits carry weight.
     """
     rel = reliability
     if "games" in rel.columns:
         rel = rel[rel["games"].eq(WEIGHT_GAMES)]
+    if "players" in rel.columns:
+        rel = rel.assign(
+            correlation=rel["correlation"].where(rel["players"].ge(MIN_RELIABILITY_PLAYERS))
+        )
     rel = rel.drop_duplicates(["position_group", "trait"]).set_index(["position_group", "trait"])
     port = portability.drop_duplicates(["position_group", "trait"]).set_index(
         ["position_group", "trait"]
@@ -170,11 +186,11 @@ def trait_weights(
     keys = pd.MultiIndex.from_frame(out[["position_group", "trait"]])
     out["reliability"] = rel["correlation"].reindex(keys).to_numpy(float)
     raw_share = port["portable_share"].reindex(keys).to_numpy(float)
-    out["portability"] = np.clip(raw_share, 0.0, 1.0)
+    measured_share = pd.Series(np.clip(raw_share, 0.0, 1.0), index=out.index)
 
     unmeasured_reliability = out["reliability"].isna()
     noise = ~unmeasured_reliability & out["reliability"].lt(NOISE_RELIABILITY)
-    measured = out["portability"].notna()
+    measured = measured_share.notna()
     usable = ~unmeasured_reliability & ~noise
     team_driven = usable & measured & (raw_share <= 0)
     out["status"] = np.select(
@@ -182,7 +198,10 @@ def trait_weights(
         ["unmeasured_reliability", "noise", "team-driven", "unmeasured"],
         "weighted",
     )
-    raw = out["reliability"].clip(lower=0.0) * out["portability"].fillna(1.0)
+    group_mean = measured_share.groupby(out["position_group"]).transform("mean")
+    out["portability"] = measured_share.fillna(group_mean).fillna(measured_share.mean())
+    out["portability_imputed"] = ~measured
+    raw = out["reliability"].clip(lower=0.0) * out["portability"]
     raw = raw.where(out["status"].isin(["weighted", "unmeasured"]), 0.0).fillna(0.0)
     total = raw.groupby(out["position_group"]).transform("sum")
     out["weight"] = (raw / total.where(total.gt(0))).fillna(0.0)
@@ -256,6 +275,7 @@ def grade_model_from_payload(payload: dict) -> GradeModel:
     weights = pd.DataFrame(payload["weights"], columns=WEIGHT_COLUMNS)
     for column in ("sign", "reliability", "portability", "weight"):
         weights[column] = weights[column].astype(float)
+    weights["portability_imputed"] = weights["portability_imputed"].astype(bool)
     reliability = pd.DataFrame(payload["reliability"], columns=RELIABILITY_COLUMNS)
     return GradeModel(
         weights=weights,
