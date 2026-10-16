@@ -11,6 +11,7 @@ from backend.players.traits import (
     context,
     defense,
     expectations,
+    line,
     offense,
     register,
     targets,
@@ -592,13 +593,13 @@ def defense_context():
         ("ad1", "Away", 2): {"TOT": 3, "TFL": 1},
     }
     box = []
-    for (athlete_id, team, game_id), line in lines.items():
+    for (athlete_id, team, game_id), stats in lines.items():
         for stat_name in DEFENSIVE_STATS:
             box.append({"game_id": game_id, "team": team, "athlete_id": athlete_id, "category": "defensive",
-                        "stat_name": stat_name, "stat": float(line.get(stat_name, 0))})
-        if "INT" in line:
+                        "stat_name": stat_name, "stat": float(stats.get(stat_name, 0))})
+        if "INT" in stats:
             box.append({"game_id": game_id, "team": team, "athlete_id": athlete_id, "category": "interceptions",
-                        "stat_name": "INT", "stat": float(line["INT"])})
+                        "stat_name": "INT", "stat": float(stats["INT"])})
     box = pd.DataFrame(box).assign(athlete_name="", stat_text="")
 
     plays, credit = [], []
@@ -682,3 +683,116 @@ def test_defense_rates_follow_the_box_score_and_the_sack_win_probability():
     assert not out.duplicated(["athlete_id", "game_id", "model_week", "trait"]).any()
     assert out["game_id"].dtype == "Int64"
     assert out.loc[out["trait"].eq("def.impact"), "game_id"].isna().all()
+
+
+def test_line_traits_emit_one_unit_row_per_team_game():
+    ctx, tables = rb_context()
+    out = line.line_traits(ctx, tables)
+    assert out["athlete_id"].str.startswith("unit:").all()
+    assert (out["kind"] == "inferred").all()
+    assert not out.duplicated(["athlete_id", "game_id", "trait"]).any()
+
+
+def test_line_traits_count_the_whole_team_and_have_no_protection_baseline_yet():
+    ctx, tables = rb_context()  # Home runs 12 carries in week 1 (4 stuffed), has 2 dropbacks in week 2
+    out = line.line_traits(ctx, tables).set_index(["trait", "athlete_id", "game_id"])
+    assert _pair(out, "ol.stuff_rate", "unit:Home", 1) == pytest.approx([-4.0, 12.0])
+    assert _pair(out, "ol.short_yardage", "unit:Home", 1) == pytest.approx([1.0 - 0.4, 1.0])
+    # 4 + 4 + 4 + 7 (the 12-yard run is capped) + 0 + 4, then 0 + 0 - 1.2 + 2 + 2 + 2
+    assert _pair(out, "ol.line_yards", "unit:Home", 1) == pytest.approx([27.8, 12.0])
+    # no dropbacks in week 1, so week 2 has no league sack rate: the numerator is NaN, the dropbacks stay
+    protection = out.loc[("ol.protection", "unit:Home", 2)]
+    assert np.isnan(protection["numerator"]) and protection["denominator"] == pytest.approx(2.0)
+    assert ("ol.protection", "unit:Home", 1) not in out.index
+    assert not any(name.startswith("unit:Away") for name in out.index.get_level_values("athlete_id"))
+
+
+def test_line_protection_is_expected_sacks_minus_sacks_allowed():
+    ctx, tables = qb_context()  # each offense: 12 dropbacks and 1 sack per game, in both weeks
+    out = line.line_traits(ctx, tables).set_index(["trait", "athlete_id", "game_id"])
+    # week 1 has no prior league rate; week 2's is 2 sacks in 24 dropbacks, so Home's 14 dropbacks
+    # (the backup's two included) expect 14 / 12 sacks and allowed one. The opponent's week 1 had
+    # no valid expectation, so there is nothing to adjust by.
+    assert np.isnan(out.loc[("ol.protection", "unit:Home", 1), "numerator"])
+    week_two = out.loc[("ol.protection", "unit:Home", 2)]
+    assert week_two["denominator"] == pytest.approx(14.0)
+    assert week_two["numerator"] == pytest.approx(14 / 12 - 1.0)
+
+
+KICK_GAMES = pd.DataFrame({
+    "game_id": [1, 2], "model_week": [1, 2], "home_team": ["Home", "Away"], "away_team": ["Away", "Home"],
+    "completed": True, "home_classification": ["fbs", "fbs"], "away_classification": ["fcs", "fbs"],
+})
+
+
+def kicking_context():
+    """Game 1 (Away is FCS, so Home's rows weigh 0.5): Home's k1 kicks field goals from 30 (good),
+    45 (missed) and 25 (good); Away's k2 makes one from 40. Game 2: Home
+    has two kickers with attempts, so its field goals are skipped; k2 makes one from 35. The table
+    expects 0.9 from 25, 0.8 from 30, 0.7 from 35, 0.6 from 40, 0.5 from 45. Punters: p1 and p2
+    kick in both games."""
+    def play(game_id, offense, text, play_type):
+        return {"id": len(plays) + 1, "game_id": game_id, "offense": offense,
+                "defense": "Away" if offense == "Home" else "Home", "play_type": play_type,
+                "play_text": text, "is_competitive": False}
+
+    plays = []
+    for args in (
+        (1, "Home", "J Kicker 30 yd FG GOOD", "Field Goal Good"),
+        (1, "Home", "J Kicker 45 yd FG MISSED", "Field Goal Missed"),
+        (1, "Home", "J Kicker 25 yd FG GOOD", "Field Goal Good"),
+        (1, "Away", "A Kicker 40 yd FG GOOD", "Field Goal Good"),
+        (2, "Home", "J Kicker 30 yd FG GOOD", "Field Goal Good"),
+        (2, "Home", "B Kicker 30 yd FG MISSED", "Field Goal Missed"),
+        (2, "Away", "A Kicker 35 yd FG GOOD", "Field Goal Good"),
+    ):
+        plays.append(play(*args))
+
+    box = []
+
+    def add(game_id, team, athlete_id, category, stat_name, stat=np.nan, text=""):
+        box.append({"game_id": game_id, "team": team, "athlete_id": athlete_id, "athlete_name": "",
+                    "category": category, "stat_name": stat_name, "stat": stat, "stat_text": text})
+
+    for game_id, team, athlete_id, made in ((1, "Home", "k1", "2/3"), (1, "Away", "k2", "1/1"),
+                                             (2, "Home", "k1", "1/1"), (2, "Home", "k3", "0/1"),
+                                             (2, "Away", "k2", "1/1")):
+        add(game_id, team, athlete_id, "kicking", "FG", text=made)
+        add(game_id, team, athlete_id, "kicking", "XP", text="1/1")
+    for game_id, team, athlete_id, punts, yards in ((1, "Home", "p1", 4, 160), (1, "Away", "p2", 2, 70),
+                                                    (2, "Home", "p1", 3, 120), (2, "Away", "p2", 3, 105)):
+        add(game_id, team, athlete_id, "punting", "NO", punts)
+        add(game_id, team, athlete_id, "punting", "YDS", yards)
+        add(game_id, team, athlete_id, "punting", "AVG", yards / punts)
+    positions = pd.DataFrame({"athlete_id": ["k1", "k2", "k3", "p1", "p2"],
+                              "position_group": ["K", "K", "K", "P", "P"]})
+    field_goal = pd.DataFrame({"fg_bucket": pd.array([25, 30, 35, 40, 45], dtype="Int64"),
+                               "expected": [0.9, 0.8, 0.7, 0.6, 0.5], "plays": 10})
+    tables = expectations.ExpectationTables(rush_yards=pd.DataFrame(), conversion=pd.DataFrame(),
+                                            field_goal=field_goal, source_seasons=[2025])
+    empty = pd.DataFrame()
+    ctx = context.SeasonContext(season=2026, plays=pd.DataFrame(plays), games=KICK_GAMES, effects=empty,
+                                credit=empty, box=pd.DataFrame(box), roster=empty, teams=empty,
+                                positions=positions, presence=empty)
+    return ctx, tables
+
+
+def test_kicking_traits_score_field_goals_and_punts_against_expectation(caplog):
+    ctx, tables = kicking_context()
+    with caplog.at_level("INFO", logger=line.__name__):
+        out = line.kicking_traits(ctx, tables)
+    assert (out["kind"] == "counted").all()
+    assert not out.duplicated(["athlete_id", "game_id", "trait"]).any()
+    out = out.set_index(["trait", "athlete_id", "game_id"])
+    # k1 in game 1: (1 - .8) + (0 - .5) + (1 - .9) = -0.2 over 3 kicks, all at the 0.5 FCS weight
+    assert _pair(out, "k.field_goal", "k1", 1) == pytest.approx([-0.1, 1.5])
+    assert _pair(out, "k.field_goal", "k2", 1) == pytest.approx([0.4, 1.0])
+    assert _pair(out, "k.field_goal", "k2", 2) == pytest.approx([0.3, 1.0])
+    # Home had two kickers with attempts in game 2, so neither is credited
+    assert {athlete for trait, athlete, _ in out.index if trait == "k.field_goal"} == {"k1", "k2"}
+    assert ("k.field_goal", "k1", 2) not in out.index and ("k.field_goal", "k3", 2) not in out.index
+    assert "1 team-games skipped: ambiguous kicker" in caplog.text
+    # no league average before week 2; then 230 yards on 6 punts through week 1
+    assert not any(trait == "p.punt_average" and game == 1 for trait, _, game in out.index)
+    assert _pair(out, "p.punt_average", "p1", 2) == pytest.approx([120 - 3 * 230 / 6, 3.0])
+    assert _pair(out, "p.punt_average", "p2", 2) == pytest.approx([105 - 3 * 230 / 6, 3.0])
