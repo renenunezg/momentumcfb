@@ -18,6 +18,15 @@ def handle_ingest_players(args: Namespace) -> None:
         log.info(f"players {season}: {len(manifest)} sources snapshotted")
 
 
+def handle_ingest_portal(args: Namespace) -> None:
+    from backend.cfbd.client import CFBDClient
+    from backend.players.ingest import ingest_portal
+
+    client = CFBDClient(max_calls=args.max_calls, min_remaining=args.min_remaining)
+    for season in args.seasons:
+        ingest_portal(client, season)
+
+
 def handle_player_values(args: Namespace) -> None:
     from datetime import datetime, timezone
 
