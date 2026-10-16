@@ -1261,7 +1261,7 @@ def _two_week_traits() -> pd.DataFrame:
         {"season": 2026, "week": week, "as_of": "2026-10-01T00:00:00+00:00", "model_version": "cfb_position_traits_v1",
          "athlete_id": athlete, "athlete_name": athlete.upper(), "team": "A", "team_id": 1, "position_group": "QB",
          "games": week, "trait": trait, "value": 1.0, "percentile": 50.0, "kind": "fitted", "qualified": True,
-         "uncertainty": np.nan, "in_grade": True, "fbs": True,
+         "uncertainty": np.nan, "in_grade": True, "points_above_replacement": np.nan, "fbs": True,
          "poor_coverage": False}
         for week in (7, 8) for athlete in ("q1", "q2") for trait in ("headline", "qb.explosive")
     ]

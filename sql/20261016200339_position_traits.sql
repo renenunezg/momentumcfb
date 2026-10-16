@@ -17,6 +17,7 @@ create table if not exists cfb.position_traits (
     kind text,
     in_grade boolean not null,
     uncertainty double precision,
+    points_above_replacement double precision,
     primary key (season, athlete_id, trait)
 );
 create index if not exists position_traits_group_trait_idx
