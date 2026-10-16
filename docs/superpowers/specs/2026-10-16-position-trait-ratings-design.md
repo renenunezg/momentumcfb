@@ -1,6 +1,6 @@
 # Position trait ratings: design
 
-Date: 2026-10-16. Status: approved by Rene on 2026-10-16, including the seven CFBD portal calls.
+Date: 2026-10-16. Status: approved by Rene on 2026-10-16, including the seven CFBD portal calls. Implementation complete on 2026-10-16; the backtest report is at `docs/position_traits_v1.md`.
 
 ## Intent
 
