@@ -3,7 +3,6 @@
 import hashlib
 import json
 import logging
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -81,13 +80,9 @@ def run_player_values(season: int, as_of: datetime) -> pd.DataFrame:
     return outputs["player_values"]
 
 
-def _fit_cutoff(path: Path) -> int:
-    return int(re.fullmatch(r"position_traits_(\d{4})\.json", path.name).group(1))
-
-
 def frozen_expectation_tables(fit_path: Path) -> expectations.ExpectationTables:
     """The serving expectation tables saved with the fit at ``fit_path``."""
-    path = expectations.expectation_tables_path(fit_path.parent, _fit_cutoff(fit_path))
+    path = expectations.expectation_tables_path(fit_path.parent, headline.fit_cutoff(fit_path))
     if not path.exists():
         raise FileNotFoundError(
             f"no frozen expectation tables {path.name} beside {fit_path.name} in "
@@ -98,19 +93,7 @@ def frozen_expectation_tables(fit_path: Path) -> expectations.ExpectationTables:
 
 def latest_headline_fit_path(season: int) -> Path:
     """The frozen headline fit with the greatest cutoff before ``season``."""
-    models = store.PROCESSED_DIR / "players" / "models"
-    cutoffs = {
-        int(match.group(1)): path
-        for path in models.glob("position_traits_*.json")
-        if (match := re.fullmatch(r"position_traits_(\d{4})\.json", path.name))
-    }
-    earlier = [cutoff for cutoff in cutoffs if cutoff < season]
-    if not earlier:
-        raise FileNotFoundError(
-            f"no position trait headline fit with a cutoff before {season} in {models}; "
-            "run position-traits-fit first"
-        )
-    return cutoffs[max(earlier)]
+    return headline.latest_fit_path(store.PROCESSED_DIR / "players" / "models", season)
 
 
 def headline_rows(

@@ -52,17 +52,20 @@ target-based traits to receptions.
 mode too (uncovered share 0.699).
 
 Portal rows are matched to an athlete id by name on both the destination
-roster of the portal season and the origin roster of the season before. The
-match counts are from the run log; the FBS-destination rate divides matched
-rows whose destination is FBS by portal rows naming an FBS destination.
+roster of the portal season and the origin roster of the season before
+(`match_transfers`). The table is the evaluation file's `portal` table, built
+by `backtest.portal_match_table`: it counts the portal rows, the rows whose
+destination is an FBS school in that season's teams file, the rows
+`match_transfers` tied to one athlete, and the matched rows whose destination
+is FBS. The rate is the last count over the FBS-destination rows.
 
-| Portal season | Portal rows | Matched | Rows naming an FBS destination | Matched with an FBS destination | Rate |
+| Portal season | Portal rows | Rows naming an FBS destination | Matched | Matched with an FBS destination | Rate |
 | --- | --- | --- | --- | --- | --- |
-| 2021 | 1770 | 566 | 816 | 514 | 0.630 |
-| 2022 | 2273 | 1021 | 1092 | 845 | 0.774 |
-| 2023 | 2502 | 1300 | 1418 | 1223 | 0.862 |
-| 2024 | 3378 | 1963 | 2066 | 1697 | 0.821 |
-| 2025 | 4499 | 2857 | 2905 | 2361 | 0.813 |
+| 2021 | 1770 | 816 | 566 | 514 | 0.630 |
+| 2022 | 2273 | 1092 | 1021 | 845 | 0.774 |
+| 2023 | 2502 | 1418 | 1300 | 1223 | 0.862 |
+| 2024 | 3378 | 2066 | 1963 | 1697 | 0.821 |
+| 2025 | 4499 | 2905 | 2857 | 2361 | 0.813 |
 
 Most unmatched rows have no destination match (1070 to 1147 rows a season),
 which is mostly players who left for a non-FBS school or have no destination.
@@ -92,7 +95,9 @@ weights are heavily shrunk.
 Weights are points of home margin per development-season standard deviation
 of the feature. `loso_sd` is the sd of the weight across the five
 leave-one-season-out refits. Two decimals is as much precision as these
-spreads support.
+spreads support. The spreads shown are from the final refit on the kept
+features; the drop rule was applied to the first pass over every feature, so
+a kept weight can sit under twice its refit spread.
 
 | Feature | Weight | LOSO sd | Jackknife sd | Analytic SE |
 | --- | --- | --- | --- | --- |
@@ -417,12 +422,28 @@ distance and field position baselines for rushing yards and conversions and
 the distance baseline for field goals, fit on every play season on disk from
 2019 through 2025, with the source seasons stored in the parquet metadata.
 The weekly runner loads both and refits neither, so it needs no historical
-play-by-play. The directory is gitignored and travels through the weekly
-workflow cache. Both artifacts must be restored there before the first
-weekly run, the same way the Heisman model bundle is. The weekly workflow no
-longer swallows a `position-traits` failure, so a missing artifact stops the
-player step, and with it the Heisman board and `publish-players`. The
-README and runbook change for installing the two artifacts is a follow-up.
+play-by-play.
+
+The pair reaches the runner two ways. It travels in the reviewed player
+runtime bundle: `export_runtime_bundle` adds the latest fit before the
+season and its tables to the Heisman model, WPA baseline and opponent prior,
+and `install_runtime_bundle` accepts a bundle with or without the pair,
+refusing a fit or tables that do not precede the season. And every weekly
+run uploads the pair as the `position-traits-fit-SEASON` artifact, which the
+next run pinned to that run id restores into the models directory beside the
+`heisman-model-SEASON` artifact.
+
+The first production run needs a re-exported bundle, because the bundle and
+run the workflow points at today predate the pair. Export it with
+`poetry run python -m backend player-prior --season 2026 --runtime-bundle <zip>`,
+which rebuilds the 2026 opponent prior from local data before exporting (on
+2026-10-16 the rebuild matched the frozen prior's numbers and changed only its
+model version label from v3 to v4), then review it and point
+`PLAYER_RUNTIME_BUNDLE_URL` and its checksum at it. Until then the weekly
+workflow, which no longer swallows a `position-traits` failure, stops the
+player step at `position-traits` and skips the Heisman board and
+`publish-players`. The push must wait for the bundle. The runbook change for
+this is a follow-up.
 
 ## Findings
 
@@ -440,7 +461,10 @@ error still falling. The grid now runs to 100,000 and the minimum is still
 half as reliable as v4 at six games (0.167 against 0.334).
 
 Every kept weight is more than three times its leave-one-season-out sd. The
-weights are stable. The ones that are hard to explain are
+weights are stable. One kept weight would fail the drop rule on the refit
+spreads: `RB:rb.breakaway` is 0.48 against a refit jackknife sd of 0.27
+(twice that is 0.54); it passed on the first-pass spreads, where the rule is
+applied. The ones that are hard to explain are
 `RB:rb.ball_security` at -0.96, where fewer fumble costs predict a worse
 margin on a trait with near-zero reliability, and `DL:def.run_stop` at
 -1.01, which reads as an offset to havoc.

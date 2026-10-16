@@ -105,7 +105,16 @@ TABLES = (
     "portability",
     "target_coverage",
     "draft_check",
+    "portal",
 )
+PORTAL_COLUMNS = [
+    "season",
+    "portal_rows",
+    "fbs_destination_rows",
+    "matched",
+    "matched_fbs",
+    "rate",
+]
 
 
 def traits_artifact(name: str) -> tuple[str, ...]:
@@ -637,22 +646,57 @@ def reliability_table(
 # Report-only tables
 
 
-def portability_table(snapshots_by_season: dict[int, pd.DataFrame]) -> pd.DataFrame:
-    matched = [
-        match_transfers(
+def matched_transfers(seasons) -> dict[int, pd.DataFrame]:
+    """``match_transfers`` for every portal season from ``FIRST_PORTAL_SEASON``."""
+    return {
+        season: match_transfers(
             read_season_source(season, "portal"),
             read_season_source(season, "roster"),
             read_season_source(season - 1, "roster"),
         )
-        for season in sorted(snapshots_by_season)
+        for season in sorted(seasons)
         if season >= FIRST_PORTAL_SEASON
-    ]
+    }
+
+
+def portability_table(
+    snapshots_by_season: dict[int, pd.DataFrame],
+    matched: dict[int, pd.DataFrame] | None = None,
+) -> pd.DataFrame:
+    matched = matched_transfers(snapshots_by_season) if matched is None else matched
     transfers = (
-        pd.concat(matched, ignore_index=True)
+        pd.concat(matched.values(), ignore_index=True)
         if matched
         else pd.DataFrame(columns=TRANSFER_COLUMNS)
     )
     return portability(snapshots_by_season, transfers)
+
+
+def portal_match_table(
+    seasons, matched: dict[int, pd.DataFrame] | None = None
+) -> pd.DataFrame:
+    """Per portal season: portal rows, rows whose destination is an FBS school in the
+    season's teams file, rows ``match_transfers`` tied to one athlete, the matched rows
+    with an FBS destination, and ``rate = matched_fbs / fbs_destination_rows``."""
+    matched = matched_transfers(seasons) if matched is None else matched
+    rows = []
+    for season, transfers in sorted(matched.items()):
+        portal = read_season_source(season, "portal")
+        teams = read_season_source(season, "teams")
+        fbs = set(teams.loc[teams["classification"].eq("fbs"), "school"])
+        destination_rows = int(portal["destination"].isin(fbs).sum())
+        matched_fbs = int(transfers["destination"].isin(fbs).sum())
+        rows.append(
+            {
+                "season": season,
+                "portal_rows": len(portal),
+                "fbs_destination_rows": destination_rows,
+                "matched": len(transfers),
+                "matched_fbs": matched_fbs,
+                "rate": matched_fbs / destination_rows if destination_rows else np.nan,
+            }
+        )
+    return pd.DataFrame(rows, columns=PORTAL_COLUMNS)
 
 
 def _spearman(left: pd.Series, right: pd.Series) -> float:
@@ -769,6 +813,7 @@ class BacktestResult:
     portability: pd.DataFrame
     target_coverage: pd.DataFrame
     draft_check: pd.DataFrame
+    portal: pd.DataFrame
     fit: headline.HeadlineFit
     expectations: ExpectationTables
 
@@ -840,12 +885,13 @@ def run_backtest(
     snapshots_by_season = {
         season: data["snapshots"] for season, data in seasons.items()
     }
+    matched = matched_transfers(snapshots_by_season)
     return BacktestResult(
         weights=weights_table(fit),
         validation=validation,
         swap=swap,
         reliability=reliability_table(dev, headline_rows, v4_rows),
-        portability=portability_table(snapshots_by_season),
+        portability=portability_table(snapshots_by_season, matched),
         target_coverage=pd.concat(
             [data["target_coverage"] for data in seasons.values()], ignore_index=True
         ),
@@ -854,6 +900,7 @@ def run_backtest(
             {season: data["values"] for season, data in seasons.items()},
             fit,
         ),
+        portal=portal_match_table(snapshots_by_season, matched),
         fit=fit,
         expectations=fit_tables_before(validation_season + 1),
     )

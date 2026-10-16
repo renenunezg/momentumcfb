@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from backend.draft import research
-from backend.players import ingest, pipeline
+from backend.players import artifacts, ingest, pipeline
 from backend.players.traits import (
     TRAITS,
     TraitSpec,
@@ -1535,6 +1535,127 @@ def test_build_season_traits_with_frozen_tables_skips_the_fit(monkeypatch):
         backtest.build_season_traits(2026, tables=_serving_tables(2025))
     with pytest.raises(ValueError, match="cannot rate 2026"):
         backtest.build_season_traits(2026, tables=_serving_tables(2026))
+
+
+@pytest.fixture
+def runtime_root(monkeypatch, tmp_path):
+    """A processed directory holding the three required runtime files, with every
+    validator except the position trait checks stubbed out."""
+    import backend.model.ingame as ingame
+
+    monkeypatch.setattr(artifacts, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(artifacts, "_validate", lambda payload, season: None)
+    monkeypatch.setattr(artifacts, "load_heisman_model", lambda season: None)
+    monkeypatch.setattr(artifacts.player_value, "load_opponent_prior", lambda season: None)
+    monkeypatch.setattr(artifacts.player_value, "validate_opponent_prior", lambda prior, season: None)
+    monkeypatch.setattr(ingame, "load_baseline_params", lambda frame: None)
+    artifacts.model_path(2026).parent.mkdir(parents=True)
+    artifacts.model_path(2026).write_text("{}")
+    for parts in (("ingame", "baseline_summary.parquet"), artifacts.player_value.opponent_prior_artifact(2026)):
+        path = tmp_path.joinpath(*parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"x": [1]}).to_parquet(path)
+    return tmp_path
+
+
+REQUIRED_MEMBERS = {
+    "players/models/heisman_2026.json", "ingame/baseline_summary.parquet", "players/opponent_priors/2026.parquet",
+}
+TRAIT_MEMBERS = {"players/models/position_traits_2024.json", "players/models/position_traits_expectations_2024.parquet"}
+
+
+def _bundle_names(path):
+    from zipfile import ZipFile
+
+    with ZipFile(path) as archive:
+        return set(archive.namelist())
+
+
+def _reinstall(bundle_path, root, season=2026):
+    data = bundle_path.read_bytes()
+    for name in (*REQUIRED_MEMBERS, *TRAIT_MEMBERS):
+        root.joinpath(name).unlink(missing_ok=True)
+    artifacts.install_runtime_bundle(data, season)
+    return {name for name in (*REQUIRED_MEMBERS, *TRAIT_MEMBERS) if root.joinpath(name).exists()}
+
+
+def test_runtime_bundle_without_a_trait_fit_keeps_the_three_files(runtime_root, tmp_path_factory):
+    bundle = artifacts.export_runtime_bundle(2026, tmp_path_factory.mktemp("out") / "bundle.zip")
+    assert _bundle_names(bundle) == REQUIRED_MEMBERS
+    assert _reinstall(bundle, runtime_root) == REQUIRED_MEMBERS
+
+
+def test_runtime_bundle_carries_and_restores_the_trait_fit_pair(runtime_root, tmp_path_factory):
+    models = runtime_root / "players" / "models"
+    _install_frozen_model(models)
+    _install_frozen_model(models, fit=_frozen_fit([2022, 2023]), cutoff=2023)  # older, not chosen
+    bundle = artifacts.export_runtime_bundle(2026, tmp_path_factory.mktemp("out") / "bundle.zip")
+    assert _bundle_names(bundle) == REQUIRED_MEMBERS | TRAIT_MEMBERS
+    assert _reinstall(bundle, runtime_root) == REQUIRED_MEMBERS | TRAIT_MEMBERS
+    assert headline.load_headline_fit(models / "position_traits_2024.json").dev_seasons == [2022, 2023, 2024]
+    restored = expectations.load_expectation_tables(models / "position_traits_expectations_2024.parquet")
+    assert restored.source_seasons == [2024, 2025]
+
+
+def _zip(members: dict[str, bytes], path):
+    from zipfile import ZipFile
+
+    with ZipFile(path, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return path.read_bytes()
+
+
+def _required_bytes(root):
+    return {name: root.joinpath(name).read_bytes() for name in REQUIRED_MEMBERS}
+
+
+def test_runtime_bundle_rejects_a_trait_fit_that_does_not_precede_the_season(runtime_root, tmp_path_factory):
+    staging = tmp_path_factory.mktemp("staging")
+    _install_frozen_model(staging, fit=_frozen_fit([2022, 2023, 2026]), cutoff=2026, tables=_serving_tables(2025))
+    _install_frozen_model(staging, fit=_frozen_fit([2022, 2023, 2024]), cutoff=2024, tables=_serving_tables(2026))
+    out = tmp_path_factory.mktemp("out")
+    base = _required_bytes(runtime_root)
+    late_fit = {**base,
+                "players/models/position_traits_2026.json": (staging / "position_traits_2026.json").read_bytes(),
+                "players/models/position_traits_expectations_2026.parquet":
+                    (staging / "position_traits_expectations_2026.parquet").read_bytes()}
+    late_tables = {**base,
+                   "players/models/position_traits_2024.json": (staging / "position_traits_2024.json").read_bytes(),
+                   "players/models/position_traits_expectations_2024.parquet":
+                       (staging / "position_traits_expectations_2024.parquet").read_bytes()}
+    with pytest.raises(ValueError, match="cannot serve 2026"):
+        artifacts.install_runtime_bundle(_zip(late_fit, out / "late_fit.zip"), 2026)
+    with pytest.raises(ValueError, match="cannot serve 2026"):
+        artifacts.install_runtime_bundle(_zip(late_tables, out / "late_tables.zip"), 2026)
+    assert not (runtime_root / "players" / "models" / "position_traits_2024.json").exists()
+    half = {**base, "players/models/position_traits_2024.json": late_tables["players/models/position_traits_2024.json"]}
+    stray = {**base, "players/models/other.json": b"{}"}
+    for name, members in (("half", half), ("stray", stray)):
+        with pytest.raises(ValueError, match="unexpected files"):
+            artifacts.install_runtime_bundle(_zip(members, out / f"{name}.zip"), 2026)
+
+
+def test_portal_match_table_counts_fbs_destinations(monkeypatch):
+    sources = {
+        (2022, "portal"): pd.DataFrame([
+            {"season": 2022, "first_name": "Jon", "last_name": "Smith", "origin": "Troy", "destination": "Auburn"},
+            {"season": 2022, "first_name": "Ann", "last_name": "Gone", "origin": "Troy", "destination": "Auburn"},
+            {"season": 2022, "first_name": "Bo", "last_name": "Low", "origin": "Troy", "destination": "Mercer"},
+            {"season": 2022, "first_name": "Cy", "last_name": "None", "origin": "Troy", "destination": None},
+        ]),
+        (2022, "roster"): pd.DataFrame([{"id": "7", "first_name": "Jon", "last_name": "Smith", "team": "Auburn"},
+                                        {"id": "9", "first_name": "Bo", "last_name": "Low", "team": "Mercer"}]),
+        (2021, "roster"): pd.DataFrame([{"id": "7", "first_name": "Jon", "last_name": "Smith", "team": "Troy"},
+                                        {"id": "9", "first_name": "Bo", "last_name": "Low", "team": "Troy"}]),
+        (2022, "teams"): pd.DataFrame({"school": ["Auburn", "Troy", "Mercer"],
+                                       "classification": ["fbs", "fbs", "fcs"]}),
+    }
+    monkeypatch.setattr(backtest, "read_season_source", lambda season, name: sources[(season, name)])
+    out = backtest.portal_match_table([2020, 2022])  # 2020 predates the portal seasons
+    assert out.to_dict("records") == [{"season": 2022, "portal_rows": 4, "fbs_destination_rows": 2,
+                                       "matched": 2, "matched_fbs": 1, "rate": 0.5}]
+    assert "portal" in backtest.TABLES
 
 
 def test_run_position_traits_needs_the_frozen_tables(monkeypatch, tmp_path):
