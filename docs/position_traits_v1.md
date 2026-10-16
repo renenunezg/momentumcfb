@@ -7,9 +7,12 @@ number. A trait is a per-game rate built from tagged plays or box score
 counts, adjusted for the opponent where the data allows, and turned into a
 position percentile among qualified FBS players that week. Traits are
 `counted` when the feed tags the player directly and `inferred` when they
-come from unit outcomes or teammate comparisons. The headline is the fitted
-combination of a player's traits plus his player value v4 EPA credit, in
-points per game above the 30th percentile of qualified players at his group.
+come from unit outcomes or teammate comparisons. The headline is the
+player's own points per game in the fitted model: his share of his team's
+usage at the group times the fitted combination of his traits and his player
+value v4 EPA credit, measured above the 30th percentile of qualified FBS
+players at his group. Only qualified FBS players carry a headline (see The
+headline number).
 
 The headline weights come from one joint fit across positions. Each
 completed FBS against FBS game from model week 2 on is one row. The target is
@@ -28,8 +31,10 @@ evaluation is
 `backend/data/processed/players/position_traits/evaluation_2024.parquet`, and
 every table below is copied from those two files and from the run log of
 `position-traits-fit --dev-seasons 2020 2021 2022 2023 2024 --validate 2025`
-on 2026-10-16, re-run after the penalty grid was extended and the
-replacement and serving fixes went in. Player values for 2020 through 2025 were rebuilt under
+on 2026-10-16, re-run after the penalty grid was extended, the replacement
+and serving fixes went in, and the headline became share-scaled over
+qualified FBS players (log `output/position-traits-fit-20261016-final.log`).
+Player values for 2020 through 2025 were rebuilt under
 `cfb_player_value_v4` before the run, so the baseline is one model.
 
 ## Data coverage
@@ -48,8 +53,11 @@ target-based traits to receptions.
 | 2024 | 35488 | 3610 | 7323 | 24555 | 0.692 | receptions |
 | 2025 | 36489 | 16874 | 8960 | 10655 | 0.292 | targets |
 
-2023 and 2024 ran in receptions mode. The 2026 week 1 data is in receptions
-mode too (uncovered share 0.699).
+2023 and 2024 ran in receptions mode. A served season does not choose its
+own mode: the fit stores the validation season's mode (`poor_coverage`,
+False for 2025) and the weekly runner builds in that mode. The 2026 week 1
+data would be in receptions mode on its own (uncovered share 0.699) and is
+built in targets mode.
 
 Portal rows are matched to an athlete id by name on both the destination
 roster of the portal season and the origin roster of the season before
@@ -67,8 +75,10 @@ is FBS. The rate is the last count over the FBS-destination rows.
 | 2024 | 3378 | 2066 | 1963 | 1697 | 0.821 |
 | 2025 | 4499 | 2905 | 2857 | 2361 | 0.813 |
 
-Most unmatched rows have no destination match (1070 to 1147 rows a season),
-which is mostly players who left for a non-FBS school or have no destination.
+Unmatched rows (portal rows minus matched) number 1204, 1252, 1202, 1415 and
+1642. Most of them name no FBS destination: the rows without one (portal rows
+minus FBS-destination rows) number 954, 1181, 1084, 1312 and 1594, and only
+302, 247, 195, 369 and 544 rows naming an FBS destination stay unmatched.
 
 ## How the weights were chosen
 
@@ -140,8 +150,8 @@ Dropped from the headline and kept on the card as descriptive:
 Unconventional traits earned weight at QB (explosive, floor), RB (yards over
 expected, breakaway), TE (target share, QB independence), DL and DB. The
 headline is not EPA per play with a new name: v4 credit keeps weight only at
-QB and RB. WR, LB and P have no headline weight at all, so their headline is
-constant and v4 remains their rating.
+QB and RB. WR, LB and P keep no feature at all, so they carry no headline,
+none of their traits is counted in the headline, and v4 remains their rating.
 
 Three signs are negative. `DB:def.run_support` has no preset sign, and the
 fit says a safety or corner who makes many run-support tackles is on a
@@ -151,6 +161,30 @@ tackles for loss; the pair reads as havoc credited once and run-game TFL
 discounted. `RB:rb.ball_security` is negative although higher means fewer
 fumble costs, and its split-half reliability is near zero. That weight is
 listed under Findings.
+
+## The headline number
+
+`raw_score` is the fitted combination of a player's standardized traits and
+EPA credit at his group: the margin a team would gain if he had all of its
+usage there. The headline scales it by his actual usage. His share is his
+exposure (dropbacks for a QB, carries for a back, targets for a receiver,
+games for a defender, attempts for a specialist) over the summed exposure of
+his team's players at the group that week; an OL unit has share 1. With
+`replacement` the 30th percentile of `raw_score` among qualified FBS players
+at the group and `sd` their standard deviation:
+
+- `headline = share x (raw_score - replacement)`, points per game the player
+  adds over a replacement-level player in his role;
+- `headline_percentile` ranks the headline among qualified FBS players at
+  the group, the same pool the trait percentiles use;
+- `uncertainty = share x sd x sqrt(1 - r)`, with `r` the headline's
+  split-half reliability at the player's game count.
+
+Only qualified FBS players get a headline row; unqualified and non-FBS
+players keep their trait rows. A group whose every feature was dropped (WR,
+LB and P in this fit) gets no headline rows, `replaces_value` False and no
+trait counted `in_headline`. The share scaling is what keeps a player with
+one dropback from topping the QB list on a single deep completion.
 
 ## 2025 validation
 
@@ -181,7 +215,7 @@ reliability is at least v4's, both measured on the same players and games.
 | RB | 15.046 | 14.986 | 0.060 | 0.334 | 0.167 | False |
 | WR | 15.046 | 15.078 | -0.031 | 0.375 |  | False |
 | TE | 15.046 | 15.081 | -0.035 | 0.311 | 0.417 | False |
-| DL | 15.046 | 14.788 | 0.258 | 0.149 | 0.178 | True |
+| DL | 15.046 | 14.788 | 0.258 | 0.149 | 0.177 | True |
 | LB | 15.046 | 14.875 | 0.171 | 0.199 |  | False |
 | DB | 15.046 | 14.869 | 0.177 | 0.092 | 0.144 | True |
 | OL | 15.046 | 14.774 | 0.273 |  |  | False |
@@ -191,8 +225,8 @@ reliability is at least v4's, both measured on the same players and games.
 The headline replaces v4 at DL and DB. It ships beside v4 everywhere
 else. QB and RB improve the margin but are less reliable than v4 at six
 games. WR and TE do not improve the margin. LB improves it in the swap test,
-but the joint fit keeps no LB feature, so the LB headline is constant and
-has no reliability. OL improves the most, but v4 has no OL rating to compare
+but the joint fit keeps no LB feature, so LB has no headline and no headline
+reliability. OL improves the most, but v4 has no OL rating to compare
 against, so it cannot replace by construction. P neither improves nor has a
 headline.
 
@@ -207,17 +241,20 @@ back pending Rene's decision.
 
 Split-half reliability correlates a player's odd-game value with his
 even-game value at a fixed game count. The headline and v4 rows are pooled
-over the development seasons and paired: same athletes, same games.
+over the development seasons and paired: same athletes, same games. The
+headline side correlates `raw_score`, the share-1 value, and follows the
+headline's own rule, so non-FBS athletes drop out of both sides; a group with
+no headline keeps its v4 side.
 
 | Group | v4 4 | Headline 4 | v4 6 | Headline 6 | v4 8 | Headline 8 | v4 12 | Headline 12 | Players at 6 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| QB | 0.358 | 0.333 | 0.463 | 0.424 | 0.465 | 0.400 | 0.477 | 0.448 | 763 |
-| RB | 0.272 | 0.127 | 0.334 | 0.167 | 0.366 | 0.192 | 0.451 | 0.272 | 1792 |
+| QB | 0.359 | 0.333 | 0.463 | 0.424 | 0.465 | 0.400 | 0.477 | 0.448 | 763 |
+| RB | 0.271 | 0.127 | 0.334 | 0.167 | 0.366 | 0.192 | 0.451 | 0.272 | 1792 |
 | WR | 0.305 |  | 0.375 |  | 0.428 |  | 0.502 |  | 2725 |
 | TE | 0.209 | 0.336 | 0.311 | 0.417 | 0.400 | 0.449 | 0.475 | 0.470 | 850 |
-| DL | 0.020 | 0.024 | 0.149 | 0.178 | 0.217 | 0.277 | 0.266 | 0.355 | 4034 |
-| LB | 0.104 |  | 0.199 |  | 0.253 |  | 0.295 |  | 3008 |
-| DB | 0.018 | 0.053 | 0.092 | 0.144 | 0.127 | 0.219 | 0.115 | 0.348 | 4633 |
+| DL | 0.021 | 0.023 | 0.149 | 0.177 | 0.217 | 0.277 | 0.266 | 0.355 | 4033 |
+| LB | 0.106 |  | 0.199 |  | 0.253 |  | 0.295 |  | 3005 |
+| DB | 0.018 | 0.048 | 0.092 | 0.144 | 0.127 | 0.219 | 0.114 | 0.348 | 4596 |
 | OL |  |  |  |  |  |  |  |  |  |
 | K |  |  | -0.004 | 0.244 | 0.013 | -0.044 |  |  | 14 |
 | P | -0.180 |  | -0.084 |  | -0.150 |  | 0.090 |  | 61 |
@@ -367,22 +404,24 @@ through 2026 enter the pick columns and only the mature classes 2021 through
 2023 enter the NFL columns. Every season except 2025 is a development season,
 so these correlations are in sample for the fit. Only the 2026 class is out
 of sample. They are reported for the draft board and were never used in
-fitting.
+fitting. A player needs both a headline and a v4 value, so only qualified FBS
+players at groups with a headline enter; WR, LB and P have no rows.
 
 | Group | Players | Pick, v4 | Pick, headline | NFL snaps, v4 | NFL snaps, headline |
 | --- | --- | --- | --- | --- | --- |
-| QB | 64 | 0.444 | 0.487 | 0.056 | 0.235 |
-| RB | 114 | 0.453 | 0.450 | 0.419 | 0.334 |
-| WR | 190 | 0.396 |  | 0.236 |  |
-| TE | 92 | 0.394 | 0.339 | 0.193 | 0.233 |
-| DL | 267 | 0.211 | 0.230 | 0.011 | 0.099 |
-| LB | 153 | 0.090 |  | 0.077 |  |
-| DB | 301 | 0.250 | 0.238 | 0.192 | 0.174 |
+| QB | 61 | 0.418 | 0.471 | 0.032 | 0.141 |
+| RB | 109 | 0.417 | 0.416 | 0.386 | 0.417 |
+| TE | 82 | 0.388 | 0.293 | 0.148 | 0.211 |
+| DL | 253 | 0.212 | 0.232 | 0.037 | 0.103 |
+| DB | 285 | 0.250 | 0.253 | 0.210 | 0.224 |
 | K | 1 |  |  |  |  |
-| P | 1 |  |  |  |  |
 
-The two measures are close at every group. On draft slot the headline is a
-little better for QB and DL, level for RB and a little worse for TE and DB.
+On draft slot the two measures are close except at QB, where the headline
+is higher (0.471 against 0.418), and TE, where it is lower (0.293 against
+0.388). On NFL snaps they are not close at QB (0.141 against 0.032) or DL
+(0.103 against 0.037), where v4 is near zero; the headline is a little
+higher at RB, TE and DB. These are in-sample rank correlations on 61 QBs and
+253 linemen, and the NFL columns use only the mature classes.
 
 ## The with-without shrink
 
@@ -399,19 +438,24 @@ Tuning it is not worth doing until the estimator shows persistence.
 
 ## Scoring 2026
 
-`position-traits --seasons 2026` scores with the frozen 2024 fit. Local raw
-data for 2026 ends at week 1, so the artifact holds weeks 0 and 1. The top
-five QB headlines in week 1 are Chaston Ditta (North Texas), Josh Hoover
-(Indiana), Lincoln Kienholz (Louisville), Rocco Becht (Penn State) and
-Darian Mensah (Miami), each on one game. The scoring used the frozen
-expectation tables and read no earlier play-by-play season.
+`position-traits --seasons 2026` scores with the frozen 2024 fit (log
+`output/position-traits-2026-final.log`). Local raw data for 2026 ends at
+week 1, so the artifact holds weeks 0 and 1, with 3,440 qualified FBS
+players scored in week 1. The top five QB headlines in week 1 are Josh Hoover
+(Indiana) 8.10, Lincoln Kienholz (Louisville) 7.34, Rocco Becht (Penn State)
+6.97, Darian Mensah (Miami) 6.70 and Beau Pribula (Virginia) 6.29, each with
+share 1.0 on one game. Chaston Ditta (North Texas), first under the old
+share-1 headline on one dropback, now scores 0.29 at share 1/28. The scoring
+used the frozen expectation tables, read no earlier play-by-play season, and
+built in the fit's targets mode. WR, LB and P have no headline rows.
 
 Every artifact row carries an `fbs` flag from the team's classification (an
 OL unit by its team), and the publisher keeps only FBS rows; the table has
-no `fbs` column. The latest 2026 week the publisher reads has 32,113 FBS
-rows of 53,025. For a late-season size, the 2025 week 17 snapshot scored
-the same way has 53,772 FBS rows (45,839 trait rows and 7,933 headline rows)
-of 73,942. The trait table keeps only the latest week per season.
+no `fbs` column. The latest 2026 week the publisher reads has 31,091 FBS
+rows (27,651 trait rows and 3,440 headline rows) of 48,811. For a
+late-season size, the 2025 week 17 snapshot scored the same way has 49,140
+FBS rows (45,839 trait rows and 3,301 headline rows). The trait table keeps
+only the latest week per season.
 
 ## Serving and the weekly step
 
@@ -433,17 +477,29 @@ run uploads the pair as the `position-traits-fit-SEASON` artifact, which the
 next run pinned to that run id restores into the models directory beside the
 `heisman-model-SEASON` artifact.
 
+The fit also freezes the receptions-or-targets mode (see Data coverage), so
+a served season is built the way the validation season was.
+
 The first production run needs a re-exported bundle, because the bundle and
-run the workflow points at today predate the pair. Export it with
+run the workflow points at today predate the pair, and a fit saved before the
+mode was stored is refused. Export it with
 `poetry run python -m backend player-prior --season 2026 --runtime-bundle <zip>`,
 which rebuilds the 2026 opponent prior from local data before exporting (on
 2026-10-16 the rebuild matched the frozen prior's numbers and changed only its
 model version label from v3 to v4), then review it and point
-`PLAYER_RUNTIME_BUNDLE_URL` and its checksum at it. Until then the weekly
-workflow, which no longer swallows a `position-traits` failure, stops the
-player step at `position-traits` and skips the Heisman board and
-`publish-players`. The push must wait for the bundle. The runbook change for
-this is a follow-up.
+`PLAYER_RUNTIME_BUNDLE_URL` and its checksum at it. The weekly player step runs
+`player-values`, then `heisman`, then `position-traits` with its failure
+captured, then `publish-players`, and exits with the trait status. A trait
+failure (a missing fit, say) therefore still publishes the Heisman board and
+then fails the job. `publish-players` also skips `cfb.position_traits`, with
+one log line, while the table is not migrated. The runbook change for this is
+a follow-up.
+
+The draft research watchlist reads the trait artifact and adds `headline`,
+`headline_percentile`, `headline_games` and `headline_replaces_value` beside
+the v4 columns; it never overwrites v4's value, rank or model version. The
+production draft publisher still reads `cfb.player_values` only; moving it to
+the trait table is a follow-up.
 
 ## Findings
 
@@ -453,6 +509,12 @@ was tuned away.
 The first run's penalty sat at 1000, the top of the original grid, with the
 error still falling. The grid now runs to 100,000 and the minimum is still
 1000, so that was a search range defect and not a hidden larger penalty.
+
+`qb.explosive` carries the largest QB trait weight (1.01) but travels worst
+of the QB traits: its portable share is 0.14 (mover slope 0.056 against a
+stayer slope of 0.393, 103 movers). Most of what it measures stays with the
+team, the receivers or the scheme, so a transferring QB's explosive
+percentile says little about his next team.
 
 `qb.explosive` reliability at 8 games is above 0.3 in 2020 (0.317), 2022
 (0.334) and 2023 (0.320) but not in 2021 (0.187) or 2024 (0.286).
@@ -477,12 +539,12 @@ LB improves the margin in the swap test (0.171) but has no headline,
 because the swap test and the joint fit select features separately and the
 joint fit drops every LB feature.
 
-Before the FBS filter the latest 2026 week had 53,025 rows, about 40 percent
-of them (20,912) non-FBS players, almost all defenders who appear in box
-scores against FBS teams. Publishing FBS rows only brings it to 32,113, and
-the late-season 2025 week to 53,772. Scoring is unchanged: the headline
-percentile and replacement level for DL, LB, DB, K and P still include
-non-FBS players, while trait percentiles rank FBS players only.
+The first scoring run gave every player a headline row, scored as if he had
+all of his team's usage, and ranked it against non-FBS defenders and
+specialists too. Its week 1 QB list was led by a passer with one dropback.
+The headline is now share-scaled and kept for qualified FBS players only.
+The 2026 week 1 publish is 31,091 FBS rows against 32,113 before; the trait
+rows changed too, because 2026 is now built in the fit's targets mode.
 
 The first version of the weekly step refit its expectation tables from the
 2019-2025 play-by-play, which the weekly runner does not have; with only the
@@ -502,7 +564,9 @@ with-without comparisons. Offensive linemen are rated as a unit; an
 individual lineman carries the unit score flagged inferred. 2019 has no
 opponent prior, so it cannot be opponent adjusted and development starts in
 2020; 2019 still feeds the 2020 expectation tables. Targets are missing for
-most incompletions in 2023 and 2024, which ran in receptions mode. Win
+most incompletions in 2023 and 2024, which ran in receptions mode, and 2026
+is built in the 2025 targets mode although 70 percent of its week 1
+incompletions have no target, so its targets are undercounted. Win
 probability is missing for games with an FCS side, so the traits weighted by
 win probability get no leverage signal from those plays. The fit target is the home margin with home field as a
 regressor and no pregame team rating, so roster aggregates carry some team
