@@ -8,8 +8,13 @@ players at the group in the snapshot of the week before the game. The fit
 standardizes each feature column, solves the ridge in closed form with the
 intercept and ``home_field`` unpenalized, picks the penalty by leave-one-season-out
 MAE, and drops features whose weight is under twice the larger of its
-jackknife and analytic standard errors. A player's headline is their own share-1 version of
-the same sum, in points per game above the group's replacement level.
+jackknife and analytic standard errors.
+
+A player's headline is their own points per game in that fit: their share of the
+team's exposure at the group times (their share-1 sum minus the group's replacement
+level), where the replacement level and the percentile pool are qualified FBS players
+at the group. Only qualified FBS players carry a headline, and a group whose every
+feature was dropped carries none.
 """
 
 import json
@@ -50,6 +55,7 @@ OUTPUT_COLUMNS = [
     "position_group",
     "games",
     "raw_score",
+    "share",
     "headline",
     "headline_percentile",
     "uncertainty",
@@ -337,29 +343,60 @@ def _reliability_at(table: pd.DataFrame, games: pd.Series) -> np.ndarray:
     return np.clip(np.interp(games.to_numpy(float), x, r), 0.0, 1.0)
 
 
+def headline_groups(fit: HeadlineFit) -> set[str]:
+    """Groups with at least one kept feature (trait or ``epa``) in ``fit.feature_scale``.
+
+    A group whose every feature was dropped has no headline: no headline rows, no
+    ``replaces_value`` and no trait counted ``in_headline``.
+    """
+    kept = set(fit.feature_scale["feature"]) - set(fit.dropped)
+    return {group for group in GROUPS if any(name.startswith(f"{group}:") for name in kept)}
+
+
 def score_players(
     snapshot_week: pd.DataFrame, player_values_week: pd.DataFrame, fit: HeadlineFit
 ) -> pd.DataFrame:
-    """Each player's headline from one snapshot week and the same week's v4 values.
+    """Each qualified FBS player's headline from one snapshot week and the same week's v4 values.
 
-    ``raw_score = Σ w_f × z_f / sd_f`` over the kept features of the player's group:
-    a share-1 player's contribution to the fitted margin. Dropped features are not in
-    ``feature_scale`` and carry weight 0. ``headline`` subtracts the
-    ``REPLACEMENT_PERCENTILE`` quantile of raw among the group's qualified players;
-    the percentile ranks qualified players only.
+    ``snapshot_week`` carries ``team``, ``exposure`` (see ``design_matrix``) and an ``fbs``
+    boolean. ``raw_score = Σ w_f × z_f / sd_f`` over the kept features of the player's
+    group: a share-1 player's contribution to the fitted margin. Dropped features are
+    not in ``feature_scale`` and carry weight 0. ``share`` is the player's exposure over
+    the summed exposure of his team's players at the group that week (1.0 for an OL
+    unit, 0 when the team total is 0), the same share the fit aggregated with.
+
+    The pool is qualified FBS players at the group (``qualified`` is the games rule; the
+    trait percentiles use the same FBS-only pool). With ``replacement_g`` the pool's
+    ``REPLACEMENT_PERCENTILE`` quantile of ``raw_score`` and ``sd_g`` its sd (ddof 1):
+    ``headline = share × (raw_score − replacement_g)``, ``headline_percentile`` ranks
+    ``headline`` within the pool, and ``uncertainty = share × sd_g × sqrt(1 − r)`` with
+    ``r`` the fit's headline reliability at the player's games. Rows are emitted only for
+    the pool, and none for a group outside ``headline_groups(fit)``.
     """
+    missing = {"team", "exposure", "fbs"} - set(snapshot_week.columns)
+    if missing:
+        raise ValueError(f"score_players needs {sorted(missing)} on the snapshot")
     scale = fit.feature_scale.set_index("feature")
     per_point = fit.weights.reindex(scale.index) / scale["sd"]
 
+    keys = ["athlete_id", "position_group"]
+    snapshot_week = snapshot_week.astype({"athlete_id": str})
     players = (
-        snapshot_week.astype({"athlete_id": str})
-        .assign(qualified=snapshot_week["qualified"].eq(True))
-        .groupby(["athlete_id", "position_group"], as_index=False)
-        .agg(games=("games", "max"), qualified=("qualified", "any"))
+        snapshot_week.assign(
+            qualified=snapshot_week["qualified"].eq(True), fbs=snapshot_week["fbs"].eq(True)
+        )
+        .groupby(keys, as_index=False)
+        .agg(games=("games", "max"), qualified=("qualified", "any"), fbs=("fbs", "any"))
     )
+    shares = _group_players(snapshot_week)
+    units = shares["athlete_id"].str.startswith(UNIT_PREFIX)
+    shares.loc[units, "share"] = 1.0
+    players = players.merge(shares[[*keys, "share"]], on=keys, how="left")
+    players["share"] = players["share"].fillna(0.0)
+
     traits = standardized_traits(snapshot_week)
     traits["feature"] = traits["position_group"] + ":" + traits["trait"]
-    epa = players[["athlete_id", "position_group"]].merge(
+    epa = players[keys].merge(
         standardized_epa(player_values_week)[["athlete_id", "z"]], on="athlete_id"
     )
     epa["feature"] = epa["position_group"] + f":{EPA}"
@@ -368,25 +405,23 @@ def score_players(
     points = (rows["z"] * rows["feature"].map(per_point)).groupby(
         [rows["athlete_id"], rows["position_group"]]
     ).sum()
-    keys = pd.MultiIndex.from_frame(players[["athlete_id", "position_group"]])
-    players["raw_score"] = points.reindex(keys).fillna(0.0).to_numpy()
+    players["raw_score"] = points.reindex(pd.MultiIndex.from_frame(players[keys])).fillna(0.0).to_numpy()
 
-    qualified_raw = players["raw_score"].where(players["qualified"])
-    by_group = qualified_raw.groupby(players["position_group"])
-    players["headline"] = players["raw_score"] - by_group.transform(
-        lambda raw: raw.quantile(REPLACEMENT_PERCENTILE)
-    )
-    rank = by_group.rank(method="average")
-    n = by_group.transform("count")
-    players["headline_percentile"] = (100 * (rank - 1) / (n - 1)).where(n.gt(1), 100.0).where(
-        players["qualified"]
-    )
+    pool = players["qualified"] & players["fbs"] & players["position_group"].isin(headline_groups(fit))
+    players = players[pool].reset_index(drop=True)
+    by_group = players.groupby("position_group")["raw_score"]
+    replacement = by_group.transform(lambda raw: raw.quantile(REPLACEMENT_PERCENTILE))
+    players["headline"] = players["share"] * (players["raw_score"] - replacement)
+    headline_by_group = players.groupby("position_group")["headline"]
+    rank = headline_by_group.rank(method="average")
+    n = headline_by_group.transform("count")
+    players["headline_percentile"] = (100 * (rank - 1) / (n - 1)).where(n.gt(1), 100.0)
     spread = by_group.transform("std")
     reliability = np.empty(len(players))
     for group, index in players.groupby("position_group").groups.items():
         table = fit.reliability[fit.reliability["position_group"].eq(group)]
         reliability[players.index.get_indexer(index)] = _reliability_at(table, players.loc[index, "games"])
-    players["uncertainty"] = spread * np.sqrt(1 - reliability)
+    players["uncertainty"] = players["share"] * spread * np.sqrt(1 - reliability)
     players["replaces_value"] = players["position_group"].map(fit.replaces_value).eq(True)
     return players[OUTPUT_COLUMNS]
 

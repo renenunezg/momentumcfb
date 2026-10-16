@@ -1211,40 +1211,77 @@ def test_headline_fit_refuses_to_score_its_own_seasons(tmp_path):
         headline.validate_headline_fit(loaded, 2023)
 
 
-def test_score_players_uses_the_fit_scale_replacement_and_reliability():
+def _scoring_fit(features=("QB:qb.explosive", "QB:epa"), sd=(0.5, 1.0), dropped=("QB:qb.legs",)):
+    features = list(features)
+    weights = {"QB:qb.explosive": 2.0, "QB:epa": 1.0, "home_field": 3.0, "intercept": 0.0}
+    return headline.HeadlineFit(
+        weights=pd.Series({name: weights[name] for name in ["intercept", "home_field", *features]}),
+        penalty=1.0, loso_sd=pd.Series(0.1, index=features), jackknife_sd=pd.Series(0.15, index=features),
+        analytic_se=pd.Series(0.12, index=features), dropped=list(dropped),
+        dropped_reason=dict.fromkeys(dropped, "insignificant"), dev_seasons=[2022, 2023],
+        model_version=headline.MODEL_VERSION,
+        feature_scale=pd.DataFrame({"feature": features, "mean": 0.0, "sd": list(sd)}),
+        reliability=pd.DataFrame({"position_group": "QB", "games": [4, 8], "correlation": [0.5, 0.7]}),
+        replaces_value={"QB": True, "RB": True},
+    )
+
+
+def scoring_snapshot():
+    """Week 6 QBs. A: q1 (exposure 30), q2 (10) and unqualified q5 (20), so shares 1/2, 1/6
+    and 1/3. B: q3 (40) and q4 (0), shares 1 and 0. q6 is qualified but on FCS team Z."""
     snapshot = pd.DataFrame({
-        "week": 6, "athlete_id": ["q1", "q2", "q3", "q4", "q5"], "team": "A", "position_group": "QB",
-        "games": [2, 4, 6, 12, 1], "trait": "qb.explosive", "value": [0.0, 0.1, 0.2, 0.3, 0.9],
-        "qualified": [True, True, True, True, False],
+        "week": 6, "athlete_id": ["q1", "q2", "q3", "q4", "q5", "q6"],
+        "team": ["A", "A", "B", "B", "A", "Z"], "position_group": "QB",
+        "games": [2, 4, 6, 12, 1, 6], "trait": "qb.explosive", "value": [0.0, 0.1, 0.2, 0.3, 0.9, 0.4],
+        "qualified": [True, True, True, True, False, True], "exposure": [30.0, 10.0, 40.0, 0.0, 20.0, 25.0],
+        "fbs": [True, True, True, True, True, False],
     })
-    legs = snapshot.assign(trait="qb.legs", value=[5.0, 0.0, 0.0, 0.0, 0.0])  # dropped: weight 0
-    snapshot = pd.concat([snapshot, legs], ignore_index=True)
+    legs = snapshot.assign(trait="qb.legs", value=[5.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # dropped: weight 0
     values = pd.DataFrame({"week": 6, "athlete_id": ["q1", "q4"], "position_group": "QB", "games": 4,
                            "shrunk_per_game": [-1.0, 1.0]})
-    features = ["QB:qb.explosive", "QB:epa"]
-    fit = headline.HeadlineFit(
-        weights=pd.Series({"QB:qb.explosive": 2.0, "QB:epa": 1.0, "home_field": 3.0, "intercept": 0.0}),
-        penalty=1.0, loso_sd=pd.Series(0.1, index=features), jackknife_sd=pd.Series(0.15, index=features),
-        analytic_se=pd.Series(0.12, index=features), dropped=["QB:qb.legs"],
-        dropped_reason={"QB:qb.legs": "insignificant"}, dev_seasons=[2022, 2023],
-        model_version=headline.MODEL_VERSION,
-        feature_scale=pd.DataFrame({"feature": features, "mean": 0.0, "sd": [0.5, 1.0]}),
-        reliability=pd.DataFrame({"position_group": "QB", "games": [4, 8], "correlation": [0.5, 0.7]}),
-        replaces_value={"QB": True},
-    )
-    out = headline.score_players(snapshot, values, fit).set_index("athlete_id")
-    # qualified mean 0.15, sd sqrt(0.05 / 3); q5 is standardized on that scale but sets none of it
-    z = (np.array([0.0, 0.1, 0.2, 0.3, 0.9]) - 0.15) / np.sqrt(0.05 / 3)
-    epa = np.array([-1, 0, 0, 1, 0]) / np.sqrt(2)
-    raw = 2.0 * z / 0.5 + 1.0 * epa / 1.0
+    return pd.concat([snapshot, legs], ignore_index=True), values
+
+
+def test_score_players_scales_by_share_over_qualified_fbs_replacement():
+    snapshot, values = scoring_snapshot()
+    out = headline.score_players(snapshot, values, _scoring_fit()).set_index("athlete_id")
+    # Only qualified FBS players carry a headline: q5 is unqualified, q6 is FCS.
+    assert list(out.index) == ["q1", "q2", "q3", "q4"]
+    # z scale: qualified players q1-q4 and q6 (0.0 to 0.4), mean 0.2, sd sqrt(0.025);
+    # v4 epa: q1 -1 and q4 +1, sd sqrt(2). raw = 2 z / 0.5 + epa z.
+    raw = 4 * (np.array([0.0, 0.1, 0.2, 0.3]) - 0.2) / np.sqrt(0.025) + np.array([-1, 0, 0, 1]) / np.sqrt(2)
     assert out["raw_score"].to_numpy() == pytest.approx(raw)
-    assert out["headline"].to_numpy() == pytest.approx(raw - np.quantile(raw[:4], 0.3))
-    assert out["headline_percentile"].tolist()[:4] == pytest.approx([0.0, 100 / 3, 200 / 3, 100.0])
-    assert np.isnan(out.loc["q5", "headline_percentile"])
+    assert raw == pytest.approx([-5.7667, -2.5298, 0.0, 3.2369], abs=1e-4)
+    # replacement = 30th percentile of the pool's raw: -5.7667 + 0.9 x 3.2369 = -2.8535
+    replacement = raw[0] + 0.9 * (raw[1] - raw[0])
+    assert replacement == pytest.approx(-2.8535, abs=1e-4)
+    share = np.array([0.5, 1 / 6, 1.0, 0.0])
+    assert out["share"].to_numpy() == pytest.approx(share)
+    # headline = share x (raw - replacement): -1.4566, 0.0540, 2.8535 and 0 (q4 has no usage)
+    assert out["headline"].to_numpy() == pytest.approx([-1.4566, 0.0540, 2.8535, 0.0], abs=1e-4)
+    # The percentile ranks the share-scaled headline: q1 < q4 < q2 < q3.
+    assert out["headline_percentile"].to_numpy() == pytest.approx([0.0, 200 / 3, 100.0, 100 / 3])
     # r(2) = 0.25 from r(0) = 0, r(6) = 0.6 between 4 and 8, flat at 0.7 beyond 8
-    r = np.array([0.25, 0.5, 0.6, 0.7, 0.125])
-    assert out["uncertainty"].to_numpy() == pytest.approx(np.std(raw[:4], ddof=1) * np.sqrt(1 - r))
+    r = np.array([0.25, 0.5, 0.6, 0.7])
+    assert out["uncertainty"].to_numpy() == pytest.approx(share * np.std(raw, ddof=1) * np.sqrt(1 - r))
     assert out["replaces_value"].all()
+    with pytest.raises(ValueError, match="fbs"):
+        headline.score_players(snapshot.drop(columns="fbs"), values, _scoring_fit())
+
+
+def test_score_players_gives_no_headline_to_a_group_with_every_feature_dropped():
+    snapshot, values = scoring_snapshot()
+    backs = snapshot[snapshot["trait"].eq("qb.explosive")].assign(
+        position_group="RB", trait="rb.breakaway", athlete_id=lambda f: "r" + f["athlete_id"]
+    )
+    fit = _scoring_fit(dropped=("QB:qb.legs", "RB:rb.breakaway", "RB:epa"))
+    assert headline.headline_groups(fit) == {"QB"}
+    out = headline.score_players(pd.concat([snapshot, backs], ignore_index=True), values, fit)
+    assert set(out["position_group"]) == {"QB"}
+    # Every QB feature dropped too: no group has a headline.
+    nothing = _scoring_fit(features=(), sd=(), dropped=("QB:qb.explosive", "QB:epa", "QB:qb.legs"))
+    assert headline.headline_groups(nothing) == set()
+    assert headline.score_players(snapshot, values, nothing).empty
 
 
 def test_replacement_rule_needs_both_a_better_mae_and_equal_reliability():
@@ -1345,7 +1382,8 @@ def test_paired_split_half_scores_both_sides_on_one_athlete_set():
                 credit.append({"athlete_id": player, "game_id": game_id, "model_week": game,
                                "adjusted_epa": rng.normal()})
     frames = _trait_frame(rows)
-    snaps = pd.DataFrame({"athlete_id": frames["athlete_id"].unique(), "position_group": "QB"})
+    snaps = pd.DataFrame({"athlete_id": frames["athlete_id"].unique(), "position_group": "QB", "team": "A",
+                          "fbs": True})
     data = {"frames": frames, "credited": pd.DataFrame(credit), "snapshots": snaps}
 
     chosen = backtest.paired_games(frames, data["credited"], 6)
@@ -1358,6 +1396,16 @@ def test_paired_split_half_scores_both_sides_on_one_athlete_set():
     assert v4[["position_group", "games", "players"]].equals(head[["position_group", "games", "players"]])
     assert head["correlation"].notna().all() and v4["correlation"].notna().all()
     assert head["correlation"].iloc[0] != pytest.approx(v4["correlation"].iloc[0])
+
+    # Scoring keeps the headline's rule: non-FBS athletes leave both sides.
+    fcs = {**data, "snapshots": snaps.assign(fbs=~snaps["athlete_id"].isin(["q0", "q1"]))}
+    head, v4 = backtest.paired_split_half({2024: fcs}, _paired_fit(), (6,))
+    assert head["players"].tolist() == [10] and v4["players"].tolist() == [10]
+    # A group with no headline still reports v4; its headline side is constant (NaN).
+    idle = dataclasses.replace(_paired_fit(), feature_scale=_paired_fit().feature_scale.iloc[:0],
+                               dropped=["QB:qb.explosive", "QB:epa"])
+    head, v4 = backtest.paired_split_half({2024: data}, idle, (6,))
+    assert head["players"].tolist() == [12] and head["correlation"].isna().all() and v4["correlation"].notna().all()
 
 
 def _frozen_fit(dev_seasons, replaces_qb=True):
@@ -1445,21 +1493,44 @@ def test_run_position_traits_scores_with_a_frozen_fit_and_never_refits(monkeypat
     assert pd.read_parquet(tmp_path / "players" / "position_traits" / "2026.parquet").shape == out.shape
 
     headlines = out[out["trait"].eq("headline")]
-    assert len(headlines) == 10  # three QBs and two RBs in each of two weeks
-    q3 = headlines[headlines["athlete_id"].eq("q3")]
-    assert not q3["qualified"].any() and q3["percentile"].isna().all()
-    assert set(q3["team"]) == {"A"} and set(q3["athlete_name"]) == {"Q3"}
-    assert (headlines.groupby("week").size() == 5).all()
+    assert len(headlines) == 8  # two qualified QBs and two RBs in each of two weeks
+    assert "q3" not in set(headlines["athlete_id"])  # unqualified: trait rows only
+    assert headlines["qualified"].all() and headlines["percentile"].notna().all()
+    assert set(headlines["team"]) == {"A"} and set(headlines.loc[headlines["athlete_id"].eq("q1"), "athlete_name"]) == {"Q1"}
+    assert (headlines.groupby("week").size() == 4).all()
     # the fitted feature is in the headline, the dropped one is not, headlines always are
     flags = out.groupby("trait")["in_headline"].all()
     assert flags["qb.explosive"] and flags["headline"] and not out.loc[out["trait"].eq("qb.legs"), "in_headline"].any()
     assert out.groupby("position_group")["replaces_value"].all().to_dict() == {"QB": True, "RB": False}
     q1 = headlines[headlines["athlete_id"].eq("q1") & headlines["week"].eq(2)].iloc[0]
     scored = headline.score_players(
-        FAKE_SEASON_2026["snapshots"].query("week == 2"), FAKE_V4_2026.query("week == 2"), FROZEN_FIT_2024
+        FAKE_SEASON_2026["snapshots"].query("week == 2").assign(fbs=True), FAKE_V4_2026.query("week == 2"),
+        FROZEN_FIT_2024,
     ).set_index("athlete_id")
     assert q1["value"] == pytest.approx(scored.loc["q1", "headline"])
     assert q1["games"] == 2 and q1["uncertainty"] == pytest.approx(scored.loc["q1", "uncertainty"])
+
+
+def test_run_position_traits_flags_no_headline_where_every_feature_was_dropped(monkeypatch, tmp_path, caplog):
+    fit = dataclasses.replace(
+        FROZEN_FIT_2024,
+        weights=FROZEN_FIT_2024.weights.drop("RB:rb.yards_over_expected"),
+        dropped=["QB:qb.legs", "RB:rb.yards_over_expected", "RB:epa"],
+        feature_scale=FROZEN_FIT_2024.feature_scale.iloc[:2],
+        replaces_value={"QB": True, "RB": True},
+    )
+    monkeypatch.setattr(pipeline.store, "PROCESSED_DIR", tmp_path)
+    _install_frozen_model(tmp_path / "players" / "models", fit=fit)
+    monkeypatch.setattr(pipeline.backtest, "build_season_traits", lambda season, tables=None: FAKE_SEASON_2026)
+    monkeypatch.setattr(pipeline, "read_season_source", lambda season, name: FBS_TEAMS)
+    monkeypatch.setattr(pipeline.store, "read_processed", lambda *parts, **k: FAKE_V4_2026)
+    with caplog.at_level("INFO", logger=pipeline.log.name):
+        out = pipeline.run_position_traits(2026, AS_OF)
+    backs = out[out["position_group"].eq("RB")]
+    assert len(backs) and not backs["trait"].eq("headline").any()
+    assert not backs["replaces_value"].any() and not backs["in_headline"].any()
+    assert out.loc[out["position_group"].eq("QB"), "replaces_value"].all()
+    assert any("no headline (every feature dropped) at RB" in message for message in caplog.messages)
 
 
 def test_run_position_traits_uses_the_latest_fit_before_the_season(monkeypatch, tmp_path):
