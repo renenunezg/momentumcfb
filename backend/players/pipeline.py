@@ -63,6 +63,7 @@ POSITION_TRAIT_COLUMNS = [
     "replaces_value",
     "in_headline",
     "fbs",
+    "poor_coverage",
 ]
 HISTORY_ARTIFACT = ("players", "heisman_history.parquet")
 META_ARTIFACT = ("players", "player_model_meta.parquet")
@@ -131,10 +132,11 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     """Score the season's weekly trait snapshots with the latest earlier headline fit.
 
     The fit and its expectation tables are frozen: they are only loaded, never refit,
-    and a fit whose development seasons include ``season`` is refused; the fit's
-    ``poor_coverage`` fixes the receptions-or-targets mode. Each row carries ``fbs``
-    from the team's classification; headline rows exist for qualified FBS players
-    only, and only FBS rows are published.
+    and a fit whose development seasons include ``season`` is refused. The season
+    decides its own receptions-or-targets mode from its own target coverage; every
+    row records it in ``poor_coverage``, which the table does not publish. Each row
+    carries ``fbs`` from the team's classification; headline rows exist for qualified
+    FBS players only, and only FBS rows are published.
     """
     fit_path = latest_headline_fit_path(season)
     fit = headline.load_headline_fit(fit_path)
@@ -142,9 +144,10 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     tables = frozen_expectation_tables(fit_path)
     teams = read_season_source(season, "teams")
     fbs_schools = set(teams.loc[teams["classification"].eq("fbs"), "school"])
-    snapshot = backtest.build_season_traits(
-        season, tables=tables, poor_coverage=fit.poor_coverage
-    )["snapshots"].astype({"athlete_id": str})
+    built = backtest.build_season_traits(season, tables=tables)
+    coverage = built["target_coverage"]
+    poor = backtest.poor_target_coverage(coverage)
+    snapshot = built["snapshots"].astype({"athlete_id": str})
     # The headline pool is qualified FBS players, so the flag precedes scoring.
     snapshot = snapshot.assign(fbs=snapshot["team"].isin(fbs_schools))
     values = backtest.player_values(season)
@@ -171,6 +174,7 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         as_of=as_of.isoformat(),
         model_version=MODEL_VERSION,
         fbs=out["team"].isin(fbs_schools),
+        poor_coverage=poor,
     )[POSITION_TRAIT_COLUMNS]
     store.write_processed(out, *position_traits_artifact(season))
     without = [group for group in headline.GROUPS if group not in with_headline]
@@ -178,7 +182,9 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         f"position traits {season}: {scored['athlete_id'].nunique()} qualified FBS players "
         f"scored over {scored['week'].nunique()} weeks with the fit through "
         f"{max(fit.dev_seasons)}; {sum(replaces.values())} groups replace v4; "
-        f"no headline (every feature dropped) at {', '.join(without) or 'no group'}"
+        f"no headline (every feature dropped) at {', '.join(without) or 'no group'}; "
+        f"{'receptions' if poor else 'targets'} mode, uncovered incompletions "
+        f"{backtest.uncovered_share(coverage):.3f}"
     )
     return out
 
