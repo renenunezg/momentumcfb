@@ -4,11 +4,13 @@ import pytest
 
 from backend.players import ingest
 from backend.players.traits import (
+    TRAITS,
     TraitSpec,
     absence,
     adjust,
     context,
     expectations,
+    offense,
     register,
     targets,
     teammate,
@@ -227,3 +229,144 @@ def test_with_without_needs_an_absence_and_shrinks_by_games():
     assert out["impact"] == pytest.approx(3.0 * 3 / (3 + 3))
     never_absent = presence.assign(present=True)
     assert np.isnan(absence.with_without(never_absent, unit, "epa_allowed", 3.0).iloc[0]["impact"])
+
+
+# Passer-row share of the play's EPA by outcome, as in credit.OFFENSE_SHARES.
+PASSER_SHARE = {"Pass Reception": 0.6, "Pass Incompletion": 0.7, "Sack": 0.5, "Pass Interception Return": 0.8}
+OUTCOME_EPA = {"Pass Reception": 0.5, "Pass Incompletion": -0.4, "Sack": -1.0, "Pass Interception Return": -3.0}
+
+
+def _starter_dropbacks():
+    """Twelve dropbacks: one 25-yard completion, five short ones, three incompletions,
+    a sack, an interception, and a two-minute completion in the fourth quarter."""
+    kinds = (["Pass Reception"] * 6 + ["Pass Incompletion"] * 3
+             + ["Sack", "Pass Interception Return", "Pass Reception"])
+    yards = [25, 8, 8, 8, 8, 8, 0, 0, 0, -7, 0, 5]
+    out = []
+    for i, (kind, gained) in enumerate(zip(kinds, yards)):
+        last = i == len(kinds) - 1
+        out.append({
+            "play_type": kind, "yards_gained": float(gained), "down": i % 4 + 1, "distance": 10,
+            "period": 4 if last else 1 + i // 6, "clock": 90 if last else 600,
+            "epa": 2.0 if gained >= 20 else OUTCOME_EPA[kind],
+            "wpa": -0.1 if kind == "Pass Interception Return" else 0.01,
+        })
+    return out
+
+
+def qb_context():
+    """Home hosts Away in week 1 and visits in week 2. Each starter has twelve
+    dropbacks and two third-down scrambles per game, all at his team's receiver
+    except the sack and the interception; Home's backup throws two completions
+    to the same receiver in week 2."""
+    games = pd.DataFrame({"game_id": [1, 2], "model_week": [1, 2], "home_team": ["Home", "Away"],
+                          "away_team": ["Away", "Home"], "completed": True})
+    starters = {"Home": ("qb_home", "wr_home"), "Away": ("qb_away", "wr_away")}
+    plays, credit = [], []
+
+    def add(game_id, team, passer, receiver, play):
+        play_id = len(plays) + 1
+        opponent = "Away" if team == "Home" else "Home"
+        kind = play["play_type"]
+        success = play["yards_gained"] >= (play["distance"] if play["down"] >= 3 else 0.5 * play["distance"])
+        plays.append({"id": play_id, "game_id": game_id, "offense": team, "defense": opponent,
+                      "down": play["down"], "distance": play["distance"], "yards_to_goal": 60,
+                      "yards_gained": play["yards_gained"], "period": play["period"],
+                      "clock_seconds_remaining": play["clock"], "is_competitive": True,
+                      "is_rush": kind == "Rush", "is_pass": kind != "Rush", "is_success": bool(success),
+                      "play_type": kind, "play_text": "", "epa": play["epa"], "wpa": play["wpa"]})
+        base = {"play_id": str(play_id), "team": team, "opponent": opponent, "side": "offense",
+                "game_id": game_id, "model_week": game_id, "weight": 1.0, "plays": 1.0, "is_competitive": True}
+        if kind == "Rush":
+            roles = [(passer, "rusher", 0.7)]
+        else:
+            roles = [(passer, "passer", PASSER_SHARE[kind])]
+            if kind == "Pass Reception":
+                roles.append((receiver, "receiver", 0.4))
+            elif kind == "Pass Incompletion":
+                roles.append((receiver, "target", 0.3))
+        for athlete_id, role, share in roles:
+            credit.append({**base, "athlete_id": athlete_id, "role": role, "share": share,
+                           "channel": "rush" if kind == "Rush" else "pass",
+                           "raw_epa": share * play["epa"], "adjusted_epa": share * play["epa"],
+                           "wpa": share * play["wpa"]})
+
+    for game_id in (1, 2):
+        for team, (passer, receiver) in starters.items():
+            for play in _starter_dropbacks():
+                add(game_id, team, passer, receiver, play)
+            for gained in (6.0, 12.0):
+                add(game_id, team, passer, receiver, {"play_type": "Rush", "yards_gained": gained, "down": 3,
+                                                      "distance": 5, "period": 3, "clock": 600, "epa": 0.3, "wpa": 0.01})
+    for _ in range(2):
+        add(2, "Home", "qb_backup", "wr_home", {"play_type": "Pass Reception", "yards_gained": 9.0, "down": 1,
+                                               "distance": 10, "period": 3, "clock": 600, "epa": 1.0, "wpa": 0.02})
+
+    positions = pd.DataFrame({
+        "athlete_id": ["qb_home", "qb_away", "qb_backup", "wr_home", "wr_away"],
+        "position": ["QB", "QB", "QB", "WR", "WR"],
+        "position_group": ["QB", "QB", "QB", "WR", "WR"],
+    })
+    # No bucket matches the probe plays, so every lookup falls back to the table mean of 0.4.
+    conversion = pd.DataFrame({"down_bucket": pd.array([9], dtype="Int64"), "distance_bucket": ["none"],
+                               "field_bucket": ["none"], "expected": [0.4], "plays": [1]})
+    tables = expectations.ExpectationTables(rush_yards=pd.DataFrame(), conversion=conversion,
+                                            field_goal=pd.DataFrame(), source_seasons=[2025])
+    empty = pd.DataFrame()
+    ctx = context.SeasonContext(season=2026, plays=pd.DataFrame(plays), games=games, effects=empty,
+                                credit=pd.DataFrame(credit), box=empty, roster=empty, teams=empty,
+                                positions=positions, presence=empty)
+    return ctx, tables
+
+
+NO_RECOVERED_TARGETS = pd.DataFrame(columns=["play_id", "athlete_id", "source"])
+
+
+def test_qb_traits_cover_every_registered_qb_trait_once_per_game():
+    ctx, tables = qb_context()
+    out = offense.qb_traits(ctx, tables, recovered_targets=NO_RECOVERED_TARGETS)
+    expected = {name for name, spec in TRAITS.items() if "QB" in spec.position_groups}
+    assert set(out["trait"]) == expected
+    assert not out.duplicated(["athlete_id", "game_id", "trait"]).any()
+    assert set(out["athlete_id"]) == {"qb_home", "qb_away", "qb_backup"}
+
+
+def test_qb_pressure_handling_falls_back_to_the_league_rate_with_one_passer():
+    ctx, tables = qb_context()
+    out = offense.qb_traits(ctx, tables, NO_RECOVERED_TARGETS)
+    away = out[out["trait"].eq("qb.pressure_handling") & out["athlete_id"].eq("qb_away")]
+    assert not away.empty
+    assert away["numerator"].notna().all()
+    assert (away["kind"] == "inferred").all()
+
+
+def test_qb_floor_is_nan_under_ten_dropbacks():
+    ctx, tables = qb_context()
+    out = offense.qb_traits(ctx, tables, NO_RECOVERED_TARGETS)
+    backup = out[out["trait"].eq("qb.floor") & out["athlete_id"].eq("qb_backup")]
+    assert not backup.empty
+    assert backup["numerator"].isna().all()
+
+
+def test_qb_ball_security_charges_the_interception_win_probability():
+    ctx, tables = qb_context()
+    out = offense.qb_traits(ctx, tables, NO_RECOVERED_TARGETS).set_index(["trait", "athlete_id", "game_id"])
+    # week 1 has no prior opponent evidence, so the numerator is the raw offense-view WPA
+    row = out.loc[("qb.ball_security", "qb_away", 1)]
+    assert row["numerator"] == pytest.approx(-0.1)
+    assert row["denominator"] == pytest.approx(12.0)
+
+
+def test_qb_receiver_independence_compares_to_the_receivers_rate_with_other_passers():
+    ctx, tables = qb_context()
+    out = offense.qb_traits(ctx, tables, NO_RECOVERED_TARGETS).set_index(["trait", "athlete_id", "game_id"])
+    # wr_home's ten week-1 targets from qb_home carry 2.16 passer EPA, 0.216 per target
+    backup = out.loc[("qb.receiver_independence", "qb_backup", 2)]
+    assert backup["numerator"] == pytest.approx(2 * 0.6 - 2 * 0.216)
+    assert backup["denominator"] == pytest.approx(2.0)
+    assert np.isnan(out.loc[("qb.receiver_independence", "qb_home", 1), "numerator"])
+
+    # Under poor coverage only receptions count: seven from qb_home is below the ten needed.
+    poor = offense.qb_traits(ctx, tables, NO_RECOVERED_TARGETS, poor_coverage=True)
+    poor = poor.set_index(["trait", "athlete_id", "game_id"])
+    assert np.isnan(poor.loc[("qb.receiver_independence", "qb_backup", 2), "numerator"])
