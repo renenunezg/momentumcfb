@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from backend.draft import research
 from backend.players import ingest, pipeline
 from backend.players.traits import (
     TRAITS,
@@ -1506,3 +1507,52 @@ def test_migration_declares_the_trait_table_contract():
     published = set(pipeline.POSITION_TRAIT_COLUMNS) - {"exposure", "qualified"}
     declared = {line.split()[0] for line in sql.splitlines() if line.startswith("    ")}
     assert published <= declared and "exposure" not in declared
+
+
+def draft_fixture():
+    """Two FBS players with v4 values at week 8, plus a third QB the roster does not list."""
+    roster = pd.DataFrame({
+        "id": [1, 2], "first_name": ["Q", "R"], "last_name": ["One", "One"], "team": ["A", "A"],
+        "position": ["QB", "RB"], "year": [3, 3], "height": [75, 70], "weight": [210, 200],
+    })
+    catalog = pd.DataFrame({"school": ["A"], "classification": ["fbs"]})
+    values = pd.DataFrame({
+        "athlete_id": ["1", "2"], "team": ["A", "A"], "position": ["QB", "RB"], "position_group": ["QB", "RB"],
+        "week": [8, 8], "as_of": ["2026-10-01T00:00:00+00:00"] * 2, "model_version": ["cfb_player_value_v4"] * 2,
+        "games": [6, 6], "value_above_replacement": [5.0, 4.0], "position_rank": [2, 1],
+    })
+    return roster, catalog, values
+
+
+def _headline_row(athlete_id, week, group, value, replaces, as_of="2026-10-01T00:00:00+00:00", trait="headline"):
+    return {
+        "athlete_id": athlete_id, "week": week, "as_of": as_of, "trait": trait, "value": value,
+        "position_group": group, "replaces_value": replaces, "model_version": "cfb_position_traits_v1",
+    }
+
+
+DRAFT_AS_OF = pd.Timestamp("2026-10-02", tz="UTC")
+
+
+def test_watchlist_uses_the_headline_where_it_replaces_v4():
+    roster, catalog, values = draft_fixture()
+    traits = pd.DataFrame([
+        _headline_row("1", 8, "QB", 9.0, True),
+        _headline_row("2", 8, "RB", 1.0, False),
+        _headline_row("3", 8, "QB", 12.0, True),  # off the roster, still sets the group rank
+        _headline_row("1", 8, "QB", -3.0, True, trait="qb.explosive"),
+        _headline_row("1", 7, "QB", 99.0, True),  # an earlier week never wins
+        _headline_row("1", 9, "QB", 50.0, True, as_of="2026-10-09T00:00:00+00:00"),  # after the cutoff
+    ])
+    board, audit = research.watchlist(roster, catalog, values, DRAFT_AS_OF, traits=traits)
+    by_id = board.set_index("athlete_id")
+    assert by_id.loc["1", "value_above_replacement"] == 9.0
+    assert by_id.loc["1", "model_version"] == "cfb_position_traits_v1"
+    assert by_id.loc["1", "position_rank"] == 2
+    assert by_id.loc["2", "value_above_replacement"] == 4.0
+    assert by_id.loc["2", "model_version"] == "cfb_player_value_v4" and by_id.loc["2", "position_rank"] == 1
+    assert audit["headline_replaced_groups"] == ["QB"]
+
+    plain, plain_audit = research.watchlist(roster, catalog, values, DRAFT_AS_OF)
+    assert plain.set_index("athlete_id").loc["1", "value_above_replacement"] == 5.0
+    assert plain_audit["headline_replaced_groups"] == []

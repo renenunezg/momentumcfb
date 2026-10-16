@@ -277,6 +277,7 @@ jobs:
         run: |
           poetry run python -m backend ingest-players --seasons "$SEASON" --max-calls "$CFBD_MAX_CALLS"
           poetry run python -m backend player-values --seasons "$SEASON"
+          poetry run python -m backend position-traits --seasons "$SEASON" || echo "position traits skipped: no fit artifact"
           poetry run python -m backend heisman --season "$SEASON"
           poetry run python -m backend publish-players --season "$SEASON"
 

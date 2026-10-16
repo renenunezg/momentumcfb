@@ -50,7 +50,7 @@ class Inputs:
         return frame
 
 
-def watchlist(roster, catalog, values, as_of):
+def watchlist(roster, catalog, values, as_of, traits=None):
     roster = roster.copy()
     roster["athlete_id"] = ids(roster["id"])
     ambiguous = roster.athlete_id.duplicated(keep=False) | roster.athlete_id.isna()
@@ -99,6 +99,9 @@ def watchlist(roster, catalog, values, as_of):
     board = board.merge(
         latest[keep], on="athlete_id", how="left", validate="one_to_one"
     )
+    replaced_groups = []
+    if traits is not None:
+        board, replaced_groups = replace_with_headline(board, traits, as_of)
     board["production_status"] = np.select(
         [board.week.isna(), board.team.ne(board.value_team)],
         ["no_individual_value", "team_mismatch"],
@@ -111,6 +114,7 @@ def watchlist(roster, catalog, values, as_of):
         "scope": "FBS roster exploration; draft eligibility is unverified",
         "players": len(board),
         "college_week": latest_week,
+        "headline_replaced_groups": replaced_groups,
         "college_as_of": str(latest.as_of.max()),
         "college_snapshot_age_days": round(
             (as_of - pd.to_datetime(latest.as_of, utc=True).max()).total_seconds()
@@ -129,6 +133,31 @@ def watchlist(roster, catalog, values, as_of):
         .reset_index()
         .to_dict("records"),
     }
+
+
+def replace_with_headline(board, traits, as_of):
+    """Overwrite v4 value, rank and version with the headline where its group replaces v4.
+
+    ``traits`` is the scored trait artifact, possibly many weeks; only the latest
+    headline snapshot known at ``as_of`` counts. Players without a headline row keep v4.
+    """
+    headlines = traits[traits.trait.eq("headline")].copy()
+    headlines["athlete_id"] = ids(headlines.athlete_id)
+    headlines = headlines[pd.to_datetime(headlines.as_of, utc=True).le(as_of)]
+    if headlines.empty:
+        return board, []
+    headlines = headlines[headlines.week.eq(headlines.week.max())]
+    headlines["rank"] = headlines.groupby("position_group").value.rank(
+        method="min", ascending=False
+    )
+    replaced = headlines[headlines.replaces_value.eq(True)]
+    swap = replaced.set_index("athlete_id")
+    rows = board.athlete_id.isin(swap.index)
+    key = board.loc[rows, "athlete_id"]
+    board.loc[rows, "value_above_replacement"] = key.map(swap.value).to_numpy()
+    board.loc[rows, "position_rank"] = key.map(swap["rank"]).to_numpy()
+    board.loc[rows, "model_version"] = key.map(swap.model_version).to_numpy()
+    return board, sorted(replaced.position_group.unique())
 
 
 def historical_cohort(inputs, cache, cfb_root, completed_season, nfl_root):
@@ -406,11 +435,13 @@ def build(cfb_root, nfl_root, cache, output, season, as_of):
         raise ValueError("as-of must include an explicit timezone")
     as_of = as_of.tz_convert("UTC")
     inputs = Inputs()
+    traits_path = cfb_root / f"processed/players/position_traits/{season}.parquet"
     board, board_audit = watchlist(
         inputs.parquet(cfb_root / f"raw/players/{season}/roster.parquet"),
         inputs.parquet(cfb_root / f"raw/players/{season}/teams.parquet"),
         inputs.parquet(cfb_root / f"processed/players/player_values/{season}.parquet"),
         as_of,
+        inputs.parquet(traits_path) if traits_path.exists() else None,
     )
     # A calendar-year change does not complete the NFL regular season/postseason.
     completed_season = min(season - 1, as_of.year - (2 if as_of.month < 3 else 1))
