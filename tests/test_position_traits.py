@@ -1882,35 +1882,41 @@ def draft_fixture():
     return roster, catalog, values
 
 
-def _headline_row(athlete_id, week, group, value, replaces, as_of="2026-10-01T00:00:00+00:00", trait="headline"):
+def _headline_row(athlete_id, week, group, value, replaces, as_of="2026-10-01T00:00:00+00:00", trait="headline",
+                  percentile=50.0, games=6):
     return {
         "athlete_id": athlete_id, "week": week, "as_of": as_of, "trait": trait, "value": value,
-        "position_group": group, "replaces_value": replaces, "model_version": "cfb_position_traits_v1",
+        "percentile": percentile, "games": games, "position_group": group, "replaces_value": replaces,
+        "model_version": "cfb_position_traits_v1",
     }
 
 
 DRAFT_AS_OF = pd.Timestamp("2026-10-02", tz="UTC")
 
 
-def test_watchlist_uses_the_headline_where_it_replaces_v4():
+def test_watchlist_adds_the_headline_beside_v4_without_overwriting_it():
     roster, catalog, values = draft_fixture()
     traits = pd.DataFrame([
-        _headline_row("1", 8, "QB", 9.0, True),
-        _headline_row("2", 8, "RB", 1.0, False),
-        _headline_row("3", 8, "QB", 12.0, True),  # off the roster, still sets the group rank
+        _headline_row("1", 8, "QB", 9.0, True, percentile=90.0, games=6),
+        _headline_row("3", 8, "QB", 12.0, True, percentile=100.0),  # off the roster
         _headline_row("1", 8, "QB", -3.0, True, trait="qb.explosive"),
+        _headline_row("2", 8, "RB", 0.5, False, trait="rb.breakaway"),  # r2 has no headline row
         _headline_row("1", 7, "QB", 99.0, True),  # an earlier week never wins
         _headline_row("1", 9, "QB", 50.0, True, as_of="2026-10-09T00:00:00+00:00"),  # after the cutoff
     ])
     board, audit = research.watchlist(roster, catalog, values, DRAFT_AS_OF, traits=traits)
     by_id = board.set_index("athlete_id")
-    assert by_id.loc["1", "value_above_replacement"] == 9.0
-    assert by_id.loc["1", "model_version"] == "cfb_position_traits_v1"
-    assert by_id.loc["1", "position_rank"] == 2
-    assert by_id.loc["2", "value_above_replacement"] == 4.0
-    assert by_id.loc["2", "model_version"] == "cfb_player_value_v4" and by_id.loc["2", "position_rank"] == 1
+    # v4 columns are never overwritten
+    assert by_id["value_above_replacement"].to_dict() == {"1": 5.0, "2": 4.0}
+    assert by_id["position_rank"].to_dict() == {"1": 2, "2": 1}
+    assert set(by_id["model_version"]) == {"cfb_player_value_v4"}
+    assert by_id.loc["1", ["headline", "headline_percentile", "headline_games"]].tolist() == [9.0, 90.0, 6.0]
+    assert bool(by_id.loc["1", "headline_replaces_value"]) is True
+    assert by_id.loc["2", ["headline", "headline_percentile", "headline_games"]].isna().all()
+    assert bool(by_id.loc["2", "headline_replaces_value"]) is False
     assert audit["headline_replaced_groups"] == ["QB"]
 
     plain, plain_audit = research.watchlist(roster, catalog, values, DRAFT_AS_OF)
+    assert plain["headline"].isna().all() and not plain["headline_replaces_value"].any()
     assert plain.set_index("athlete_id").loc["1", "value_above_replacement"] == 5.0
     assert plain_audit["headline_replaced_groups"] == []
