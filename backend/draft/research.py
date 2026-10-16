@@ -99,7 +99,7 @@ def watchlist(roster, catalog, values, as_of, traits=None):
     board = board.merge(
         latest[keep], on="athlete_id", how="left", validate="one_to_one"
     )
-    board, replaced_groups = headline_columns(board, traits, as_of)
+    board, graded = grade_columns(board, traits, as_of)
     board["production_status"] = np.select(
         [board.week.isna(), board.team.ne(board.value_team)],
         ["no_individual_value", "team_mismatch"],
@@ -112,7 +112,7 @@ def watchlist(roster, catalog, values, as_of, traits=None):
         "scope": "FBS roster exploration; draft eligibility is unverified",
         "players": len(board),
         "college_week": latest_week,
-        "headline_replaced_groups": replaced_groups,
+        "graded_groups": graded,
         "college_as_of": str(latest.as_of.max()),
         "college_snapshot_age_days": round(
             (as_of - pd.to_datetime(latest.as_of, utc=True).max()).total_seconds()
@@ -133,47 +133,36 @@ def watchlist(roster, catalog, values, as_of, traits=None):
     }
 
 
-HEADLINE_COLUMNS = {
-    "headline": "value",
-    "headline_percentile": "percentile",
-    "headline_games": "games",
-    "headline_replaces_value": "replaces_value",
+GRADE_COLUMNS = {
+    "grade": "value",
+    "grade_percentile": "percentile",
+    "grade_games": "games",
 }
 
 
-def headline_columns(board, traits, as_of):
-    """Add the position trait headline beside v4; v4's value, rank and version stay.
+def grade_columns(board, traits, as_of):
+    """Add the position grade beside v4; v4's value, rank and version stay.
 
     ``traits`` is the scored trait artifact (or ``None``), possibly many weeks; only
-    the latest headline snapshot known at ``as_of`` counts. Headline rows exist for
-    qualified FBS players only, so everyone else gets NaN and
-    ``headline_replaces_value`` False. Also returns the groups flagged
-    ``replaces_value`` in that snapshot.
+    the latest grade snapshot known at ``as_of`` counts. Grade rows exist for
+    qualified FBS players only, so everyone else gets NaN. Also returns the groups
+    with grade rows in that snapshot.
     """
-    board = board.assign(
-        headline=np.nan,
-        headline_percentile=np.nan,
-        headline_games=np.nan,
-        headline_replaces_value=False,
-    )
+    board = board.assign(grade=np.nan, grade_percentile=np.nan, grade_games=np.nan)
     if traits is None:
         return board, []
-    headlines = traits[traits.trait.eq("headline")].copy()
-    headlines["athlete_id"] = ids(headlines.athlete_id)
-    headlines = headlines[pd.to_datetime(headlines.as_of, utc=True).le(as_of)]
-    if headlines.empty:
+    grades = traits[traits.trait.eq("grade")].copy()
+    grades["athlete_id"] = ids(grades.athlete_id)
+    grades = grades[pd.to_datetime(grades.as_of, utc=True).le(as_of)]
+    if grades.empty:
         return board, []
-    headlines = headlines[headlines.week.eq(headlines.week.max())]
-    latest = headlines.sort_values("games", ascending=False, kind="stable").drop_duplicates(
+    grades = grades[grades.week.eq(grades.week.max())]
+    latest = grades.sort_values("games", ascending=False, kind="stable").drop_duplicates(
         "athlete_id"
     ).set_index("athlete_id")
-    for column, source in HEADLINE_COLUMNS.items():
-        mapped = board.athlete_id.map(latest[source])
-        board[column] = (
-            mapped.eq(True) if column == "headline_replaces_value" else mapped.astype(float)
-        )
-    replaced = headlines[headlines.replaces_value.eq(True)]
-    return board, sorted(replaced.position_group.unique())
+    for column, source in GRADE_COLUMNS.items():
+        board[column] = board.athlete_id.map(latest[source]).astype(float)
+    return board, sorted(grades.position_group.unique())
 
 
 def historical_cohort(inputs, cache, cfb_root, completed_season, nfl_root):

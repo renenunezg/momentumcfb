@@ -153,9 +153,9 @@ jobs:
           github-token: ${{ github.token }}
           path: backend/data/processed/
 
-      # The frozen position trait fit and its expectation tables. Runs pinned
+      # The frozen position grade model and its expectation tables. Runs pinned
       # before this artifact existed lack it; the bundle bootstrap covers them.
-      - name: Restore pinned position trait fit artifact
+      - name: Restore pinned position grade model artifact
         if: env.HEISMAN_MODEL_RUN_ID != ''
         continue-on-error: true
         uses: actions/download-artifact@v7
@@ -280,13 +280,13 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Preserve frozen position trait fit
+      - name: Preserve frozen position grade model
         uses: actions/upload-artifact@v7
         with:
           name: position-traits-fit-${{ env.SEASON }}
           path: |
-            backend/data/processed/players/models/position_traits_*.json
-            backend/data/processed/players/models/position_traits_expectations_*.parquet
+            backend/data/processed/players/models/position_grade_*.json
+            backend/data/processed/players/models/position_grade_expectations_*.parquet
           if-no-files-found: warn
           retention-days: 90
 
