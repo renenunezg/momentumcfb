@@ -50,6 +50,12 @@ PRIMARY_TRAITS = {
 # must carry for a grade. Missing traits count as average (z = 0), so below this
 # the composite would be mostly the average standing in for him.
 MIN_WEIGHT_COVERAGE = 0.6
+# A trait counts toward the coverage denominator only where at least this share
+# of the week's qualified FBS players at the group have a value for it. Structural
+# gaps (``qb.floor`` before four games, prior-week baselines in week one, receiver
+# independence before any receiver has other-passer targets) then drop out for
+# everyone, while one player with an unusually thin profile still fails the bar.
+MIN_TRAIT_AVAILABILITY = 0.5
 GRADE_MEAN, GRADE_SD, GRADE_MIN, GRADE_MAX = 50.0, 10.0, 20.0, 80.0
 WEIGHT_COLUMNS = [
     "position_group",
@@ -307,9 +313,12 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     trait is z-scored on the pool's mean and sd (ddof 1; 0 where sd is 0 or
     missing) and multiplied by the model's sign. ``composite = Σ w_t z_t`` over the
     group's weighted traits, with ``z = 0`` for a trait the player has no value for.
-    ``coverage`` is the weight of the traits he has a value for; ``graded`` needs
-    ``has_primary`` (a value for ``PRIMARY_TRAITS[group]``) and ``coverage`` of at
-    least ``MIN_WEIGHT_COVERAGE``. ``composite`` is NaN where he is not graded.
+    A trait is available at the group that week when at least
+    ``MIN_TRAIT_AVAILABILITY`` of the pool has a value for it. ``coverage`` is the
+    weight of the available traits he has a value for over the weight of every
+    available trait; ``graded`` needs ``has_primary`` (a value for
+    ``PRIMARY_TRAITS[group]``) and ``coverage`` of at least ``MIN_WEIGHT_COVERAGE``.
+    ``composite`` is NaN where he is not graded.
     """
     missing = {"team", "fbs"} - set(snapshot_week.columns)
     if missing:
@@ -332,9 +341,24 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     value = pool["value"].astype(float)
     z = _scaled(value, value, [pool["position_group"], pool["trait"]]) * pool["sign"]
     pool = pool.assign(z=z)[z.notna()]
+    pool_size = players.groupby("position_group").size()
+    share = pool.groupby(["position_group", "trait"])["athlete_id"].nunique().div(
+        pool_size, level="position_group"
+    )
+    available = share[share.ge(MIN_TRAIT_AVAILABILITY)].index
+    available_weight = (
+        weights.set_index(["position_group", "trait"])["weight"]
+        .reindex(available)
+        .groupby(level="position_group")
+        .sum()
+    )
+    in_available = pd.MultiIndex.from_frame(pool[["position_group", "trait"]]).isin(available)
     sums = (
-        pool.assign(weighted=pool["weight"] * pool["z"])
-        .groupby(keys)[["weighted", "weight"]]
+        pool.assign(
+            weighted=pool["weight"] * pool["z"],
+            covered=pool["weight"].where(in_available, 0.0),
+        )
+        .groupby(keys)[["weighted", "covered"]]
         .sum()
         .reindex(pd.MultiIndex.from_frame(players[keys]))
         .fillna(0.0)
@@ -342,7 +366,8 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     primary = pool[pool["trait"].eq(pool["position_group"].map(PRIMARY_TRAITS))]
     primary_keys = set(zip(primary["athlete_id"], primary["position_group"]))
     players["has_primary"] = [key in primary_keys for key in zip(players["athlete_id"], players["position_group"])]
-    players["coverage"] = sums["weight"].to_numpy()
+    denominator = players["position_group"].map(available_weight)
+    players["coverage"] = sums["covered"].to_numpy() / denominator.where(denominator.gt(0))
     players["graded"] = players["has_primary"] & players["coverage"].ge(MIN_WEIGHT_COVERAGE)
     players["composite"] = np.where(players["graded"], sums["weighted"].to_numpy(), np.nan)
     return players[ELIGIBILITY_COLUMNS]

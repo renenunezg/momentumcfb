@@ -161,6 +161,54 @@ def war_rows(
     )
 
 
+def score_snapshot(
+    snapshot: pd.DataFrame,
+    model: grade.GradeModel,
+    values: pd.DataFrame,
+    credited: pd.DataFrame,
+    projections: pd.DataFrame,
+    as_of: datetime,
+    poor: bool,
+    fbs_schools: set[str],
+) -> pd.DataFrame:
+    """The scored artifact for one season's weekly trait snapshots (``POSITION_TRAIT_COLUMNS``).
+
+    ``snapshot`` carries ``fbs`` (from ``fbs_schools``); ``values`` are the season's v4
+    values, ``credited`` its per-game credit and ``projections`` its pregame
+    projections for WAR.
+    """
+    scored = grade_rows(snapshot, model)
+    measured = war_rows(
+        snapshot, values, war.wins_above_replacement(values, credited, projections)
+    )
+    weighted = model.weights[model.weights["weight"].gt(0)]
+    weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
+    traits = snapshot[TRAIT_SNAPSHOT_COLUMNS].assign(uncertainty=np.nan)
+    traits["in_grade"] = [
+        (group, trait) in weighted_keys
+        for group, trait in zip(traits["position_group"], traits["trait"])
+    ]
+    scored = scored.assign(in_grade=True, as_of=None, model_version=None)
+    measured = measured.assign(
+        in_grade=False, uncertainty=np.nan, as_of=None, model_version=None
+    )
+    columns = [*TRAIT_SNAPSHOT_COLUMNS, "uncertainty", "in_grade"]
+    out = pd.concat(
+        [
+            traits.assign(points_above_replacement=np.nan),
+            scored[columns].assign(points_above_replacement=np.nan),
+            measured[[*columns, "points_above_replacement"]],
+        ],
+        ignore_index=True,
+    )
+    return out.assign(
+        as_of=as_of.isoformat(),
+        model_version=MODEL_VERSION,
+        fbs=out["team"].isin(fbs_schools),
+        poor_coverage=poor,
+    )[POSITION_TRAIT_COLUMNS]
+
+
 def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     """Score the season's weekly trait snapshots with the latest earlier grade model.
 
@@ -186,39 +234,16 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     snapshot = built["snapshots"].astype({"athlete_id": str})
     # The grade pool is qualified FBS players, so the flag precedes scoring.
     snapshot = snapshot.assign(fbs=snapshot["team"].isin(fbs_schools))
-    scored = grade_rows(snapshot, model)
-    values = backtest.player_values(season)
-    measured = war_rows(
+    out = score_snapshot(
         snapshot,
-        values,
-        war.wins_above_replacement(values, built["credited"], war.season_projections(season)),
+        model,
+        backtest.player_values(season),
+        built["credited"],
+        war.season_projections(season),
+        as_of,
+        poor,
+        fbs_schools,
     )
-    weighted = model.weights[model.weights["weight"].gt(0)]
-    weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
-    traits = snapshot[TRAIT_SNAPSHOT_COLUMNS].assign(uncertainty=np.nan)
-    traits["in_grade"] = [
-        (group, trait) in weighted_keys
-        for group, trait in zip(traits["position_group"], traits["trait"])
-    ]
-    scored = scored.assign(in_grade=True, as_of=None, model_version=None)
-    measured = measured.assign(
-        in_grade=False, uncertainty=np.nan, as_of=None, model_version=None
-    )
-    columns = [*TRAIT_SNAPSHOT_COLUMNS, "uncertainty", "in_grade"]
-    out = pd.concat(
-        [
-            traits.assign(points_above_replacement=np.nan),
-            scored[columns].assign(points_above_replacement=np.nan),
-            measured[[*columns, "points_above_replacement"]],
-        ],
-        ignore_index=True,
-    )
-    out = out.assign(
-        as_of=as_of.isoformat(),
-        model_version=MODEL_VERSION,
-        fbs=out["team"].isin(fbs_schools),
-        poor_coverage=poor,
-    )[POSITION_TRAIT_COLUMNS]
     store.write_processed(out, *position_traits_artifact(season))
     graded = sorted(grade.graded_groups(model))
     latest = snapshot["week"].max()
@@ -232,11 +257,12 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
             f"{row.no_primary} lack the primary trait, {row.low_coverage} cover under "
             f"{grade.MIN_WEIGHT_COVERAGE} of the weight"
         )
+    scored = out[out["trait"].eq("grade")]
     log.info(
         f"position traits {season}: {scored['athlete_id'].nunique()} qualified FBS players "
         f"graded over {scored['week'].nunique()} weeks with the model through "
         f"{max(model.dev_seasons)}; graded groups {', '.join(graded) or 'none'}; "
-        f"{len(measured)} war rows; "
+        f"{int(out['trait'].eq('war').sum())} war rows; "
         f"{'receptions' if poor else 'targets'} mode, uncovered incompletions "
         f"{backtest.uncovered_share(coverage):.3f}"
     )
