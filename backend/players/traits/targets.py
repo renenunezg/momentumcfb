@@ -28,6 +28,11 @@ def normalize_name(value: str) -> str:
     return " ".join(word for word in text.split() if word not in SUFFIXES)
 
 
+def _ids(values: pd.Series) -> pd.Series:
+    """String ids; an integer-valued float (4.0) becomes "4" and nulls stay null."""
+    return values.astype("string").str.replace(r"\.0$", "", regex=True)
+
+
 def _receiver_name(play_text: object) -> str | None:
     text = _PENALTY.sub("", play_text) if isinstance(play_text, str) else ""
     match = _RECEIVER.search(text)
@@ -45,7 +50,8 @@ def recover_targets(
     incomplete = plays[plays["play_type"].eq(INCOMPLETION)]
 
     feed = play_stats[play_stats["stat_type"].eq("Target")]
-    feed = feed.assign(play_id=feed["play_id"].astype(str), athlete_id=feed["athlete_id"].astype(str))
+    feed = feed.assign(play_id=feed["play_id"].astype(str), athlete_id=_ids(feed["athlete_id"]))
+    feed = feed.dropna(subset=["athlete_id"]).astype({"athlete_id": object})
     feed = feed[feed["play_id"].isin(set(plays["id"].astype(str)))]
     feed = feed.drop_duplicates("play_id")[["play_id", "athlete_id"]].assign(source="feed")
 
@@ -53,7 +59,7 @@ def recover_targets(
         roster.assign(
             key=(roster["first_name"].fillna("") + " " + roster["last_name"].fillna(""))
             .map(normalize_name),
-            athlete_id=roster["id"].astype(str),
+            athlete_id=_ids(roster["id"]),
         )
         .drop_duplicates(["team", "key", "athlete_id"])
         .groupby(["team", "key"])["athlete_id"]
