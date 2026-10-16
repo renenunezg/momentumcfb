@@ -1303,17 +1303,49 @@ def test_season_identity_takes_each_players_latest_row_and_names_line_units():
     assert out.loc["unit:A", ["athlete_name", "team"]].tolist() == ["A offensive line", "A"]
 
 
-def test_split_half_correlation_uses_each_halfs_first_games_and_needs_enough_games():
-    rows = []
-    for player in range(12):
-        for game in range(1, 8):  # game 7 is past the six games and must be ignored
-            value = 100.0 * (-1) ** player if game == 7 else float(player)
-            rows.append({"athlete_id": f"p{player}", "game_id": 100 * player + game, "model_week": game,
-                         "value": value})
-    rows += [{"athlete_id": "short", "game_id": 9000 + game, "model_week": game, "value": 50.0 * game}
-             for game in range(1, 6)]
-    groups = pd.Series({**{f"p{player}": "QB" for player in range(12)}, "short": "QB"})
-    out = backtest.split_half_correlation(pd.DataFrame(rows), groups, games_at=(6, 8))
-    assert out.to_dict("records") == [
-        {"position_group": "QB", "games": 6, "players": 12, "correlation": pytest.approx(1.0)}
+def test_swap_features_keep_the_full_set_for_one_group_and_epa_elsewhere():
+    features = headline.feature_names()
+    out = backtest.swap_features(features, "QB")
+    qb = [name for name in features if name.startswith("QB:")]
+    assert set(qb) <= set(out) and "QB:qb.explosive" in out and "QB:epa" in out
+    assert sorted(set(out) - set(qb)) == sorted(f"{group}:epa" for group in headline.GROUPS if group != "QB")
+    assert len(out) == len(set(out))
+
+
+def _paired_fit():
+    features = ["QB:qb.explosive", "QB:epa"]
+    index = ["intercept", "home_field", *features]
+    zeros = pd.Series(0.0, index=index)
+    return headline.HeadlineFit(
+        weights=pd.Series([0.0, 0.0, 1.0, 1.0], index=index), penalty=1.0, loso_sd=zeros,
+        jackknife_sd=zeros, analytic_se=zeros, dropped=[], dropped_reason={}, dev_seasons=[2023, 2024],
+        model_version=headline.MODEL_VERSION,
+        feature_scale=pd.DataFrame({"feature": features, "mean": 0.0, "sd": 1.0}),
+    )
+
+
+def test_paired_split_half_scores_both_sides_on_one_athlete_set():
+    """12 credited QBs with six games each, plus ghost: six frame games and no credit."""
+    rng = np.random.default_rng(0)
+    rows, credit = [], []
+    for player in [f"q{i}" for i in range(12)] + ["ghost"]:
+        for game in range(1, 7):
+            game_id = 1000 * len(rows) + game
+            rows.append(_trait_row(player, game, game_id, "qb.explosive", rng.uniform(0, 5)))
+            if player != "ghost":
+                credit.append({"athlete_id": player, "game_id": game_id, "model_week": game,
+                               "adjusted_epa": rng.normal()})
+    frames = _trait_frame(rows)
+    snaps = pd.DataFrame({"athlete_id": frames["athlete_id"].unique(), "position_group": "QB"})
+    data = {"frames": frames, "credited": pd.DataFrame(credit), "snapshots": snaps}
+
+    chosen = backtest.paired_games(frames, data["credited"], 6)
+    assert "ghost" not in set(chosen["athlete_id"]) and chosen["athlete_id"].nunique() == 12
+
+    head, v4 = backtest.paired_split_half({2024: data}, _paired_fit(), (6,))
+    assert head[["position_group", "games", "players"]].to_dict("records") == [
+        {"position_group": "QB", "games": 6, "players": 12}
     ]
+    assert v4[["position_group", "games", "players"]].equals(head[["position_group", "games", "players"]])
+    assert head["correlation"].notna().all() and v4["correlation"].notna().all()
+    assert head["correlation"].iloc[0] != pytest.approx(v4["correlation"].iloc[0])
