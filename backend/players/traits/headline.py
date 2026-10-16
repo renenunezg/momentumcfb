@@ -223,7 +223,8 @@ def design_matrix(
     ``anchors`` (``game_id, home_margin``: the pregame projection) adds a
     ``projection`` column, an unpenalized regressor so the traits fit the margin net
     of the team model; a game without an anchor is dropped and counted in the log.
-    ``None`` or an empty frame adds no column.
+    ``None`` or an empty frame adds no column. With anchors, ``attrs["projection"]``
+    holds ``games`` (rows before the anchor join) and ``with_projection``.
     """
     if "exposure" not in snapshots.columns:
         raise ValueError("design_matrix needs an exposure column on the snapshots")
@@ -263,7 +264,9 @@ def design_matrix(
         len(out),
         int(missing.sum()),
     )
-    return out[~missing].reset_index(drop=True)
+    out = out[~missing].reset_index(drop=True)
+    out.attrs["projection"] = {"games": len(missing), "with_projection": int((~missing).sum())}
+    return out
 
 
 def fixed_columns(rows: pd.DataFrame) -> list[str]:
