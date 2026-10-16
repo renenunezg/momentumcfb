@@ -34,7 +34,7 @@ evaluation is
 `backend/data/processed/players/position_traits/evaluation_2024.parquet`,
 and every table below is copied from those two files and from the run log of
 `position-traits-fit --dev-seasons 2020 2021 2022 2023 2024 --validate 2025`
-on 2026-10-16 (`output/position-grade-fit-202610162156.log`). Player values
+on 2026-10-16 (`output/position-grade-fit-202610162200.log`). Player values
 for 2020 through 2025 are all `cfb_player_value_v4`, so the EPA baseline is
 one model.
 
@@ -55,16 +55,21 @@ evidence on the development seasons, and nothing else.
   team. It is unmeasured when fewer than 20 players moved or the stayer
   slope is not positive.
 
-`weight = max(reliability, 0) x portability`, with an unmeasured
-portability counted as 1, then normalized to sum to 1 within the position.
-Each trait gets a status:
+A reliability measured on fewer than 30 players counts as unmeasured. 30
+is a sample floor, not a tuned value. An unmeasured portability is imputed
+as the mean measured portability of the position's traits (the mean over
+every position's traits when the position has none measured), so an
+unmeasured trait is weighted like a typical trait at its position rather
+than like a perfectly portable one; the model flags it
+`portability_imputed`. Then `weight = max(reliability, 0) x portability`,
+normalized to sum to 1 within the position. Each trait gets a status:
 
 | Status | Rule | Weight |
 | --- | --- | --- |
 | weighted | reliability at least 0.10, portability measured and positive | reliability x portability, normalized |
-| unmeasured | reliability at least 0.10, portability not measurable | reliability, normalized |
+| unmeasured | reliability at least 0.10, portability not measurable | reliability x imputed portability, normalized |
 | noise | reliability under 0.10 | 0 |
-| unmeasured_reliability | reliability cannot be measured: too few players, or no per-game values | 0 |
+| unmeasured_reliability | reliability cannot be measured: under 30 players, or no per-game values | 0 |
 | team-driven | portability measured and at or below zero | 0 |
 
 Traits with no weight stay on the card, dimmed, as descriptive.
@@ -80,23 +85,24 @@ seasons, so it enters with a positive sign. The sign is stored in the model.
 ## Weights
 
 Reliability is the pooled 8-game split-half correlation; portability the
-clipped portable share. Weights sum to 1 within each position.
+clipped portable share, or the imputed position mean where marked. Weights
+sum to 1 within each position.
 
 | Group | Trait | Reliability | Portability | Weight | Status |
 | --- | --- | --- | --- | --- | --- |
-| QB | qb.drive_engine | 0.191 | 1.000 | 0.117 | weighted |
-| QB | qb.explosive | 0.288 | 0.360 | 0.063 | weighted |
-| QB | qb.ball_security | 0.115 | 1.000 | 0.070 | weighted |
-| QB | qb.floor | 0.269 | 0.672 | 0.110 | weighted |
-| QB | qb.legs | 0.160 | 1.000 | 0.097 | weighted |
-| QB | qb.pressure_handling | 0.351 | 1.000 | 0.214 | weighted |
-| QB | qb.receiver_independence | 0.537 |  | 0.328 | unmeasured |
+| QB | qb.drive_engine | 0.191 | 1.000 | 0.123 | weighted |
+| QB | qb.explosive | 0.288 | 0.360 | 0.067 | weighted |
+| QB | qb.ball_security | 0.115 | 1.000 | 0.074 | weighted |
+| QB | qb.floor | 0.269 | 0.672 | 0.116 | weighted |
+| QB | qb.legs | 0.160 | 1.000 | 0.103 | weighted |
+| QB | qb.pressure_handling | 0.351 | 1.000 | 0.226 | weighted |
+| QB | qb.receiver_independence | 0.537 | 0.839 (imputed) | 0.290 | unmeasured |
 | RB | rb.yards_over_expected | 0.150 | 1.000 | 0.238 | weighted |
 | RB | rb.stuff_avoidance | 0.108 | 1.000 | 0.171 | weighted |
 | RB | rb.breakaway | 0.172 | 0.434 | 0.119 | weighted |
 | RB | rb.short_yardage | -0.044 | 0.960 | 0 | noise |
 | RB | rb.receiving | 0.190 | 1.000 | 0.302 | weighted |
-| RB | rb.ball_security | -0.051 |  | 0 | noise |
+| RB | rb.ball_security | -0.051 | 0.899 (imputed) | 0 | noise |
 | RB | rb.line_independence | 0.107 | 1.000 | 0.170 | weighted |
 | WR | rec.target_share | 0.715 | 0.354 | 0.231 | weighted |
 | WR | rec.value_per_target | 0.339 | 0.755 | 0.234 | weighted |
@@ -113,7 +119,7 @@ clipped portable share. Weights sum to 1 within each position.
 | DL | def.finishing | 0.073 | 1.000 | 0 | noise |
 | DL | def.run_stop | 0.179 | 0.346 | 0.110 | weighted |
 | DL | def.every_week | 0.270 | 0.545 | 0.261 | weighted |
-| DL | def.impact |  |  | 0 | unmeasured_reliability |
+| DL | def.impact |  | 0.702 (imputed) | 0 | unmeasured_reliability |
 | LB | def.havoc | 0.424 | 0.596 | 0.171 | weighted |
 | LB | def.pass_rush | 0.138 | 0.808 | 0.075 | weighted |
 | LB | def.finishing | 0.141 | 1.000 | 0.095 | weighted |
@@ -128,10 +134,10 @@ clipped portable share. Weights sum to 1 within each position.
 | DB | def.run_support | 0.485 | 0.353 | 0.285 | weighted |
 | DB | def.impact |  | 0.000 | 0 | unmeasured_reliability |
 | DB | def.pass_impact |  | 0.000 | 0 | unmeasured_reliability |
-| OL | ol.protection | 0.311 |  | 0.337 | unmeasured |
-| OL | ol.stuff_rate | 0.253 |  | 0.274 | unmeasured |
-| OL | ol.short_yardage | 0.024 |  | 0 | noise |
-| OL | ol.line_yards | 0.360 |  | 0.389 | unmeasured |
+| OL | ol.protection | 0.311 | 0.716 (imputed) | 0.337 | unmeasured |
+| OL | ol.stuff_rate | 0.253 | 0.716 (imputed) | 0.274 | unmeasured |
+| OL | ol.short_yardage | 0.024 | 0.716 (imputed) | 0 | noise |
+| OL | ol.line_yards | 0.360 | 0.716 (imputed) | 0.389 | unmeasured |
 | K | k.field_goal | 0.036 | 0.800 | 0 | noise |
 | P | p.punt_average | 0.497 | 0.580 | 1.000 | weighted |
 
@@ -147,10 +153,13 @@ What the table says:
   move; at TE it keeps 0.235. Tackle share at LB is 0.771 and 0.643. The
   product rule keeps them in the grade but cuts them back.
 - `qb.explosive` is reliable (0.288) but travels poorly (0.360), so it has
-  the smallest QB weight (0.063).
-- `qb.receiver_independence` carries the largest QB weight (0.328) on a
-  reliability measured over 36 players and no portability (12 movers). It
-  exists for few QBs; a QB without it counts as average on it.
+  the smallest QB weight (0.067).
+- `qb.receiver_independence` still carries the largest QB weight (0.290).
+  Its reliability rests on 36 players, above the 30 floor, and its
+  portability (12 movers) is imputed at the QB mean, 0.839. At the final
+  week of 2025 only 69 of the 170 qualified FBS QBs have a value for it
+  (`scored_2025.parquet`); a
+  QB without it counts as average on it.
 - The with-without impacts (`def.impact`, `def.pass_impact`) carry no
   weight: they have no per-game values, so their reliability cannot be
   measured, and at DB their portability is at or below zero as well.
@@ -158,8 +167,10 @@ What the table says:
   share already had no measurable reliability.
 - K has no grade: `k.field_goal` is not reliable (0.036). P is graded on
   punt average alone.
-- OL units never move, so the three OL traits that pass the reliability
-  cut are unmeasured for portability and carry their reliability weight.
+- OL units never move, so OL has no measured portability. Its traits take
+  the mean over every position's measured traits, 0.716, the same for all
+  three OL traits that pass the reliability cut, so their relative weights
+  follow reliability.
 
 ## The grade
 
@@ -230,7 +241,7 @@ the two composites are correlated. This curve sets the uncertainty band.
 
 | Group | 4 games | 6 games | 8 games | 12 games | Players at 4 | Players at 6 | Players at 8 | Players at 12 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| QB | 0.173 | 0.245 | 0.275 | 0.380 | 934 | 751 | 598 | 260 |
+| QB | 0.178 | 0.245 | 0.284 | 0.379 | 934 | 751 | 598 | 260 |
 | RB | 0.075 | 0.084 | 0.119 | 0.097 | 2101 | 1771 | 1430 | 592 |
 | WR | 0.165 | 0.222 | 0.234 | 0.267 | 3310 | 2698 | 2101 | 717 |
 | TE | 0.130 | 0.166 | 0.207 | 0.151 | 1153 | 838 | 585 | 115 |
@@ -338,11 +349,11 @@ empty.
 
 | Group | Seasons | Players | Grade to next grade | Grade to next EPA | EPA to next EPA | Holdout |
 | --- | --- | --- | --- | --- | --- | --- |
-| QB | 2020-2021 | 62 | 0.267 | 0.299 | 0.374 |  |
-| QB | 2021-2022 | 89 | 0.127 | 0.279 | 0.518 |  |
-| QB | 2022-2023 | 83 | 0.324 | 0.232 | 0.408 |  |
-| QB | 2023-2024 | 82 | 0.373 | 0.396 | 0.390 |  |
-| QB | 2024-2025 | 82 | 0.226 | 0.330 | 0.546 | yes |
+| QB | 2020-2021 | 62 | 0.281 | 0.291 | 0.374 |  |
+| QB | 2021-2022 | 89 | 0.167 | 0.311 | 0.518 |  |
+| QB | 2022-2023 | 83 | 0.322 | 0.230 | 0.408 |  |
+| QB | 2023-2024 | 82 | 0.386 | 0.395 | 0.390 |  |
+| QB | 2024-2025 | 82 | 0.254 | 0.347 | 0.546 | yes |
 | RB | 2020-2021 | 166 | 0.304 | 0.348 | 0.328 |  |
 | RB | 2021-2022 | 197 | 0.201 | 0.220 | 0.340 |  |
 | RB | 2022-2023 | 224 | 0.283 | 0.278 | 0.373 |  |
@@ -391,7 +402,7 @@ Holdout, grade to next EPA against EPA to next EPA:
 
 | Group | Grade to next EPA | EPA to next EPA | Better |
 | --- | --- | --- | --- |
-| QB | 0.330 | 0.546 | EPA |
+| QB | 0.347 | 0.546 | EPA |
 | RB | 0.244 | 0.256 | EPA |
 | WR | 0.215 | 0.397 | EPA |
 | TE | 0.286 | 0.294 | EPA |
@@ -412,7 +423,7 @@ reported for the draft board and were never used to set a weight.
 
 | Group | Players | Pick, v4 | Pick, grade | NFL snaps, v4 | NFL snaps, grade |
 | --- | --- | --- | --- | --- | --- |
-| QB | 61 | 0.418 | 0.333 | 0.032 | -0.085 |
+| QB | 61 | 0.418 | 0.346 | 0.032 | -0.080 |
 | RB | 109 | 0.417 | 0.344 | 0.386 | 0.302 |
 | WR | 179 | 0.433 | 0.218 | 0.268 | 0.059 |
 | TE | 82 | 0.388 | 0.361 | 0.148 | 0.175 |
@@ -468,7 +479,7 @@ are matched and counted here but feed no weight.
 ## Scoring 2026 and serving
 
 `position-traits --seasons 2026` scores with the frozen model (log
-`output/position-grade-2026-202610162156.log`). Local raw data for 2026 ends
+`output/position-grade-2026-202610162200.log`). Local raw data for 2026 ends
 at week 1, so the artifact holds weeks 0 and 1: 67,812 rows, with 4,552
 qualified FBS players graded and 2,914 war rows. It ran in receptions mode
 and used the frozen expectation tables, reading no earlier play-by-play
@@ -501,7 +512,7 @@ season, without rebuilding anything or reading the expectation tables, and
 writes `processed/players/position_traits/scored_<season>.parquet` with the
 runner's columns. For 2025 it wrote 1,112,719 rows, 81,386 of them grade
 rows and 66,626 war rows (log
-`output/position-grade-scored-2025-202610162156.log`), for a local preview
+`output/position-grade-scored-2025-202610162200.log`), for a local preview
 of the validation season.
 
 Each artifact row carries the trait snapshot columns plus `uncertainty`
@@ -612,9 +623,9 @@ Plainly, against EPA credit alone on the 2024 to 2025 holdout:
   box score traits do. The grade also persists far better than defensive
   EPA (DL 0.384, LB 0.409, DB 0.272 grade to grade), and at DL it ranks the
   draft better than v4.
-- **QB and WR: EPA credit wins clearly.** QB 0.330 against 0.546, WR 0.215
+- **QB and WR: EPA credit wins clearly.** QB 0.347 against 0.546, WR 0.215
   against 0.397. EPA wins every development pair at WR and three of four at
-  QB (the grade edges 2023 to 2024, 0.396 against 0.390). At WR the
+  QB (the grade edges 2023 to 2024, 0.395 against 0.390). At WR the
   grade is also far behind v4 on the draft. For passers and receivers the
   traits do not yet add up to what the credited plays already say.
 - **RB and TE: EPA credit wins narrowly** (RB 0.244 against 0.256, TE 0.286
