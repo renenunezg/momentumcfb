@@ -34,3 +34,8 @@ def register(spec: TraitSpec) -> TraitSpec:
         raise ValueError(f"trait {spec.name!r} is already registered")
     TRAITS[spec.name] = spec
     return spec
+
+
+# Importing a position module registers its traits, so the registry is complete
+# whenever the package is imported.
+from backend.players.traits import offense  # noqa: E402, F401
