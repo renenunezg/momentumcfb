@@ -99,9 +99,7 @@ def watchlist(roster, catalog, values, as_of, traits=None):
     board = board.merge(
         latest[keep], on="athlete_id", how="left", validate="one_to_one"
     )
-    replaced_groups = []
-    if traits is not None:
-        board, replaced_groups = replace_with_headline(board, traits, as_of)
+    board, replaced_groups = headline_columns(board, traits, as_of)
     board["production_status"] = np.select(
         [board.week.isna(), board.team.ne(board.value_team)],
         ["no_individual_value", "team_mismatch"],
@@ -135,28 +133,46 @@ def watchlist(roster, catalog, values, as_of, traits=None):
     }
 
 
-def replace_with_headline(board, traits, as_of):
-    """Overwrite v4 value, rank and version with the headline where its group replaces v4.
+HEADLINE_COLUMNS = {
+    "headline": "value",
+    "headline_percentile": "percentile",
+    "headline_games": "games",
+    "headline_replaces_value": "replaces_value",
+}
 
-    ``traits`` is the scored trait artifact, possibly many weeks; only the latest
-    headline snapshot known at ``as_of`` counts. Players without a headline row keep v4.
+
+def headline_columns(board, traits, as_of):
+    """Add the position trait headline beside v4; v4's value, rank and version stay.
+
+    ``traits`` is the scored trait artifact (or ``None``), possibly many weeks; only
+    the latest headline snapshot known at ``as_of`` counts. Headline rows exist for
+    qualified FBS players only, so everyone else gets NaN and
+    ``headline_replaces_value`` False. Also returns the groups flagged
+    ``replaces_value`` in that snapshot.
     """
+    board = board.assign(
+        headline=np.nan,
+        headline_percentile=np.nan,
+        headline_games=np.nan,
+        headline_replaces_value=False,
+    )
+    if traits is None:
+        return board, []
     headlines = traits[traits.trait.eq("headline")].copy()
     headlines["athlete_id"] = ids(headlines.athlete_id)
     headlines = headlines[pd.to_datetime(headlines.as_of, utc=True).le(as_of)]
     if headlines.empty:
         return board, []
     headlines = headlines[headlines.week.eq(headlines.week.max())]
-    headlines["rank"] = headlines.groupby("position_group").value.rank(
-        method="min", ascending=False
-    )
+    latest = headlines.sort_values("games", ascending=False, kind="stable").drop_duplicates(
+        "athlete_id"
+    ).set_index("athlete_id")
+    for column, source in HEADLINE_COLUMNS.items():
+        mapped = board.athlete_id.map(latest[source])
+        board[column] = (
+            mapped.eq(True) if column == "headline_replaces_value" else mapped.astype(float)
+        )
     replaced = headlines[headlines.replaces_value.eq(True)]
-    swap = replaced.set_index("athlete_id")
-    rows = board.athlete_id.isin(swap.index)
-    key = board.loc[rows, "athlete_id"]
-    board.loc[rows, "value_above_replacement"] = key.map(swap.value).to_numpy()
-    board.loc[rows, "position_rank"] = key.map(swap["rank"]).to_numpy()
-    board.loc[rows, "model_version"] = key.map(swap.model_version).to_numpy()
     return board, sorted(replaced.position_group.unique())
 
 
