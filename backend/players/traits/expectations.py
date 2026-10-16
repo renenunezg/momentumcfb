@@ -37,22 +37,26 @@ def _fg_distance(play_text: object) -> float:
 
 
 def bucket(plays: pd.DataFrame) -> pd.DataFrame:
-    """A copy of ``plays`` with the down, distance, field, and field goal buckets."""
+    """A copy of ``plays`` with the down, distance, field, and field goal buckets.
+
+    Each group is added only when its source columns are present.
+    """
     out = plays.copy()
-    down = pd.to_numeric(out["down"], errors="coerce")
-    distance = pd.to_numeric(out["distance"], errors="coerce")
-    yards_to_goal = pd.to_numeric(out["yards_to_goal"], errors="coerce")
-    out["down_bucket"] = down.where(down.isin([1, 2, 3, 4])).astype("Int64")
-    out["distance_bucket"] = np.select(
-        [distance.le(2), distance.le(6), distance.le(10), distance.gt(10)],
-        ["1-2", "3-6", "7-10", "11+"],
-        default=None,
-    )
-    out["field_bucket"] = np.select(
-        [yards_to_goal.ge(80), yards_to_goal.ge(40), yards_to_goal.ge(20), yards_to_goal.lt(20)],
-        ["own", "mid", "plus", "red"],
-        default=None,
-    )
+    if {"down", "distance", "yards_to_goal"} <= set(out.columns):
+        down = pd.to_numeric(out["down"], errors="coerce")
+        distance = pd.to_numeric(out["distance"], errors="coerce")
+        yards_to_goal = pd.to_numeric(out["yards_to_goal"], errors="coerce")
+        out["down_bucket"] = down.where(down.isin([1, 2, 3, 4])).astype("Int64")
+        out["distance_bucket"] = np.select(
+            [distance.le(2), distance.le(6), distance.le(10), distance.gt(10)],
+            ["1-2", "3-6", "7-10", "11+"],
+            default=None,
+        )
+        out["field_bucket"] = np.select(
+            [yards_to_goal.ge(80), yards_to_goal.ge(40), yards_to_goal.ge(20), yards_to_goal.lt(20)],
+            ["own", "mid", "plus", "red"],
+            default=None,
+        )
     if "play_text" in out:
         feet = out["play_text"].map(_fg_distance)
         out["fg_bucket"] = (5 * (feet // 5)).astype("Int64")
