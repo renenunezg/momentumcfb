@@ -748,6 +748,48 @@ def log_war_leaders(data: dict[str, pd.DataFrame], season: int, top: int = 10) -
         )
 
 
+def score_cached_season(season: int) -> pd.DataFrame:
+    """Score an already-built season from its cached artifacts and write
+    ``scored_<season>.parquet``.
+
+    Uses the latest grade model whose cutoff precedes ``season``; reads the cached
+    snapshot, target coverage and per-game credit, the season's v4 values and its
+    pregame projections. Nothing is rebuilt and no expectation table is read. The
+    output has the weekly runner's columns (trait, grade and war rows). A cached
+    snapshot that is itself a scored artifact keeps only its trait rows.
+    """
+    models = store.PROCESSED_DIR / "players" / "models"
+    model = grade.load_grade_model(grade.latest_grade_model_path(models, season))
+    grade.validate_grade_model(model, season)
+    snapshot = store.read_processed(*season_artifact("snapshots", season))
+    snapshot = snapshot[~snapshot["trait"].isin(["grade", "war"])]
+    snapshot = with_fbs(
+        snapshot[snapshots.TRAIT_SNAPSHOT_COLUMNS].astype({"athlete_id": str}), season
+    )
+    teams = read_season_source(season, "teams")
+    out = pipeline.score_snapshot(
+        snapshot,
+        model,
+        player_values(season),
+        store.read_processed(*season_artifact("credited", season)),
+        war.season_projections(season),
+        datetime.now(timezone.utc),
+        poor_target_coverage(store.read_processed(*season_artifact("target_coverage", season))),
+        set(teams.loc[teams["classification"].eq("fbs"), "school"]),
+    )
+    store.write_processed(out, *traits_artifact(f"scored_{season}"))
+    log.info(
+        "position traits %s: scored the cached season with the model through %s; "
+        "%d rows, %d grade rows, %d war rows",
+        season,
+        max(model.dev_seasons),
+        len(out),
+        int(out["trait"].eq("grade").sum()),
+        int(out["trait"].eq("war").sum()),
+    )
+    return out
+
+
 # The backtest
 
 
