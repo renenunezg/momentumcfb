@@ -1,14 +1,17 @@
+import numpy as np
 import pandas as pd
 import pytest
 
 from backend.players import ingest
 from backend.players.traits import (
     TraitSpec,
+    absence,
     adjust,
     context,
     expectations,
     register,
     targets,
+    teammate,
 )
 
 
@@ -203,3 +206,24 @@ def test_adjust_rate_subtracts_only_prior_week_opponent_deviation():
     assert out.loc[(1, "a")] == 2.0  # week 1: no prior evidence, unchanged
     # week 2 vs D1: D1 allowed 0.2 through week 1, league 0.1, so subtract 10 * 0.1
     assert out.loc[(2, "c")] == pytest.approx(0.0)
+
+
+def test_relative_rate_compares_to_teammates_in_the_same_games():
+    events = pd.DataFrame([
+        {"game_id": 1, "team": "T", "athlete_id": "rb1", "numerator": 4.0, "denominator": 10.0},
+        {"game_id": 1, "team": "T", "athlete_id": "rb2", "numerator": 1.0, "denominator": 10.0},
+        {"game_id": 2, "team": "T", "athlete_id": "rb1", "numerator": 3.0, "denominator": 10.0},
+    ])
+    out = teammate.relative_rate(events).set_index(["athlete_id", "game_id"])
+    assert out.loc[("rb1", 1), "numerator"] == pytest.approx(3.0)   # (0.4 - 0.1) * 10
+    assert np.isnan(out.loc[("rb1", 2), "numerator"])                # no teammate carries
+
+
+def test_with_without_needs_an_absence_and_shrinks_by_games():
+    presence = pd.DataFrame({"athlete_id": "de1", "team": "T", "game_id": [1, 2, 3, 4], "present": [True, True, True, False]})
+    unit = pd.DataFrame({"team": "T", "game_id": [1, 2, 3, 4], "epa_allowed": [-1.0, -1.0, -1.0, 2.0]})
+    out = absence.with_without(presence, unit, "epa_allowed", shrink_games=3.0).iloc[0]
+    assert out["raw_difference"] == pytest.approx(3.0)
+    assert out["impact"] == pytest.approx(3.0 * 3 / (3 + 3))
+    never_absent = presence.assign(present=True)
+    assert np.isnan(absence.with_without(never_absent, unit, "epa_allowed", 3.0).iloc[0]["impact"])
