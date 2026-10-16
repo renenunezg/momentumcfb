@@ -62,6 +62,18 @@ def test_player_presence_counts_zero_stat_box_rows_as_present():
     assert de1.to_dict() == {1: True, 2: True, 3: False}
 
 
+def test_box_positions_group_box_only_players_from_the_roster(caplog):
+    positions = pd.DataFrame({"athlete_id": ["lb1"], "position": ["LB"], "position_group": ["LB"]})
+    box = pd.DataFrame({"athlete_id": ["lb1", "cb1", "ghost"], "team": "Home", "game_id": 1})
+    roster = pd.DataFrame({"id": ["lb1", "cb1"], "position": ["LB", "CB"]})
+    with caplog.at_level("INFO", logger="backend.players.traits.context"):
+        out = context.box_positions(positions, box, roster).set_index("athlete_id")
+    assert out.loc["cb1", ["position", "position_group"]].tolist() == ["CB", "DB"]  # tackles only, no credit
+    assert "ghost" not in out.index  # neither rostered nor credited
+    assert len(out) == 2
+    assert "1 box-score players have no roster row and no credit; skipped" in caplog.text
+
+
 def test_register_keys_by_name_and_rejects_duplicates_and_bad_aggregates(monkeypatch):
     monkeypatch.setattr("backend.players.traits.TRAITS", {})
     from backend.players import traits
@@ -668,3 +680,5 @@ def test_defense_rates_follow_the_box_score_and_the_sack_win_probability():
         name for name, spec in TRAITS.items() if "DB" in spec.position_groups
     }
     assert not out.duplicated(["athlete_id", "game_id", "model_week", "trait"]).any()
+    assert out["game_id"].dtype == "Int64"
+    assert out.loc[out["trait"].eq("def.impact"), "game_id"].isna().all()
