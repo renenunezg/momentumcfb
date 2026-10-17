@@ -48,6 +48,7 @@ PRIMARY_TRAITS = {
     "LB": "def.every_week",
     "DB": "def.every_week",
     "OL": "ol.line_yards",
+    "P": "p.punt_average",
 }
 # The least share of the position's total trait weight a player's measured traits
 # must carry for a grade. Missing traits count as average (z = 0), so below this

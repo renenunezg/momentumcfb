@@ -22,11 +22,18 @@ the feed tags the player directly and `inferred` when they come from unit
 outcomes or teammate comparisons. Nothing from the week being rated enters
 its own rating.
 
-Kickers and punters were removed from the trait table on 2026-10-16. Each
-had one trait; the kicker's earned no weight, so K had no grade, and the
-punter's grade was punt distance alone rescaled to 20 to 80, which is a
-single statistic and not a scouting grade. The K and P rows in the tables
-below are from the fit that still carried them and are kept as a record.
+Kickers were removed from the trait table on 2026-10-16: field goal accuracy
+has no measurable skill at college volumes (made over the distance
+expectation has a split-half reliability of 0.00 at eight games and a
+year-to-year Spearman of 0.08; research/kicker_punter_grade_2026-10-16.md),
+and the one stable kicker trait, the kickoff leg, is not what a kicker grade
+should mean. Punters went from one trait (punt distance, a single statistic
+rescaled to 20 to 80) to four: `p.punt_average`, `p.net`,
+`p.fair_catch_share` and `p.no_return_share`, built in
+`backend/players/traits/punting.py`. The P rows in the tables below are from
+the one-trait fit and the K rows from the fit that still carried kickers;
+both are kept as a record, and the refit's P figures are in the section
+"Punters, four traits" at the end.
 
 The grade replaces the margin fit of the first version. That fit asked
 whether a trait improved a team spread forecast beyond the team model, and
@@ -727,3 +734,27 @@ and is judged only as it is served.
 - **The 80 clip is crowded at DL.** In the 2025 week 17 scored file, 16
   defensive linemen sit at 80 (`scored_2025.parquet`). The fitted DL weights
   rest on havoc and pass rush, whose capped z-scores bunch at the top.
+
+## Punters, four traits (2026-10-16 refit)
+
+Refit with `position-traits-fit --dev-seasons 2020 2021 2022 2023 2024
+--validate 2025 --rebuild` after the punter traits moved to
+`backend/players/traits/punting.py` (`output/position-grade-fit-punters-20261016.log`).
+Every other position's weights, coefficients and reliability curves are
+unchanged to the last digit. Punters have no v4 credit, so the EPA-based
+steps do not apply and the P grade is the reliability x portability weights:
+
+| Trait | Reliability at 8 | Portability | Weight |
+| --- | --- | --- | --- |
+| p.punt_average | 0.497 | 0.580 | 0.389 |
+| p.fair_catch_share | 0.293 | 0.661 | 0.261 |
+| p.no_return_share | 0.418 | 0.379 | 0.213 |
+| p.net | 0.333 | 0.303 | 0.137 |
+
+Portability is measured on 20 movers against 380 stayers, exactly the sample
+floor. The P composite's split-half reliability is 0.18, 0.29, 0.35 and 0.44
+at 4, 6, 8 and 12 games, so it shrinks toward 50 with k = 12. Final-week
+grade against the next season's final-week grade (Spearman): 0.390 (2020 to
+2021, 62 punters), 0.501 (75), 0.339 (79), 0.333 (83); the held-out 2024 to
+2025 pair is 0.266 over 70 punters. All 136 qualified 2025 punters were
+graded. Kickers stay out.

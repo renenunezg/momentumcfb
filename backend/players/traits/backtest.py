@@ -42,6 +42,7 @@ from backend.players.traits.offense import (
     rb_traits,
     receiver_traits,
 )
+from backend.players.traits.punting import punting_traits
 from backend.players.traits.targets import recover_targets, target_coverage
 from backend.players.traits.transfers import (
     TRANSFER_COLUMNS,
@@ -263,6 +264,7 @@ def build_season_traits(
             receiver_traits(ctx, tables, recovered, poor_coverage=poor),
             defense_traits(ctx),
             line_traits(ctx, tables),
+            punting_traits(ctx),
         ],
         ignore_index=True,
     ).astype({"athlete_id": str})
