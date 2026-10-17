@@ -20,7 +20,6 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from backend.etl import store
 from backend.serving.anchors import load_serving_anchors
 
 log = logging.getLogger(__name__)
@@ -44,32 +43,34 @@ def game_leverage(projections: pd.DataFrame) -> pd.Series:
     return pd.Series(leverage.to_numpy(float), index=rows["game_id"].astype("int64"))
 
 
-def season_projections(season: int) -> pd.DataFrame:
-    """``game_id, home_margin, margin_sd`` for ``season``: the calibration replay when
-    it covers the season, else the stored weekly serving anchors on disk (each game
-    from the earliest week that projected it), else an empty frame."""
+def season_projections(season: int, games: pd.DataFrame | None = None) -> pd.DataFrame:
+    """``game_id, home_margin, margin_sd`` for ``season``.
+
+    The calibration replay is used when it covers the season (the development
+    and validation seasons, built locally). Otherwise the projection published
+    for each game's week is used, the same source player value v4 reads for win
+    probability, which a fresh weekly runner has (the frozen published
+    projections, then the served anchors). An empty frame means no leverage
+    and no WAR rows.
+    """
     try:
         return load_serving_anchors(season=season)[["game_id", "home_margin", "margin_sd"]]
-    except ValueError:
+    except (ValueError, FileNotFoundError, OSError):
         pass
-    weeks = sorted(
-        int(name.rsplit("_", 1)[1])
-        for name in store.processed_names("serving")
-        if name.startswith(f"anchors_{season}_") and name.rsplit("_", 1)[1].isdigit()
-    )
-    parts = []
-    for week in weeks:
-        parts.append(load_serving_anchors("serving", season=season, week=week))
-    if not parts:
+    from backend.model.weekly import load_weekly_games
+    from backend.players.value import _projection_anchors
+
+    try:
+        anchors = _projection_anchors(season, games if games is not None else load_weekly_games(season))
+    except FileNotFoundError:
         log.warning("wins above replacement %s: no pregame projections on disk", season)
         return pd.DataFrame(columns=["game_id", "home_margin", "margin_sd"])
     log.info(
-        "wins above replacement %s: no calibration replay; serving anchors from weeks %s",
+        "wins above replacement %s: no calibration replay; published projections for %d games",
         season,
-        weeks,
+        len(anchors),
     )
-    frame = pd.concat(parts, ignore_index=True).drop_duplicates("game_id")
-    return frame[["game_id", "home_margin", "margin_sd"]]
+    return anchors[["game_id", "home_margin", "margin_sd"]].drop_duplicates("game_id")
 
 
 def wins_above_replacement(
