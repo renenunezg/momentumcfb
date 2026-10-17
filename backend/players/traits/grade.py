@@ -98,7 +98,14 @@ ELIGIBILITY_COLUMNS = [
     "graded",
     "composite",
 ]
-ORIENTATION_COLUMNS = ["position_group", "trait", "sign", "sign_source", "spearman_epa", "players"]
+ORIENTATION_COLUMNS = [
+    "position_group",
+    "trait",
+    "sign",
+    "sign_source",
+    "spearman_epa",
+    "players",
+]
 RELIABILITY_COLUMNS = ["position_group", "games", "players", "correlation"]
 OUTPUT_COLUMNS = [
     "athlete_id",
@@ -119,7 +126,11 @@ def group_traits() -> pd.DataFrame:
     """``position_group, trait`` for every registered and derived trait at each of its
     groups."""
     return pd.DataFrame(
-        [(group, name) for name, spec in all_traits().items() for group in spec.position_groups],
+        [
+            (group, name)
+            for name, spec in all_traits().items()
+            for group in spec.position_groups
+        ],
         columns=["position_group", "trait"],
     )
 
@@ -146,7 +157,9 @@ def orientations(final_weeks: pd.DataFrame) -> pd.DataFrame:
     specs = all_traits()
     for group, trait in group_traits().itertuples(index=False):
         spec = specs[trait]
-        part = final_weeks[final_weeks["position_group"].eq(group) & final_weeks["trait"].eq(trait)]
+        part = final_weeks[
+            final_weeks["position_group"].eq(group) & final_weeks["trait"].eq(trait)
+        ]
         part = part.dropna(subset=["value", "shrunk_per_game"])
         rho = _spearman(part["value"], part["shrunk_per_game"]) if len(part) else np.nan
         if spec.higher_is_better is None:
@@ -196,9 +209,13 @@ def trait_weights(
         rel = rel[rel["games"].eq(WEIGHT_GAMES)]
     if "players" in rel.columns:
         rel = rel.assign(
-            correlation=rel["correlation"].where(rel["players"].ge(MIN_RELIABILITY_PLAYERS))
+            correlation=rel["correlation"].where(
+                rel["players"].ge(MIN_RELIABILITY_PLAYERS)
+            )
         )
-    rel = rel.drop_duplicates(["position_group", "trait"]).set_index(["position_group", "trait"])
+    rel = rel.drop_duplicates(["position_group", "trait"]).set_index(
+        ["position_group", "trait"]
+    )
     port = portability.drop_duplicates(["position_group", "trait"]).set_index(
         ["position_group", "trait"]
     )
@@ -233,14 +250,18 @@ def trait_weights(
 # Fitted weights
 
 
-def _ridge(x: np.ndarray, y: np.ndarray, lower: np.ndarray, penalty: float) -> np.ndarray:
+def _ridge(
+    x: np.ndarray, y: np.ndarray, lower: np.ndarray, penalty: float
+) -> np.ndarray:
     """Bounded ridge: an unpenalized free intercept, then coefficients with lower
     bounds ``lower`` and penalty ``penalty`` on their squares."""
     width = x.shape[1]
-    design = np.vstack([
-        np.column_stack([np.ones(len(x)), x]),
-        np.column_stack([np.zeros(width), np.sqrt(penalty) * np.eye(width)]),
-    ])
+    design = np.vstack(
+        [
+            np.column_stack([np.ones(len(x)), x]),
+            np.column_stack([np.zeros(width), np.sqrt(penalty) * np.eye(width)]),
+        ]
+    )
     target = np.concatenate([y, np.zeros(width)])
     bounds = (np.concatenate([[-np.inf], lower]), np.full(width + 1, np.inf))
     return lsq_linear(design, target, bounds=bounds).x
@@ -262,8 +283,13 @@ def fit_ridge_weights(
     columns = list(lower.index)
     bound = lower.to_numpy(float)
     seasons = sorted(pairs)
-    stacked = {season: (pairs[season][0][columns].to_numpy(float), pairs[season][1].to_numpy(float))
-               for season in seasons}
+    stacked = {
+        season: (
+            pairs[season][0][columns].to_numpy(float),
+            pairs[season][1].to_numpy(float),
+        )
+        for season in seasons
+    }
     if len(seasons) > 1:
         errors = []
         for penalty in PENALTIES:
@@ -393,7 +419,9 @@ def grade_model_from_payload(payload: dict) -> GradeModel:
         dev_seasons=[int(season) for season in payload["dev_seasons"]],
         reliability=reliability.astype({"games": int, "correlation": float}),
         model_version=payload["model_version"],
-        shrink_games={group: float(k) for group, k in payload.get("shrink_games", {}).items()},
+        shrink_games={
+            group: float(k) for group, k in payload.get("shrink_games", {}).items()
+        },
     )
 
 
@@ -404,7 +432,9 @@ def load_grade_model(path: Path) -> GradeModel:
 def validate_grade_model(model: GradeModel, season: int) -> None:
     """Refuse a model that saw ``season`` or a later one, or that another version made."""
     if model.model_version != MODEL_VERSION:
-        raise ValueError(f"grade model is {model.model_version!r}, expected {MODEL_VERSION!r}")
+        raise ValueError(
+            f"grade model is {model.model_version!r}, expected {MODEL_VERSION!r}"
+        )
     if not model.dev_seasons or max(model.dev_seasons) >= season:
         raise ValueError(f"grade model on {model.dev_seasons} cannot score {season}")
 
@@ -412,7 +442,9 @@ def validate_grade_model(model: GradeModel, season: int) -> None:
 # Scoring
 
 
-def _scaled(values: pd.Series, reference: pd.Series, keys: list[pd.Series]) -> pd.Series:
+def _scaled(
+    values: pd.Series, reference: pd.Series, keys: list[pd.Series]
+) -> pd.Series:
     """(value − mean) / sd with the mean and sd (ddof 1) of ``reference`` (NaN where not
     a reference row) within ``keys``; 0 where sd is 0 or missing, NaN where the value is."""
     mean = reference.groupby(keys).transform("mean")
@@ -441,16 +473,18 @@ def shrink_games_from(reliability: pd.DataFrame) -> dict[str, float]:
     """Per group, the games at which the composite reliability curve (linear from
     r(0) = 0) first reaches ``SHRINK_RELIABILITY``, or ``SHRINK_CAP_GAMES``."""
     out = {}
-    for group, table in reliability.dropna(subset=["correlation"]).groupby("position_group"):
+    for group, table in reliability.dropna(subset=["correlation"]).groupby(
+        "position_group"
+    ):
         table = table.sort_values("games")
         games = np.concatenate([[0.0], table["games"].to_numpy(float)])
         r = np.concatenate([[0.0], table["correlation"].to_numpy(float)])
         k = SHRINK_CAP_GAMES
         for i in range(1, len(r)):
             if r[i] >= SHRINK_RELIABILITY:
-                k = games[i - 1] + (SHRINK_RELIABILITY - r[i - 1]) / (r[i] - r[i - 1]) * (
-                    games[i] - games[i - 1]
-                )
+                k = games[i - 1] + (SHRINK_RELIABILITY - r[i - 1]) / (
+                    r[i] - r[i - 1]
+                ) * (games[i] - games[i - 1])
                 break
         out[group] = float(min(k, SHRINK_CAP_GAMES))
     return out
@@ -469,19 +503,34 @@ def with_epa_credit(snapshot: pd.DataFrame, values: pd.DataFrame) -> pd.DataFram
     v4_weeks = np.array(sorted(values["week"].astype(int).unique()))
     if people.empty or not len(v4_weeks):
         return snapshot
-    position = np.searchsorted(v4_weeks, people["week"].astype(int).to_numpy(), side="right") - 1
+    position = (
+        np.searchsorted(v4_weeks, people["week"].astype(int).to_numpy(), side="right")
+        - 1
+    )
     people = people[position >= 0].assign(value_week=v4_weeks[position[position >= 0]])
-    credit = values[["week", "athlete_id", "shrunk_per_game"]].astype({"athlete_id": str})
-    rows = people.drop(columns=["value"]).merge(
-        credit.rename(columns={"week": "value_week", "shrunk_per_game": "value"}),
-        on=["athlete_id", "value_week"],
-    ).drop(columns="value_week")
+    credit = values[["week", "athlete_id", "shrunk_per_game"]].astype(
+        {"athlete_id": str}
+    )
+    rows = (
+        people.drop(columns=["value"])
+        .merge(
+            credit.rename(columns={"week": "value_week", "shrunk_per_game": "value"}),
+            on=["athlete_id", "value_week"],
+        )
+        .drop(columns="value_week")
+    )
     rows = rows.assign(trait=EPA_TRAIT, kind=spec.kind)
-    ranked = rows["qualified"].eq(True) & rows["fbs"].eq(True) if "fbs" in rows else rows["qualified"].eq(True)
+    ranked = (
+        rows["qualified"].eq(True) & rows["fbs"].eq(True)
+        if "fbs" in rows
+        else rows["qualified"].eq(True)
+    )
     groups = [rows.loc[ranked, "week"], rows.loc[ranked, "position_group"]]
     rank = rows.loc[ranked, "value"].groupby(groups).rank(method="average")
     n = rows.loc[ranked, "value"].groupby(groups).transform("size")
-    rows["percentile"] = ((100 * (rank - 1) / (n - 1)).where(n.gt(1), 100.0)).reindex(rows.index)
+    rows["percentile"] = ((100 * (rank - 1) / (n - 1)).where(n.gt(1), 100.0)).reindex(
+        rows.index
+    )
     return pd.concat([snapshot, rows[snapshot.columns]], ignore_index=True)
 
 
@@ -503,27 +552,39 @@ def _week_pool(
     players = players[
         players["qualified"] & players["fbs"] & players["position_group"].isin(groups)
     ][[*keys, "games"]].reset_index(drop=True)
-    pool = rows.merge(players[keys], on=keys).merge(traits, on=["position_group", "trait"])
+    pool = rows.merge(players[keys], on=keys).merge(
+        traits, on=["position_group", "trait"]
+    )
     value = pool["value"].astype(float)
     z = _scaled(value, value, [pool["position_group"], pool["trait"]]) * pool["sign"]
     pool = pool.assign(z=z.clip(-Z_CAP, Z_CAP))[z.notna()]
     pool_size = players.groupby("position_group").size()
-    share = pool.groupby(["position_group", "trait"])["athlete_id"].nunique().div(
-        pool_size, level="position_group"
+    share = (
+        pool.groupby(["position_group", "trait"])["athlete_id"]
+        .nunique()
+        .div(pool_size, level="position_group")
     )
     available = share[share.ge(MIN_TRAIT_AVAILABILITY)].index
     return players, pool, available
 
 
-def trait_z_frame(snapshot_week: pd.DataFrame, traits: pd.DataFrame, group: str) -> pd.DataFrame:
+def trait_z_frame(
+    snapshot_week: pd.DataFrame, traits: pd.DataFrame, group: str
+) -> pd.DataFrame:
     """One row per qualified FBS player at ``group``, one column per trait of
     ``traits`` at the group: the capped oriented z, 0 where the player has no value
     or the trait is unavailable that week."""
     traits = traits[traits["position_group"].eq(group)]
     players, pool, available = _week_pool(snapshot_week, traits, {group})
-    pool = pool[pd.MultiIndex.from_frame(pool[["position_group", "trait"]]).isin(available)]
-    wide = pool.pivot_table(index="athlete_id", columns="trait", values="z", aggfunc="first")
-    return wide.reindex(index=players["athlete_id"], columns=traits["trait"]).fillna(0.0)
+    pool = pool[
+        pd.MultiIndex.from_frame(pool[["position_group", "trait"]]).isin(available)
+    ]
+    wide = pool.pivot_table(
+        index="athlete_id", columns="trait", values="z", aggfunc="first"
+    )
+    return wide.reindex(index=players["athlete_id"], columns=traits["trait"]).fillna(
+        0.0
+    )
 
 
 def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame:
@@ -560,7 +621,9 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
         .groupby(level="position_group")
         .sum()
     )
-    in_available = pd.MultiIndex.from_frame(pool[["position_group", "trait"]]).isin(available)
+    in_available = pd.MultiIndex.from_frame(pool[["position_group", "trait"]]).isin(
+        available
+    )
     sums = (
         pool.assign(
             weighted=(pool["weight"] * pool["z"]).where(in_available, 0.0),
@@ -574,16 +637,20 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     # The primary trait is read from the snapshot, whatever its weight.
     rows = snapshot_week.astype({"athlete_id": str})
     primary = rows[
-        rows["trait"].eq(rows["position_group"].map(PRIMARY_TRAITS)) & rows["value"].notna()
+        rows["trait"].eq(rows["position_group"].map(PRIMARY_TRAITS))
+        & rows["value"].notna()
     ]
     primary_keys = set(zip(primary["athlete_id"], primary["position_group"]))
     players["has_primary"] = [
-        key in primary_keys for key in zip(players["athlete_id"], players["position_group"])
+        key in primary_keys
+        for key in zip(players["athlete_id"], players["position_group"])
     ]
     denominator = players["position_group"].map(available_weight)
     denominator = denominator.where(denominator.gt(0))
     players["coverage"] = sums["covered"].to_numpy() / denominator
-    players["graded"] = players["has_primary"] & players["coverage"].ge(MIN_WEIGHT_COVERAGE)
+    players["graded"] = players["has_primary"] & players["coverage"].ge(
+        MIN_WEIGHT_COVERAGE
+    )
     k = players["position_group"].map(model.shrink_games).fillna(0.0)
     games = players["games"].astype(float)
     shrink = (games / (games + k)).where(k.gt(0), 1.0).to_numpy()
@@ -592,7 +659,13 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     return players[ELIGIBILITY_COLUMNS]
 
 
-COVERAGE_LOSS_COLUMNS = ["position_group", "qualified", "graded", "no_primary", "low_coverage"]
+COVERAGE_LOSS_COLUMNS = [
+    "position_group",
+    "qualified",
+    "graded",
+    "no_primary",
+    "low_coverage",
+]
 
 
 def coverage_losses(eligibility: pd.DataFrame) -> pd.DataFrame:
@@ -637,6 +710,8 @@ def score_grades(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame
     reliability = np.zeros(len(out))
     for group, index in out.groupby("position_group").groups.items():
         table = model.reliability[model.reliability["position_group"].eq(group)]
-        reliability[out.index.get_indexer(index)] = reliability_at(table, out.loc[index, "games"])
+        reliability[out.index.get_indexer(index)] = reliability_at(
+            table, out.loc[index, "games"]
+        )
     out["uncertainty"] = GRADE_SD * np.sqrt(1 - reliability)
     return out[OUTPUT_COLUMNS]

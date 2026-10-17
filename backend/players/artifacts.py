@@ -214,14 +214,19 @@ def _trait_members(extra: set[str]) -> tuple[str, str, int] | None:
     """``(model name, tables name, model cutoff)`` when ``extra`` is exactly one grade pair."""
     if not extra:
         return None
-    models = [name for name in extra if name.startswith("players/models/")
-              and grade.GRADE_NAME.fullmatch(name.removeprefix("players/models/"))]
+    models = [
+        name
+        for name in extra
+        if name.startswith("players/models/")
+        and grade.GRADE_NAME.fullmatch(name.removeprefix("players/models/"))
+    ]
     if len(models) != 1:
         raise ValueError("player runtime bundle contains unexpected files")
     model_cutoff = grade.grade_cutoff(Path(models[0]))
-    tables_name = "players/models/" + expectations.expectation_tables_path(
-        Path("."), model_cutoff
-    ).name
+    tables_name = (
+        "players/models/"
+        + expectations.expectation_tables_path(Path("."), model_cutoff).name
+    )
     if extra != {models[0], tables_name}:
         raise ValueError("player runtime bundle contains unexpected files")
     return models[0], tables_name, model_cutoff

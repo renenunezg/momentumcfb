@@ -53,15 +53,20 @@ def recover_targets(
     incomplete = plays[plays["play_type"].eq(INCOMPLETION)]
 
     feed = play_stats[play_stats["stat_type"].eq("Target")]
-    feed = feed.assign(play_id=feed["play_id"].astype(str), athlete_id=_ids(feed["athlete_id"]))
+    feed = feed.assign(
+        play_id=feed["play_id"].astype(str), athlete_id=_ids(feed["athlete_id"])
+    )
     feed = feed.dropna(subset=["athlete_id"]).astype({"athlete_id": object})
     feed = feed[feed["play_id"].isin(set(plays["id"].astype(str)))]
-    feed = feed.drop_duplicates("play_id")[["play_id", "athlete_id"]].assign(source="feed")
+    feed = feed.drop_duplicates("play_id")[["play_id", "athlete_id"]].assign(
+        source="feed"
+    )
 
     names = (
         roster.assign(
-            key=(roster["first_name"].fillna("") + " " + roster["last_name"].fillna(""))
-            .map(normalize_name),
+            key=(
+                roster["first_name"].fillna("") + " " + roster["last_name"].fillna("")
+            ).map(normalize_name),
             athlete_id=_ids(roster["id"]),
         )
         .drop_duplicates(["team", "key", "athlete_id"])
@@ -79,7 +84,9 @@ def recover_targets(
         name = _receiver_name(play.play_text)
         athlete_id = unique.get((play.offense, normalize_name(name))) if name else None
         if athlete_id:
-            rows.append({"play_id": play_id, "athlete_id": athlete_id, "source": "text"})
+            rows.append(
+                {"play_id": play_id, "athlete_id": athlete_id, "source": "text"}
+            )
     text = pd.DataFrame(rows, columns=TARGET_COLUMNS)
     return pd.concat([feed[TARGET_COLUMNS], text], ignore_index=True)
 
@@ -87,9 +94,13 @@ def recover_targets(
 def target_coverage(plays: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
     """Per season: incompletions, and how many have a feed, text, or no target."""
     incomplete = plays[plays["play_type"].eq(INCOMPLETION)]
-    source = targets.assign(play_id=targets["play_id"].astype(str)).set_index("play_id")["source"]
+    source = targets.assign(play_id=targets["play_id"].astype(str)).set_index(
+        "play_id"
+    )["source"]
     covered = incomplete["id"].astype(str).map(source)
-    frame = pd.DataFrame({"season": incomplete["season"].to_numpy(), "source": covered.to_numpy()})
+    frame = pd.DataFrame(
+        {"season": incomplete["season"].to_numpy(), "source": covered.to_numpy()}
+    )
     grouped = frame.groupby("season")["source"]
     out = pd.DataFrame(
         {

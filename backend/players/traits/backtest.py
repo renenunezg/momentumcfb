@@ -348,7 +348,9 @@ def frames_with_epa(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
     its ``rate`` aggregate is adjusted EPA per game."""
     frames = data["frames"].astype({"athlete_id": str})
     credited = data["credited"].astype({"athlete_id": str})
-    credited = credited[credited["athlete_id"].isin(set(data["snapshots"]["athlete_id"].astype(str)))]
+    credited = credited[
+        credited["athlete_id"].isin(set(data["snapshots"]["athlete_id"].astype(str)))
+    ]
     epa = pd.DataFrame(
         {
             "athlete_id": credited["athlete_id"],
@@ -371,9 +373,13 @@ def pooled_frames(
     frames, groups = [], []
     for season, data in seasons.items():
         frame = frames_with_epa(data)
-        frames.append(frame.assign(athlete_id=_season_keys(frame["athlete_id"], season)))
+        frames.append(
+            frame.assign(athlete_id=_season_keys(frame["athlete_id"], season))
+        )
         people = _people(data["snapshots"])["position_group"].reset_index()
-        groups.append(people.assign(athlete_id=_season_keys(people["athlete_id"], season)))
+        groups.append(
+            people.assign(athlete_id=_season_keys(people["athlete_id"], season))
+        )
     return pd.concat(frames, ignore_index=True), pd.concat(groups, ignore_index=True)
 
 
@@ -452,7 +458,9 @@ def half_composites(
     """
     rows = frames.merge(chosen, on=["athlete_id", "game_id"])
     rows = rows.assign(
-        aggregate=rows["trait"].map({name: spec.aggregate for name, spec in all_traits().items()})
+        aggregate=rows["trait"].map(
+            {name: spec.aggregate for name, spec in all_traits().items()}
+        )
     )
     values = snapshots.aggregate(rows, ["athlete_id", "trait", "half"]).reset_index()
     half_snapshot = values.assign(
@@ -464,7 +472,9 @@ def half_composites(
     ).dropna(subset=["position_group"])
     columns = {}
     for half in (0, 1):
-        scored = grade.score_grades(half_snapshot[half_snapshot["half"].eq(half)], model)
+        scored = grade.score_grades(
+            half_snapshot[half_snapshot["half"].eq(half)], model
+        )
         columns[half] = scored.set_index("athlete_id")["composite"]
     return pd.DataFrame(columns)
 
@@ -493,7 +503,9 @@ def composite_split_half(
                 continue
             halves = half_composites(frames, people, chosen, n, model)
             halves["position_group"] = halves.index.map(people["position_group"])
-            by_games[n].append(halves.set_axis(_season_keys(halves.index.to_series(), season)))
+            by_games[n].append(
+                halves.set_axis(_season_keys(halves.index.to_series(), season))
+            )
     rows = []
     for n, parts in by_games.items():
         if not parts:
@@ -522,7 +534,8 @@ def reliability_table(
     """Each dev season's trait reliability, the pooled trait rows the weights read,
     and the pooled composite curve (``trait`` ``grade``)."""
     parts = [
-        data["reliability"].assign(season=str(season)) for season, data in seasons.items()
+        data["reliability"].assign(season=str(season))
+        for season, data in seasons.items()
     ]
     parts.append(pooled_traits.assign(season="pooled"))
     parts.append(composite.assign(trait="grade", season="pooled"))
@@ -598,13 +611,17 @@ def _spearman(left: pd.Series, right: pd.Series) -> float:
 def _final_epa(values: pd.DataFrame) -> pd.Series:
     """v4 ``shrunk_per_game`` at the values' final week, by athlete id."""
     final = values[values["week"].eq(values["week"].max())].astype({"athlete_id": str})
-    return final.drop_duplicates("athlete_id").set_index("athlete_id")["shrunk_per_game"]
+    return final.drop_duplicates("athlete_id").set_index("athlete_id")[
+        "shrunk_per_game"
+    ]
 
 
 def final_week_grades(snapshot: pd.DataFrame, model: grade.GradeModel) -> pd.DataFrame:
     """``athlete_id, position_group, games, grade`` at the snapshot's final week."""
     final = snapshot[snapshot["week"].eq(snapshot["week"].max())]
-    return grade.score_grades(final, model)[["athlete_id", "position_group", "games", "grade"]]
+    return grade.score_grades(final, model)[
+        ["athlete_id", "position_group", "games", "grade"]
+    ]
 
 
 def next_season_table(
@@ -634,7 +651,9 @@ def next_season_table(
         pair_model = model[season] if isinstance(model, dict) else model
         now = final_week_grades(seasons[season]["snapshots"], pair_model)
         nxt = final_week_grades(seasons[later]["snapshots"], pair_model)
-        both = now.merge(nxt, on=["athlete_id", "position_group"], suffixes=("", "_next"))
+        both = now.merge(
+            nxt, on=["athlete_id", "position_group"], suffixes=("", "_next")
+        )
         both = both.assign(
             epa=both["athlete_id"].map(epa[season]),
             epa_next=both["athlete_id"].map(epa[later]),
@@ -648,10 +667,15 @@ def next_season_table(
                     "next_season": later,
                     "position_group": group,
                     "players": len(used),
-                    "spearman_grade_next_grade": _spearman(used["grade"], used["grade_next"]),
-                    "spearman_grade_next_epa": _spearman(used["grade"], used["epa_next"]),
+                    "spearman_grade_next_grade": _spearman(
+                        used["grade"], used["grade_next"]
+                    ),
+                    "spearman_grade_next_epa": _spearman(
+                        used["grade"], used["epa_next"]
+                    ),
                     "spearman_epa_next_epa": _spearman(used["epa"], used["epa_next"]),
-                    "holdout": later == validation_season and season == validation_season - 1,
+                    "holdout": later == validation_season
+                    and season == validation_season - 1,
                 }
             )
     return pd.DataFrame(rows, columns=NEXT_SEASON_COLUMNS)
@@ -667,7 +691,9 @@ def final_week_values(
         .drop_duplicates("athlete_id")[["athlete_id", "grade"]]
     )
     final_values = values[values["week"].eq(values["week"].max())]
-    v4 = final_values.drop_duplicates("athlete_id")[["athlete_id", "value_above_replacement"]]
+    v4 = final_values.drop_duplicates("athlete_id")[
+        ["athlete_id", "value_above_replacement"]
+    ]
     return scored.merge(v4, on="athlete_id", how="outer")
 
 
@@ -718,10 +744,13 @@ def draft_check(
             {
                 "position_group": group,
                 "players": len(frame),
-                "spearman_pick_v4": _spearman(frame["value_above_replacement"], -frame["pick"]),
+                "spearman_pick_v4": _spearman(
+                    frame["value_above_replacement"], -frame["pick"]
+                ),
                 "spearman_pick_grade": _spearman(frame["grade"], -frame["pick"]),
                 "spearman_nfl_games_v4": _spearman(
-                    mature["value_above_replacement"], mature["nfl_first3_scrimmage_snaps"]
+                    mature["value_above_replacement"],
+                    mature["nfl_first3_scrimmage_snaps"],
                 ),
                 "spearman_nfl_games_grade": _spearman(
                     mature["grade"], mature["nfl_first3_scrimmage_snaps"]
@@ -740,7 +769,9 @@ def grade_coverage_table(
         snapshot = data["snapshots"]
         final = snapshot[snapshot["week"].eq(snapshot["week"].max())]
         parts.append(
-            grade.coverage_losses(grade.grade_eligibility(final, model)).assign(season=season)
+            grade.coverage_losses(grade.grade_eligibility(final, model)).assign(
+                season=season
+            )
         )
     out = pd.concat(parts, ignore_index=True)
     return out[["season", *grade.COVERAGE_LOSS_COLUMNS]]
@@ -755,7 +786,9 @@ def log_war_leaders(data: dict[str, pd.DataFrame], season: int, top: int = 10) -
     measured = pipeline.war_rows(
         final,
         values,
-        war.wins_above_replacement(values, data["credited"], war.season_projections(season)),
+        war.wins_above_replacement(
+            values, data["credited"], war.season_projections(season)
+        ),
     )
     leaders = measured.sort_values("value", ascending=False).head(top)
     for rank, row in enumerate(leaders.itertuples(), start=1):
@@ -799,7 +832,9 @@ def score_cached_season(season: int) -> pd.DataFrame:
         store.read_processed(*season_artifact("credited", season)),
         war.season_projections(season),
         datetime.now(timezone.utc),
-        poor_target_coverage(store.read_processed(*season_artifact("target_coverage", season))),
+        poor_target_coverage(
+            store.read_processed(*season_artifact("target_coverage", season))
+        ),
         set(teams.loc[teams["classification"].eq("fbs"), "school"]),
     )
     store.write_processed(out, *traits_artifact(f"scored_{season}"))
@@ -854,7 +889,9 @@ def dev_pair_table(
     return table.assign(variant=variant)[DEV_PAIR_COLUMNS]
 
 
-def pair_means(table: pd.DataFrame, column: str = "spearman_grade_next_epa") -> pd.Series:
+def pair_means(
+    table: pd.DataFrame, column: str = "spearman_grade_next_epa"
+) -> pd.Series:
     """The mean of ``column`` over the development pairs, per group."""
     return table.groupby("position_group")[column].mean()
 
@@ -866,7 +903,9 @@ def _replace_groups(base: pd.DataFrame, parts: dict[str, pd.DataFrame]) -> pd.Da
 
 
 def _model(weights: pd.DataFrame, dev_seasons: list[int], **fields) -> grade.GradeModel:
-    return grade.GradeModel(weights=weights.reset_index(drop=True), dev_seasons=dev_seasons, **fields)
+    return grade.GradeModel(
+        weights=weights.reset_index(drop=True), dev_seasons=dev_seasons, **fields
+    )
 
 
 def regression_pairs(
@@ -893,12 +932,18 @@ def regression_pairs(
         graded = grade.score_grades(final, base)
         graded = graded[graded["position_group"].eq(group)]["athlete_id"]
         values = dev[later]["values"]
-        nxt = values[values["week"].eq(values["week"].max())].astype({"athlete_id": str})
+        nxt = values[values["week"].eq(values["week"].max())].astype(
+            {"athlete_id": str}
+        )
         nxt = nxt[nxt["position_group"].eq(group)].drop_duplicates("athlete_id")
         target = nxt.set_index("athlete_id")["shrunk_per_game"].reindex(graded).dropna()
         if len(target) < MIN_FIT_ROWS or not target.std() > 0:
             continue
-        x = grade.trait_z_frame(final, candidates, group).reindex(target.index).fillna(0.0)
+        x = (
+            grade.trait_z_frame(final, candidates, group)
+            .reindex(target.index)
+            .fillna(0.0)
+        )
         out[season] = (x, (target - target.mean()) / target.std())
     return out
 
@@ -917,7 +962,10 @@ def _lower_bounds(candidates: pd.DataFrame) -> pd.Series:
     """0 for a higher-is-better trait, unbounded below for ``False`` or ``None``."""
     specs = all_traits()
     return pd.Series(
-        [0.0 if specs[trait].higher_is_better is True else -np.inf for trait in candidates["trait"]],
+        [
+            0.0 if specs[trait].higher_is_better is True else -np.inf
+            for trait in candidates["trait"]
+        ],
         index=candidates["trait"].to_list(),
     )
 
@@ -948,10 +996,15 @@ def select_grade_model(
     )
     current = _model(without, dev_seasons)
     epa_model = _model(with_epa, dev_seasons)
-    tables = [dev_pair_table(dev, current, "current"), dev_pair_table(dev, epa_model, "epa_trait")]
+    tables = [
+        dev_pair_table(dev, current, "current"),
+        dev_pair_table(dev, epa_model, "epa_trait"),
+    ]
     base_mean, epa_mean = pair_means(tables[0]), pair_means(tables[1])
     groups = sorted(grade.graded_groups(epa_model) | grade.graded_groups(current))
-    epa_kept = {g: bool(epa_mean.get(g, np.nan) > base_mean.get(g, np.nan)) for g in groups}
+    epa_kept = {
+        g: bool(epa_mean.get(g, np.nan) > base_mean.get(g, np.nan)) for g in groups
+    }
 
     epa_rows = with_epa[with_epa["trait"].eq(EPA_TRAIT)]
     dropped_epa = epa_rows.assign(weight=0.0, status="not kept")
@@ -961,11 +1014,18 @@ def select_grade_model(
             step1_parts[g] = with_epa[with_epa["position_group"].eq(g)]
         else:
             step1_parts[g] = pd.concat(
-                [without[without["position_group"].eq(g)], dropped_epa[dropped_epa["position_group"].eq(g)]]
+                [
+                    without[without["position_group"].eq(g)],
+                    dropped_epa[dropped_epa["position_group"].eq(g)],
+                ]
             )
-    step1 = _replace_groups(pd.concat([without, dropped_epa], ignore_index=True), step1_parts)
+    step1 = _replace_groups(
+        pd.concat([without, dropped_epa], ignore_index=True), step1_parts
+    )
     model1 = _model(step1, dev_seasons)
-    step1_mean = pd.Series({g: (epa_mean if epa_kept[g] else base_mean).get(g, np.nan) for g in groups})
+    step1_mean = pd.Series(
+        {g: (epa_mean if epa_kept[g] else base_mean).get(g, np.nan) for g in groups}
+    )
 
     # (2) fitted weights, cross-fitted for the evaluation
     designs, lowers, candidate_frames = {}, {}, {}
@@ -976,13 +1036,19 @@ def select_grade_model(
         pairs = regression_pairs(dev, model1, g, candidates)
         if len(pairs) < 2:
             continue
-        designs[g], lowers[g], candidate_frames[g] = pairs, _lower_bounds(candidates), candidates
+        designs[g], lowers[g], candidate_frames[g] = (
+            pairs,
+            _lower_bounds(candidates),
+            candidates,
+        )
     pair_seasons = [season for season in dev_seasons if season + 1 in dev]
     cross_models = {}
     for held in pair_seasons:
         parts = {}
         for g, pairs in designs.items():
-            training = {season: frame for season, frame in pairs.items() if season != held}
+            training = {
+                season: frame for season, frame in pairs.items() if season != held
+            }
             if not training:
                 continue
             coefficients, _ = grade.fit_ridge_weights(training, lowers[g])
@@ -990,8 +1056,10 @@ def select_grade_model(
         cross_models[held] = _model(_replace_groups(step1, parts), dev_seasons)
     fitted_table = dev_pair_table(dev, cross_models, "fitted")
     fitted_mean = pair_means(fitted_table)
-    fitted_kept = {g: g in designs and bool(fitted_mean.get(g, np.nan) > step1_mean.get(g, np.nan))
-                   for g in groups}
+    fitted_kept = {
+        g: g in designs and bool(fitted_mean.get(g, np.nan) > step1_mean.get(g, np.nan))
+        for g in groups
+    }
     final_parts, penalties = {}, {}
     for g in groups:
         if fitted_kept[g]:
@@ -1000,23 +1068,35 @@ def select_grade_model(
     step2 = _replace_groups(step1, final_parts)
     model2 = _model(step2, dev_seasons)
     step2_mean = pd.Series(
-        {g: (fitted_mean if fitted_kept[g] else step1_mean).get(g, np.nan) for g in groups}
+        {
+            g: (fitted_mean if fitted_kept[g] else step1_mean).get(g, np.nan)
+            for g in groups
+        }
     )
     composite = composite_split_half(dev, model2, RELIABILITY_GAMES)
-    reliability = composite.dropna(subset=["correlation"])[grade.RELIABILITY_COLUMNS].reset_index(drop=True)
+    reliability = composite.dropna(subset=["correlation"])[
+        grade.RELIABILITY_COLUMNS
+    ].reset_index(drop=True)
 
     # (3) shrinkage, on the same cross-fitted weights where they were kept
     shrink = grade.shrink_games_from(reliability)
     shrink_models = {}
     for held in pair_seasons:
         cross = cross_models[held].weights
-        parts = {g: cross[cross["position_group"].eq(g)] for g in groups if fitted_kept[g]}
+        parts = {
+            g: cross[cross["position_group"].eq(g)] for g in groups if fitted_kept[g]
+        }
         shrink_models[held] = _model(
-            _replace_groups(step2, parts), dev_seasons, reliability=reliability, shrink_games=shrink
+            _replace_groups(step2, parts),
+            dev_seasons,
+            reliability=reliability,
+            shrink_games=shrink,
         )
     shrink_table = dev_pair_table(dev, shrink_models, "shrinkage")
     shrink_mean = pair_means(shrink_table)
-    shrink_kept = {g: bool(shrink_mean.get(g, np.nan) > step2_mean.get(g, np.nan)) for g in groups}
+    shrink_kept = {
+        g: bool(shrink_mean.get(g, np.nan) > step2_mean.get(g, np.nan)) for g in groups
+    }
     model = _model(
         step2,
         dev_seasons,
@@ -1051,8 +1131,16 @@ def select_grade_model(
         log.info(
             "position grade %s: dev-pair mean current %.4f, +epa %.4f, +fitted %.4f, "
             "+shrinkage %.4f, epa alone %.4f; kept epa %s, fitted %s, shrinkage %s (k %.2f)",
-            row.position_group, row.current, row.epa_trait, row.fitted, row.shrinkage,
-            row.epa_alone, row.epa_kept, row.fitted_kept, row.shrink_kept, row.shrink_games,
+            row.position_group,
+            row.current,
+            row.epa_trait,
+            row.fitted,
+            row.shrinkage,
+            row.epa_alone,
+            row.epa_kept,
+            row.fitted_kept,
+            row.shrink_kept,
+            row.shrink_games,
         )
     return model, composite, dev_pairs, selection
 
@@ -1103,11 +1191,15 @@ def run_backtest(
         values = player_values(season)
         seasons[season] = {
             **data,
-            "snapshots": grade.with_epa_credit(with_fbs(data["snapshots"], season), values),
+            "snapshots": grade.with_epa_credit(
+                with_fbs(data["snapshots"], season), values
+            ),
             "values": values,
         }
     dev = {season: seasons[season] for season in dev_seasons}
-    snapshots_by_season = {season: data["snapshots"] for season, data in seasons.items()}
+    snapshots_by_season = {
+        season: data["snapshots"] for season, data in seasons.items()
+    }
 
     pooled = pooled_trait_reliability(dev, (grade.WEIGHT_GAMES,))
     matched = matched_transfers(snapshots_by_season)

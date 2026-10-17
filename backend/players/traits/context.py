@@ -62,7 +62,9 @@ class SeasonContext:
     positions: pd.DataFrame
     presence: pd.DataFrame
     # v4's credited frame (play credit plus box disruptions), the source of its per-game value.
-    credited: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=CREDITED_COLUMNS))
+    credited: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=CREDITED_COLUMNS)
+    )
 
 
 def player_presence(
@@ -112,15 +114,19 @@ def box_positions(
     position; one with no roster row (and so no credit either) or a roster
     position outside ``POSITION_GROUPS`` stays ungrouped.
     """
-    missing = set(box["athlete_id"].astype(str)) - set(positions["athlete_id"].astype(str))
-    rostered = roster[["id", "position"]].rename(columns={"id": "athlete_id"})
-    rostered = rostered.assign(athlete_id=rostered["athlete_id"].astype(str)).drop_duplicates(
-        "athlete_id"
+    missing = set(box["athlete_id"].astype(str)) - set(
+        positions["athlete_id"].astype(str)
     )
+    rostered = roster[["id", "position"]].rename(columns={"id": "athlete_id"})
+    rostered = rostered.assign(
+        athlete_id=rostered["athlete_id"].astype(str)
+    ).drop_duplicates("athlete_id")
     added = rostered[rostered["athlete_id"].isin(missing)]
     unrostered = len(missing) - len(added)
     if unrostered:
-        log.info("%d box-score players have no roster row and no credit; skipped", unrostered)
+        log.info(
+            "%d box-score players have no roster row and no credit; skipped", unrostered
+        )
     added = added.assign(position_group=added["position"].map(POSITION_GROUPS)).dropna(
         subset=["position_group"]
     )

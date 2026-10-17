@@ -157,9 +157,11 @@ def grade_columns(board, traits, as_of):
     if grades.empty:
         return board, []
     grades = grades[grades.week.eq(grades.week.max())]
-    latest = grades.sort_values("games", ascending=False, kind="stable").drop_duplicates(
-        "athlete_id"
-    ).set_index("athlete_id")
+    latest = (
+        grades.sort_values("games", ascending=False, kind="stable")
+        .drop_duplicates("athlete_id")
+        .set_index("athlete_id")
+    )
     for column, source in GRADE_COLUMNS.items():
         board[column] = board.athlete_id.map(latest[source]).astype(float)
     return board, sorted(grades.position_group.unique())
