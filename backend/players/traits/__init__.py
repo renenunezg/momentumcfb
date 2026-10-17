@@ -56,4 +56,4 @@ DERIVED_TRAITS[EPA_TRAIT] = TraitSpec(
 
 # Importing a position module registers its traits, so the registry is complete
 # whenever the package is imported.
-from backend.players.traits import defense, line, offense  # noqa: E402, F401
+from backend.players.traits import defense, line, offense, punting  # noqa: E402, F401
