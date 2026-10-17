@@ -60,6 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
+      CFB_REQUIRE_DATA_REVISION: "1"
       REQUESTED_SEASON: ${{ inputs.season }}
       FORECAST_WEEK: ${{ inputs.week || '' }}
       CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
@@ -191,6 +192,17 @@ jobs:
               install(bundle, int(os.environ['SEASON']))
           PY
 
+      - name: Validate unified historical data revision before CFBD calls
+        run: poetry run python -m backend.runtime_revision --season "$SEASON"
+
+      - name: Preserve historical data revision receipt
+        uses: actions/upload-artifact@v7
+        with:
+          name: cfb-data-revision-${{ github.run_id }}
+          path: backend/data/processed/runtime/data_revision_*.parquet
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Validate trained Heisman model before CFBD calls
         run: |
           poetry run python -c 'import os; from backend.players.artifacts import load_heisman_model; load_heisman_model(int(os.environ["SEASON"]))'
@@ -307,6 +319,18 @@ jobs:
           fi
           poetry run python -m backend publish-players --season "$SEASON"
           exit "${trait_status:-0}"
+
+      - name: Preserve corrected player output audit
+        uses: actions/upload-artifact@v7
+        with:
+          name: cfb-player-outputs-${{ github.run_id }}
+          path: |
+            backend/data/processed/players/player_values/${{ env.SEASON }}.parquet
+            backend/data/processed/players/position_traits/${{ env.SEASON }}.parquet
+            backend/data/processed/players/player_model_meta.parquet
+            backend/data/processed/runtime/data_revision_${{ env.SEASON }}.parquet
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Preserve player checkpoints even after partial failure
         if: always() && steps.player-cache.outcome == 'success'

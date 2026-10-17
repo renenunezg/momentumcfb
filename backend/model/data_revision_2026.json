@@ -1,0 +1,33 @@
+{
+  "revision_id": "cfbd-epa-2019-2025-20261017",
+  "season": 2026,
+  "source_seasons": [
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025
+  ],
+  "revised_matched_epa_values": 29507,
+  "grade_model": "players/models/position_grade_2024.json",
+  "policy": "Apply to future inference; retain all published forecast logs and records. Game coefficients and ingame_baseline_v1 parameters are unchanged.",
+  "artifacts": {
+    "ingame/baseline_summary.parquet": "d2fcd82446d24793e91d192cbdfe192ea7250a075d344f7c13cfd5eb7af97d49",
+    "players/models/heisman_2026.json": "e9a722d7d704d5c3caf96dec45b93edbc36db8af9a25b475f6ce8938f1fb2d83",
+    "players/models/position_grade_expectations_2024.parquet": "857787cfdcaeed02f1ed4557ea6cbbba2171dd5406a99532ba20700f19653c60",
+    "players/models/position_grade_2024.json": "272d3e51be7e571991c74f2a6dbcca1cb285156dec72b9dcdf96c0e4c531c9a7",
+    "players/opponent_priors/2026.parquet": "014a5ea5f4393046ce2eb052f1bec548c945e61dcb39eaf08598c81f6fa53f96",
+    "preseason/market_prior/2026_01.parquet": "310be58f487aca3abe83ae6548ceae63bbb29e5b5dafad5942adcc5a9977184f",
+    "preseason/ratings/2026_01.parquet": "64bc21d21d0d5616144feed8ce1fcd5afdc3f30af44f96f26251750ffb9d7640",
+    "preseason/score_noise_prior/2026_01.parquet": "0a58658c5f3bd6878dd8c40eb363c7a67a77a376c775541ef04a51a35fcf9132",
+    "preseason/process_prior/2026_01.parquet": "40a029c20974579f32a95fee3932a05a7a23934ba8e0b27dc54f09a40d50a34c",
+    "preseason/srs_prior/2026_01.parquet": "847f707fa6aa6c27f3764f03520565b71db447ddd42a85b5c1de926824a6fda6"
+  },
+  "release_bundles": {
+    "player-runtime-2026-epa-20261017.zip": "c220ba6070e4c8d7620e992c77ec09a1b76e3abb947fdb93f265a85a3697eccb",
+    "historical-epa-2019-2025-20261017.zip": "0f5d9a50e6e2f1dc0b3f58ac78294d45486f1bad8674fb696bfdc15520807997",
+    "preseason-runtime-2026-epa-20261017.zip": "d57175ca1a3e6fcf6c0347897890e0ba30d7d7fa35feaa10f0f39db93bef9798"
+  }
+}

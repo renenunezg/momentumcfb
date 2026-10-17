@@ -323,6 +323,9 @@ def run_weekly_forecast(
         raise ValueError("as_of must be timezone-aware")
     created_at = created_at.astimezone(timezone.utc)
 
+    from backend.runtime_revision import forecast_revision_receipt
+
+    revision_receipt = forecast_revision_receipt(season)
     games = load_weekly_games(season)
     forecast_week = resolve_forecast_week(games, week, created_at)
     target, excluded_training_games = _validate_weekly_inputs(
@@ -511,6 +514,7 @@ def run_weekly_forecast(
         forecast_week,
         created_at,
         {
+            "data_revision": revision_receipt,
             "weather_context": weather,
             "ratings": published_ratings,
             "score_noise_prior": score_noise_prior,
