@@ -62,8 +62,8 @@ jobs:
           MOMENTUMCFB_DB_WRITES: "1"
         # Hand off before the six-hour runner limit; the queued replacement
         # starts after this worker exits. Idle slates exit early. One call per
-        # 30 seconds bounds a full worker at 690 CFBD calls, and the reserve keeps
+        # 60 seconds bounds a full worker at 346 CFBD calls, and the reserve keeps
         # the weekly model's quota out of reach.
         run: >-
-          poetry run python -m backend live-win-probability --watch --interval 30
-          --duration 20700 --publish --max-calls 720 --min-remaining 3000
+          poetry run python -m backend live-win-probability --watch --interval 60
+          --duration 20700 --publish --max-calls 360 --min-remaining 3000
