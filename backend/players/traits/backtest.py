@@ -35,7 +35,7 @@ from backend.players.traits.expectations import (
     fit_expectation_tables,
     save_expectation_tables,
 )
-from backend.players.traits.line import kicking_traits, line_traits
+from backend.players.traits.line import line_traits
 from backend.players.traits.offense import (
     POOR_TARGET_COVERAGE,
     qb_traits,
@@ -263,7 +263,6 @@ def build_season_traits(
             receiver_traits(ctx, tables, recovered, poor_coverage=poor),
             defense_traits(ctx),
             line_traits(ctx, tables),
-            kicking_traits(ctx, tables),
         ],
         ignore_index=True,
     ).astype({"athlete_id": str})

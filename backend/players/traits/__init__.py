@@ -50,7 +50,7 @@ def all_traits() -> dict[str, TraitSpec]:
 # no OL value. Per game it is the game's adjusted EPA, so a ``rate`` over games with
 # denominator 1 is its per-game mean for split-half reliability.
 DERIVED_TRAITS[EPA_TRAIT] = TraitSpec(
-    EPA_TRAIT, ("QB", "RB", "WR", "TE", "DL", "LB", "DB", "K", "P"), "counted"
+    EPA_TRAIT, ("QB", "RB", "WR", "TE", "DL", "LB", "DB"), "counted"
 )
 
 

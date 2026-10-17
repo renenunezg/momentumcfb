@@ -22,6 +22,12 @@ the feed tags the player directly and `inferred` when they come from unit
 outcomes or teammate comparisons. Nothing from the week being rated enters
 its own rating.
 
+Kickers and punters were removed from the trait table on 2026-10-16. Each
+had one trait; the kicker's earned no weight, so K had no grade, and the
+punter's grade was punt distance alone rescaled to 20 to 80, which is a
+single statistic and not a scouting grade. The K and P rows in the tables
+below are from the fit that still carried them and are kept as a record.
+
 The grade replaces the margin fit of the first version. That fit asked
 whether a trait improved a team spread forecast beyond the team model, and
 almost nothing passed. The amendment to the design withdrew that question:
