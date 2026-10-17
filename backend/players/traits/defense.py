@@ -53,7 +53,9 @@ DEF_TRAITS = {
         TraitSpec("def.pass_rush", FRONT_GROUPS, "counted"),
         TraitSpec("def.finishing", FRONT_GROUPS, "counted"),
         TraitSpec("def.run_stop", FRONT_GROUPS, "counted"),
-        TraitSpec("def.every_week", DEFENSE_GROUPS, "counted", aggregate="share_of_games"),
+        TraitSpec(
+            "def.every_week", DEFENSE_GROUPS, "counted", aggregate="share_of_games"
+        ),
         TraitSpec("def.tackle_share", ("LB",), "counted"),
         TraitSpec("def.coverage", ("LB",), "counted"),
         TraitSpec("def.ball_production", ("DB",), "counted"),
@@ -72,8 +74,17 @@ def opponents(games: pd.DataFrame) -> pd.DataFrame:
     """Each team's opponent and FCS weight per game: ``game_id, team, opponent, weight``."""
     sides = []
     for team, opponent in (("home", "away"), ("away", "home")):
-        side = games[["game_id", f"{team}_team", f"{opponent}_team", f"{opponent}_classification"]]
-        sides.append(side.set_axis(["game_id", "team", "opponent", "classification"], axis=1))
+        side = games[
+            [
+                "game_id",
+                f"{team}_team",
+                f"{opponent}_team",
+                f"{opponent}_classification",
+            ]
+        ]
+        sides.append(
+            side.set_axis(["game_id", "team", "opponent", "classification"], axis=1)
+        )
     out = pd.concat(sides, ignore_index=True)
     is_fcs = out.pop("classification").fillna("").str.lower().eq("fcs")
     return out.assign(weight=np.where(is_fcs, FCS_OPPONENT_WEIGHT, 1.0))
@@ -82,29 +93,48 @@ def opponents(games: pd.DataFrame) -> pd.DataFrame:
 def box_lines(box: pd.DataFrame) -> pd.DataFrame:
     """The defensive box stats per player, team and game, one column per stat."""
     keys = list(zip(box["category"], box["stat_name"]))
-    rows = box.assign(column=[BOX_STATS.get(key) for key in keys]).dropna(subset=["column"])
+    rows = box.assign(column=[BOX_STATS.get(key) for key in keys]).dropna(
+        subset=["column"]
+    )
     wide = rows.pivot_table(
-        index=["athlete_id", "team", "game_id"], columns="column", values="stat", aggfunc="sum"
+        index=["athlete_id", "team", "game_id"],
+        columns="column",
+        values="stat",
+        aggfunc="sum",
     )
     wide = wide.reindex(columns=list(BOX_STATS.values())).fillna(0.0).reset_index()
     wide.columns.name = None
     return wide.assign(athlete_id=wide["athlete_id"].astype(str))
 
 
-def defender_games(ctx: SeasonContext, rows: pd.DataFrame, defenders: set[str]) -> pd.DataFrame:
+def defender_games(
+    ctx: SeasonContext, rows: pd.DataFrame, defenders: set[str]
+) -> pd.DataFrame:
     """One row per defender and game played with box counts, forced fumbles, and the FCS weight."""
-    played = ctx.presence[ctx.presence["present"] & ctx.presence["athlete_id"].isin(defenders)]
-    played = played.drop(columns="present").merge(opponents(ctx.games), on=["game_id", "team"], how="inner")
+    played = ctx.presence[
+        ctx.presence["present"] & ctx.presence["athlete_id"].isin(defenders)
+    ]
+    played = played.drop(columns="present").merge(
+        opponents(ctx.games), on=["game_id", "team"], how="inner"
+    )
     lines = box_lines(ctx.box)
     out = played.merge(lines, on=["athlete_id", "team", "game_id"], how="left")
     forced = rows[rows["role"].eq("fumble_forcer")]
-    forced = forced.groupby(["athlete_id", "team", "game_id"]).size().rename("forced_fumbles")
-    out = out.merge(forced.reset_index(), on=["athlete_id", "team", "game_id"], how="left")
+    forced = (
+        forced.groupby(["athlete_id", "team", "game_id"])
+        .size()
+        .rename("forced_fumbles")
+    )
+    out = out.merge(
+        forced.reset_index(), on=["athlete_id", "team", "game_id"], how="left"
+    )
     counts = [*BOX_STATS.values(), "forced_fumbles"]
     out[counts] = out[counts].fillna(0.0)
     team_tackles = lines.groupby(["team", "game_id"], as_index=False)["tackles"].sum()
     return out.merge(
-        team_tackles.rename(columns={"tackles": "team_tackles"}), on=["team", "game_id"], how="left"
+        team_tackles.rename(columns={"tackles": "team_tackles"}),
+        on=["team", "game_id"],
+        how="left",
     )
 
 
@@ -116,18 +146,29 @@ def defense_rows(ctx: SeasonContext) -> pd.DataFrame:
     return rows.assign(athlete_id=rows["athlete_id"].astype(str))
 
 
-def events(frame: pd.DataFrame, numerator: pd.Series, denominator: pd.Series) -> pd.DataFrame:
+def events(
+    frame: pd.DataFrame, numerator: pd.Series, denominator: pd.Series
+) -> pd.DataFrame:
     """FCS-weighted per-game numerator and denominator under the game keys."""
     weight = frame["weight"]
-    return frame[GAME_KEYS].assign(numerator=numerator * weight, denominator=denominator * weight)
+    return frame[GAME_KEYS].assign(
+        numerator=numerator * weight, denominator=denominator * weight
+    )
 
 
-def in_groups(frame: pd.DataFrame, positions: pd.DataFrame, groups: tuple[str, ...]) -> pd.DataFrame:
+def in_groups(
+    frame: pd.DataFrame, positions: pd.DataFrame, groups: tuple[str, ...]
+) -> pd.DataFrame:
     return frame[frame["athlete_id"].isin(group_ids(positions, groups))]
 
 
 def _def_havoc(games: pd.DataFrame, schedule: pd.DataFrame) -> pd.DataFrame:
-    havoc = games["tfl"] + games["forced_fumbles"] + games["passes_defended"] + games["interceptions"]
+    havoc = (
+        games["tfl"]
+        + games["forced_fumbles"]
+        + games["passes_defended"]
+        + games["interceptions"]
+    )
     adjusted = opponent_adjusted(events(games, havoc, 1.0), schedule)
     return trait_rows(adjusted, DEF_TRAITS["def.havoc"])
 
@@ -137,7 +178,10 @@ def sack_prices(sacks: pd.DataFrame, weeks: pd.Series) -> pd.Series:
     plays = sacks.drop_duplicates("play_id")
     value = plays["play_wpa"].fillna(0.0).abs()
     return pd.Series(
-        {week: value[plays["model_week"].lt(week)].median() for week in sorted(weeks.unique())},
+        {
+            week: value[plays["model_week"].lt(week)].median()
+            for week in sorted(weeks.unique())
+        },
         dtype=float,
     )
 
@@ -152,8 +196,14 @@ def _def_pass_rush(games: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
     """
     sacks = rows[rows["role"].eq("sacker")]
     sack_wpa = sacks["play_wpa"].fillna(0.0).abs() * sacks["share"]
-    own = sacks.assign(own=sack_wpa).groupby(["athlete_id", "team", "game_id"])["own"].sum()
-    out = games.merge(own.reset_index(), on=["athlete_id", "team", "game_id"], how="left")
+    own = (
+        sacks.assign(own=sack_wpa)
+        .groupby(["athlete_id", "team", "game_id"])["own"]
+        .sum()
+    )
+    out = games.merge(
+        own.reset_index(), on=["athlete_id", "team", "game_id"], how="left"
+    )
     price = out["model_week"].map(sack_prices(sacks, out["model_week"]))
     hurry_value = (out["hurries"] * price).where(out["hurries"] > 0, 0.0)
     numerator = out["own"].fillna(0.0) + hurry_value
@@ -217,8 +267,10 @@ def epa_allowed(plays: pd.DataFrame, schedule: pd.DataFrame) -> pd.DataFrame:
         {
             "team": units["opponent"],
             "game_id": units["game_id"],
-            "epa_allowed": (units["rush_ppa"] + units["pass_ppa"]) / total_plays.where(total_plays > 0),
-            "pass_epa_allowed": units["pass_ppa"] / units["pass_plays"].where(units["pass_plays"] > 0),
+            "epa_allowed": (units["rush_ppa"] + units["pass_ppa"])
+            / total_plays.where(total_plays > 0),
+            "pass_epa_allowed": units["pass_ppa"]
+            / units["pass_plays"].where(units["pass_plays"] > 0),
         }
     )
     weeks = schedule[["game_id", "model_week"]].drop_duplicates("game_id")
@@ -243,7 +295,10 @@ def weekly_impact(
         )
         frames.append(
             impact[["athlete_id"]].assign(
-                model_week=week, game_id=pd.NA, numerator=impact["impact"], denominator=1.0
+                model_week=week,
+                game_id=pd.NA,
+                numerator=impact["impact"],
+                denominator=1.0,
             )
         )
     return trait_rows(pd.concat(frames, ignore_index=True), spec)

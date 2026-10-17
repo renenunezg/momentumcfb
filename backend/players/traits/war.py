@@ -54,14 +54,18 @@ def season_projections(season: int, games: pd.DataFrame | None = None) -> pd.Dat
     and no WAR rows.
     """
     try:
-        return load_serving_anchors(season=season)[["game_id", "home_margin", "margin_sd"]]
+        return load_serving_anchors(season=season)[
+            ["game_id", "home_margin", "margin_sd"]
+        ]
     except (ValueError, FileNotFoundError, OSError):
         pass
     from backend.model.weekly import load_weekly_games
     from backend.players.value import _projection_anchors
 
     try:
-        anchors = _projection_anchors(season, games if games is not None else load_weekly_games(season))
+        anchors = _projection_anchors(
+            season, games if games is not None else load_weekly_games(season)
+        )
     except FileNotFoundError:
         log.warning("wins above replacement %s: no pregame projections on disk", season)
         return pd.DataFrame(columns=["game_id", "home_margin", "margin_sd"])
@@ -95,7 +99,9 @@ def wins_above_replacement(
     )
     games["leverage"] = games["game_id"].astype("int64").map(leverage).fillna(mean)
     values = season_values.astype({"athlete_id": str})
-    weeks = sorted(set(games["model_week"].astype(int)) | set(values["week"].astype(int)))
+    weeks = sorted(
+        set(games["model_week"].astype(int)) | set(values["week"].astype(int))
+    )
     cumulative = (
         games.groupby(["athlete_id", games["model_week"].astype(int)])["leverage"]
         .sum()
@@ -107,7 +113,9 @@ def wins_above_replacement(
     cumulative.columns.name = "week"
     stacked = cumulative.stack().rename("leverage_games").reset_index()
     out = values.merge(stacked, on=["athlete_id", "week"], how="left")
-    margin = out["shrunk_per_game"].astype(float) - out["replacement_per_game"].astype(float)
+    margin = out["shrunk_per_game"].astype(float) - out["replacement_per_game"].astype(
+        float
+    )
     out["points_above_replacement"] = out["value_above_replacement"].astype(float)
     out["wins_above_replacement"] = margin * out["leverage_games"]
     return out[WAR_COLUMNS]

@@ -22,32 +22,46 @@ log = logging.getLogger(__name__)
 
 TRANSFER_COLUMNS = ["athlete_id", "season", "origin", "destination"]
 PORTABILITY_COLUMNS = [
-    "position_group", "trait", "stayers", "movers",
-    "stay_slope", "move_slope", "move_slope_se", "portable_share",
+    "position_group",
+    "trait",
+    "stayers",
+    "movers",
+    "stay_slope",
+    "move_slope",
+    "move_slope_se",
+    "portable_share",
 ]
 DROP_REASONS = (
-    "no_destination_match", "ambiguous_destination",
-    "no_origin_match", "ambiguous_origin", "id_mismatch",
+    "no_destination_match",
+    "ambiguous_destination",
+    "no_origin_match",
+    "ambiguous_origin",
+    "id_mismatch",
 )
 MIN_MOVERS = 20
 
 
 def _full_name(frame: pd.DataFrame) -> pd.Series:
-    names = frame["first_name"].fillna("").astype(str) + " " + frame["last_name"].fillna("").astype(str)
+    names = (
+        frame["first_name"].fillna("").astype(str)
+        + " "
+        + frame["last_name"].fillna("").astype(str)
+    )
     return names.map(normalize_name)
 
 
 def _roster_lookup(roster: pd.DataFrame, team_column: str) -> pd.DataFrame:
     """One row per (name, team): how many distinct ids share it, and the first."""
-    keyed = pd.DataFrame({
-        "key": _full_name(roster),
-        team_column: roster["team"],
-        "athlete_id": athlete_ids(roster["id"]),
-    })
+    keyed = pd.DataFrame(
+        {
+            "key": _full_name(roster),
+            team_column: roster["team"],
+            "athlete_id": athlete_ids(roster["id"]),
+        }
+    )
     keyed = keyed[keyed["key"].ne("") & keyed["athlete_id"].notna()]
-    return (
-        keyed.groupby(["key", team_column], as_index=False)["athlete_id"]
-        .agg(candidates="nunique", athlete_id="first")
+    return keyed.groupby(["key", team_column], as_index=False)["athlete_id"].agg(
+        candidates="nunique", athlete_id="first"
     )
 
 
@@ -66,17 +80,31 @@ def match_transfers(
     before. The counts of rows dropped, by reason, are in ``out.attrs["dropped"]``.
     """
     dropped = dict.fromkeys(DROP_REASONS, 0)
-    if portal.empty or not {"season", "first_name", "last_name", "origin", "destination"} <= set(portal.columns):
+    if portal.empty or not {
+        "season",
+        "first_name",
+        "last_name",
+        "origin",
+        "destination",
+    } <= set(portal.columns):
         log.info("transfers matched 0 of 0 portal rows")
         return _empty(dropped)
 
     rows = portal.assign(key=_full_name(portal)).reset_index(drop=True)
     sides = (
-        ("destination", roster_to, "no_destination_match", "ambiguous_destination", "to_id"),
+        (
+            "destination",
+            roster_to,
+            "no_destination_match",
+            "ambiguous_destination",
+            "to_id",
+        ),
         ("origin", roster_from, "no_origin_match", "ambiguous_origin", "from_id"),
     )
     for column, roster, missing, ambiguous, id_column in sides:
-        lookup = _roster_lookup(roster, column).rename(columns={"athlete_id": id_column})
+        lookup = _roster_lookup(roster, column).rename(
+            columns={"athlete_id": id_column}
+        )
         rows = rows.merge(lookup, on=["key", column], how="left")
         absent = rows["candidates"].isna()
         crowded = rows["candidates"].gt(1)
@@ -95,7 +123,12 @@ def match_transfers(
         .reset_index(drop=True)
     )
     out.attrs["dropped"] = dropped
-    log.info("transfers matched %d of %d portal rows; dropped %s", len(out), len(portal), dropped)
+    log.info(
+        "transfers matched %d of %d portal rows; dropped %s",
+        len(out),
+        len(portal),
+        dropped,
+    )
     return out
 
 
@@ -147,7 +180,11 @@ def portability(
         keys = ["athlete_id", "trait"] + ([] if final_week_only else ["week"])
         both = before.merge(after, on=keys, suffixes=("_before", ""))
         both = both.dropna(subset=["value_before", "value"])
-        moved = set(transfers.loc[transfers["season"].eq(season), "athlete_id"]) if len(transfers) else set()
+        moved = (
+            set(transfers.loc[transfers["season"].eq(season), "athlete_id"])
+            if len(transfers)
+            else set()
+        )
         pairs.append(both.assign(mover=both["athlete_id"].isin(moved)))
     if not pairs:
         return pd.DataFrame(columns=PORTABILITY_COLUMNS)
@@ -156,12 +193,23 @@ def portability(
     rows = []
     for (group, trait), part in pooled.groupby(["position_group", "trait"], sort=True):
         stay, move = part[~part["mover"]], part[part["mover"]]
-        stay_slope, _ = _ols(stay["value_before"].to_numpy(float), stay["value"].to_numpy(float))
-        move_slope, move_se = _ols(move["value_before"].to_numpy(float), move["value"].to_numpy(float))
+        stay_slope, _ = _ols(
+            stay["value_before"].to_numpy(float), stay["value"].to_numpy(float)
+        )
+        move_slope, move_se = _ols(
+            move["value_before"].to_numpy(float), move["value"].to_numpy(float)
+        )
         usable = len(move) >= MIN_MOVERS and stay_slope > 0
-        rows.append({
-            "position_group": group, "trait": trait, "stayers": len(stay), "movers": len(move),
-            "stay_slope": stay_slope, "move_slope": move_slope, "move_slope_se": move_se,
-            "portable_share": move_slope / stay_slope if usable else np.nan,
-        })
+        rows.append(
+            {
+                "position_group": group,
+                "trait": trait,
+                "stayers": len(stay),
+                "movers": len(move),
+                "stay_slope": stay_slope,
+                "move_slope": move_slope,
+                "move_slope_se": move_se,
+                "portable_share": move_slope / stay_slope if usable else np.nan,
+            }
+        )
     return pd.DataFrame(rows, columns=PORTABILITY_COLUMNS)

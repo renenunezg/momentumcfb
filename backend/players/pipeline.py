@@ -82,7 +82,9 @@ def run_player_values(season: int, as_of: datetime) -> pd.DataFrame:
 
 def frozen_expectation_tables(model_path: Path) -> expectations.ExpectationTables:
     """The serving expectation tables saved with the grade model at ``model_path``."""
-    path = expectations.expectation_tables_path(model_path.parent, grade.grade_cutoff(model_path))
+    path = expectations.expectation_tables_path(
+        model_path.parent, grade.grade_cutoff(model_path)
+    )
     if not path.exists():
         raise FileNotFoundError(
             f"no frozen expectation tables {path.name} beside {model_path.name} in "
@@ -93,7 +95,9 @@ def frozen_expectation_tables(model_path: Path) -> expectations.ExpectationTable
 
 def latest_grade_model_path(season: int) -> Path:
     """The frozen grade model with the greatest cutoff before ``season``."""
-    return grade.latest_grade_model_path(store.PROCESSED_DIR / "players" / "models", season)
+    return grade.latest_grade_model_path(
+        store.PROCESSED_DIR / "players" / "models", season
+    )
 
 
 def grade_rows(snapshot: pd.DataFrame, model: grade.GradeModel) -> pd.DataFrame:
@@ -101,7 +105,9 @@ def grade_rows(snapshot: pd.DataFrame, model: grade.GradeModel) -> pd.DataFrame:
     weeks = sorted(snapshot["week"].unique())
     scored = pd.concat(
         [
-            grade.score_grades(snapshot[snapshot["week"].eq(week)], model).assign(week=week)
+            grade.score_grades(snapshot[snapshot["week"].eq(week)], model).assign(
+                week=week
+            )
             for week in weeks
         ],
         ignore_index=True,
@@ -130,18 +136,26 @@ def war_rows(
     games, ``value`` is his wins above replacement, ``points_above_replacement`` his
     v4 points, and ``percentile`` ranks wins among the week's rows at the group.
     """
-    flags = snapshot.assign(
-        pool=snapshot["qualified"].eq(True) & snapshot["fbs"].eq(True)
-    ).groupby(["week", "athlete_id"])["pool"].any()
+    flags = (
+        snapshot.assign(pool=snapshot["qualified"].eq(True) & snapshot["fbs"].eq(True))
+        .groupby(["week", "athlete_id"])["pool"]
+        .any()
+    )
     pool = flags[flags].reset_index()[["week", "athlete_id"]]
     v4_weeks = np.array(sorted(values["week"].astype(int).unique()))
     if pool.empty or not len(v4_weeks):
-        return pd.DataFrame(columns=[*TRAIT_SNAPSHOT_COLUMNS, "points_above_replacement"])
-    position = np.searchsorted(v4_weeks, pool["week"].astype(int).to_numpy(), side="right") - 1
+        return pd.DataFrame(
+            columns=[*TRAIT_SNAPSHOT_COLUMNS, "points_above_replacement"]
+        )
+    position = (
+        np.searchsorted(v4_weeks, pool["week"].astype(int).to_numpy(), side="right") - 1
+    )
     pool = pool[position >= 0].assign(value_week=v4_weeks[position[position >= 0]])
-    measured = values[["week", "athlete_id", "position_group", "games"]].astype(
-        {"athlete_id": str}
-    ).merge(war_frame.astype({"athlete_id": str}), on=["athlete_id", "week"])
+    measured = (
+        values[["week", "athlete_id", "position_group", "games"]]
+        .astype({"athlete_id": str})
+        .merge(war_frame.astype({"athlete_id": str}), on=["athlete_id", "week"])
+    )
     rows = pool.merge(
         measured.rename(columns={"week": "value_week"}), on=["athlete_id", "value_week"]
     ).dropna(subset=["wins_above_replacement"])
@@ -429,7 +443,9 @@ def _latest_trait_week(season: int) -> pd.DataFrame:
         return pd.DataFrame(columns=POSITION_TRAIT_COLUMNS)
     traits = store.read_processed(*position_traits_artifact(season))
     if "fbs" not in traits.columns:
-        log.warning(f"position traits {season}: artifact has no fbs flag, not published")
+        log.warning(
+            f"position traits {season}: artifact has no fbs flag, not published"
+        )
         return pd.DataFrame(columns=POSITION_TRAIT_COLUMNS)
     latest = traits["week"].eq(traits["week"].max()) & traits["fbs"].eq(True)
     return traits[latest].reset_index(drop=True)

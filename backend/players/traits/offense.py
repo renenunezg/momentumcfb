@@ -32,7 +32,15 @@ from backend.players.traits.teammate import relative_rate
 # this is "poor coverage": target-denominated traits count receptions instead.
 POOR_TARGET_COVERAGE = 0.5
 
-TRAIT_COLUMNS = ["athlete_id", "model_week", "game_id", "trait", "numerator", "denominator", "kind"]
+TRAIT_COLUMNS = [
+    "athlete_id",
+    "model_week",
+    "game_id",
+    "trait",
+    "numerator",
+    "denominator",
+    "kind",
+]
 GAME_KEYS = ["athlete_id", "game_id", "model_week", "team", "opponent"]
 PLAY_COLUMNS = [
     "down",
@@ -118,7 +126,9 @@ def offense_rows(ctx: SeasonContext) -> pd.DataFrame:
 
 
 def position_ids(positions: pd.DataFrame, group: str) -> set[str]:
-    return set(positions.loc[positions["position_group"].eq(group), "athlete_id"].astype(str))
+    return set(
+        positions.loc[positions["position_group"].eq(group), "athlete_id"].astype(str)
+    )
 
 
 def dropbacks(rows: pd.DataFrame) -> pd.DataFrame:
@@ -128,7 +138,9 @@ def dropbacks(rows: pd.DataFrame) -> pd.DataFrame:
     out["is_sack"] = play_type.eq("Sack")
     out["is_interception"] = play_type.str.contains("Interception")
     out["is_incompletion"] = play_type.eq("Pass Incompletion")
-    out["is_completion"] = ~(out["is_sack"] | out["is_interception"] | out["is_incompletion"])
+    out["is_completion"] = ~(
+        out["is_sack"] | out["is_interception"] | out["is_incompletion"]
+    )
     return out
 
 
@@ -148,26 +160,34 @@ def is_two_minute(rows: pd.DataFrame) -> pd.Series:
     )
 
 
-def conversion_over_expected(rows: pd.DataFrame, tables: ExpectationTables) -> pd.Series:
+def conversion_over_expected(
+    rows: pd.DataFrame, tables: ExpectationTables
+) -> pd.Series:
     """FCS-weighted ``is_success - expected_conversion`` for each row's situation."""
     expected = expected_conversion(tables, rows)
     return (rows["is_success"].astype(float) - expected) * rows["weight"]
 
 
-def per_game(rows: pd.DataFrame, numerator: pd.Series, denominator: pd.Series) -> pd.DataFrame:
+def per_game(
+    rows: pd.DataFrame, numerator: pd.Series, denominator: pd.Series
+) -> pd.DataFrame:
     """Sum a numerator and denominator per player and game."""
     frame = rows[GAME_KEYS].assign(numerator=numerator, denominator=denominator)
     return frame.groupby(GAME_KEYS, as_index=False)[["numerator", "denominator"]].sum()
 
 
-def prior_totals(frame: pd.DataFrame, keys: list[str], columns: list[str]) -> pd.DataFrame:
+def prior_totals(
+    frame: pd.DataFrame, keys: list[str], columns: list[str]
+) -> pd.DataFrame:
     """Sums of ``columns`` per ``keys`` over model weeks strictly before each week."""
     weekly = (
         frame.groupby([*keys, "model_week"], as_index=False)[columns]
         .sum()
         .sort_values([*keys, "model_week"])
     )
-    running = weekly.groupby(keys)[columns].cumsum() if keys else weekly[columns].cumsum()
+    running = (
+        weekly.groupby(keys)[columns].cumsum() if keys else weekly[columns].cumsum()
+    )
     weekly[columns] = running - weekly[columns]
     return weekly
 
@@ -198,7 +218,9 @@ def play_receivers(
     sources = [credited]
     if not poor_coverage:
         sources.append(
-            recovered_targets[["play_id", "athlete_id"]].astype({"play_id": str, "athlete_id": str})
+            recovered_targets[["play_id", "athlete_id"]].astype(
+                {"play_id": str, "athlete_id": str}
+            )
         )
     receivers = pd.concat(sources, ignore_index=True).drop_duplicates("play_id")
     return receivers.rename(columns={"athlete_id": "receiver_id"})
@@ -221,7 +243,9 @@ def target_rows(
     credited = rows[rows["role"].isin(roles)]
     receivers = play_receivers(rows, recovered_targets, poor_coverage)
     missing = receivers[~receivers["play_id"].isin(set(credited["play_id"]))]
-    recovered = passers[passers["is_incompletion"]].merge(missing, on="play_id", how="inner")
+    recovered = passers[passers["is_incompletion"]].merge(
+        missing, on="play_id", how="inner"
+    )
     scale = TARGET_SHARE / recovered["share"]
     recovered = recovered.assign(
         athlete_id=recovered["receiver_id"],
@@ -235,7 +259,9 @@ def target_rows(
     )
     columns = [column for column in credited.columns if column != "athlete_name"]
     targets = pd.concat([credited, recovered[columns]], ignore_index=True)
-    passer_ids = passers[["play_id", "athlete_id"]].rename(columns={"athlete_id": "passer_id"})
+    passer_ids = passers[["play_id", "athlete_id"]].rename(
+        columns={"athlete_id": "passer_id"}
+    )
     targets = targets.merge(passer_ids, on="play_id", how="left")
     return targets.assign(is_reception=targets["role"].eq("receiver"))
 
@@ -247,7 +273,9 @@ def teammate_relative(events: pd.DataFrame, context_keys: list[str]) -> pd.DataF
     return relative.merge(keys, on=["athlete_id", *context_keys], how="left")
 
 
-def _qb_drive_engine(qb_rows: pd.DataFrame, tables: ExpectationTables, games: pd.DataFrame) -> pd.DataFrame:
+def _qb_drive_engine(
+    qb_rows: pd.DataFrame, tables: ExpectationTables, games: pd.DataFrame
+) -> pd.DataFrame:
     plays = qb_rows[qb_rows["role"].isin(["passer", "rusher"])]
     plays = plays[is_late_down(plays) | is_two_minute(plays)]
     events = per_game(plays, conversion_over_expected(plays, tables), plays["weight"])
@@ -255,8 +283,12 @@ def _qb_drive_engine(qb_rows: pd.DataFrame, tables: ExpectationTables, games: pd
 
 
 def _qb_explosive(qb_dropbacks: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
-    explosive = qb_dropbacks["is_completion"] & qb_dropbacks["yards_gained"].ge(EXPLOSIVE_PASS_YARDS)
-    events = per_game(qb_dropbacks, explosive * qb_dropbacks["weight"], qb_dropbacks["weight"])
+    explosive = qb_dropbacks["is_completion"] & qb_dropbacks["yards_gained"].ge(
+        EXPLOSIVE_PASS_YARDS
+    )
+    events = per_game(
+        qb_dropbacks, explosive * qb_dropbacks["weight"], qb_dropbacks["weight"]
+    )
     return trait_rows(opponent_adjusted(events, games), QB_TRAITS["qb.explosive"])
 
 
@@ -272,7 +304,9 @@ def _qb_ball_security(
     interceptions = qb_dropbacks[qb_dropbacks["is_interception"]]
     fumbles = qb_rows[qb_rows["role"].eq("fumbler")]
     turnovers = pd.concat([interceptions, fumbles], ignore_index=True)
-    cost = per_game(turnovers, turnovers["play_wpa"].fillna(0.0) * turnovers["weight"], 0.0)
+    cost = per_game(
+        turnovers, turnovers["play_wpa"].fillna(0.0) * turnovers["weight"], 0.0
+    )
     exposure = per_game(qb_dropbacks, 0.0, qb_dropbacks["weight"])
     events = exposure.drop(columns="numerator").merge(
         cost.drop(columns="denominator"), on=GAME_KEYS, how="left"
@@ -291,9 +325,13 @@ def _qb_floor(qb_dropbacks: pd.DataFrame) -> pd.DataFrame:
     return trait_rows(games, QB_TRAITS["qb.floor"])
 
 
-def _qb_legs(qb_rows: pd.DataFrame, tables: ExpectationTables, games: pd.DataFrame) -> pd.DataFrame:
+def _qb_legs(
+    qb_rows: pd.DataFrame, tables: ExpectationTables, games: pd.DataFrame
+) -> pd.DataFrame:
     rushes = qb_rows[qb_rows["role"].eq("rusher")]
-    events = per_game(rushes, conversion_over_expected(rushes, tables), rushes["weight"])
+    events = per_game(
+        rushes, conversion_over_expected(rushes, tables), rushes["weight"]
+    )
     return trait_rows(opponent_adjusted(events, games), QB_TRAITS["qb.legs"])
 
 
@@ -309,28 +347,42 @@ def _qb_pressure_handling(
     """
     counts = ["dropbacks", "sacks"]
     passers = per_game(
-        all_dropbacks, all_dropbacks["is_sack"] * all_dropbacks["weight"], all_dropbacks["weight"]
+        all_dropbacks,
+        all_dropbacks["is_sack"] * all_dropbacks["weight"],
+        all_dropbacks["weight"],
     ).rename(columns={"numerator": "sacks", "denominator": "dropbacks"})
 
     def prior(keys: list[str], prefix: str) -> pd.DataFrame:
-        return prior_totals(passers, keys, counts).rename(columns={c: f"{prefix}_{c}" for c in counts})
+        return prior_totals(passers, keys, counts).rename(
+            columns={c: f"{prefix}_{c}" for c in counts}
+        )
 
     merged = (
         passers.merge(prior([], "league"), on="model_week", how="left")
         .merge(prior(["team"], "team"), on=["team", "model_week"], how="left")
-        .merge(prior(["team", "athlete_id"], "own"), on=["team", "athlete_id", "model_week"], how="left")
+        .merge(
+            prior(["team", "athlete_id"], "own"),
+            on=["team", "athlete_id", "model_week"],
+            how="left",
+        )
     )
     other_dropbacks = merged["team_dropbacks"] - merged["own_dropbacks"]
     other_sacks = merged["team_sacks"] - merged["own_sacks"]
-    league_rate = merged["league_sacks"] / merged["league_dropbacks"].where(merged["league_dropbacks"] > 0)
+    league_rate = merged["league_sacks"] / merged["league_dropbacks"].where(
+        merged["league_dropbacks"] > 0
+    )
     baseline = np.where(
-        other_dropbacks >= PRESSURE_MIN_OTHER_DROPBACKS, other_sacks / other_dropbacks, league_rate
+        other_dropbacks >= PRESSURE_MIN_OTHER_DROPBACKS,
+        other_sacks / other_dropbacks,
+        league_rate,
     )
     merged["numerator"] = merged["dropbacks"] * baseline - merged["sacks"]
     merged["denominator"] = merged["dropbacks"]
     events = merged[merged["athlete_id"].isin(qbs) & merged["numerator"].notna()]
     events = events[[*GAME_KEYS, "numerator", "denominator"]]
-    return trait_rows(opponent_adjusted(events, games), QB_TRAITS["qb.pressure_handling"])
+    return trait_rows(
+        opponent_adjusted(events, games), QB_TRAITS["qb.pressure_handling"]
+    )
 
 
 def _qb_receiver_independence(
@@ -344,25 +396,36 @@ def _qb_receiver_independence(
     passers produced through the previous week. Only targets whose receiver has
     at least ten such targets count; a game with none has a NaN numerator.
     """
-    throws = all_dropbacks[~all_dropbacks["is_sack"]].merge(receivers, on="play_id", how="inner")
+    throws = all_dropbacks[~all_dropbacks["is_sack"]].merge(
+        receivers, on="play_id", how="inner"
+    )
     throws = throws.assign(epa=throws["adjusted_epa"], targets=throws["weight"])
     sums = ["epa", "targets"]
     receiver_prior = prior_totals(throws, ["receiver_id"], sums)
     pair_prior = prior_totals(throws, ["receiver_id", "athlete_id"], sums)
     qb_throws = throws[throws["athlete_id"].isin(qbs)]
     merged = qb_throws.merge(
-        receiver_prior, on=["receiver_id", "model_week"], how="left", suffixes=("", "_receiver")
+        receiver_prior,
+        on=["receiver_id", "model_week"],
+        how="left",
+        suffixes=("", "_receiver"),
     ).merge(
-        pair_prior, on=["receiver_id", "athlete_id", "model_week"], how="left", suffixes=("", "_pair")
+        pair_prior,
+        on=["receiver_id", "athlete_id", "model_week"],
+        how="left",
+        suffixes=("", "_pair"),
     )
     other_targets = merged["targets_receiver"] - merged["targets_pair"]
     other_epa = merged["epa_receiver"] - merged["epa_pair"]
     qualifies = other_targets >= RECEIVER_MIN_OTHER_TARGETS
     rate = other_epa / other_targets.where(qualifies)
     value = (merged["epa"] - merged["weight"] * rate).where(qualifies)
-    events = merged[GAME_KEYS].assign(value=value, denominator=merged["weight"].where(qualifies, 0.0))
+    events = merged[GAME_KEYS].assign(
+        value=value, denominator=merged["weight"].where(qualifies, 0.0)
+    )
     events = events.groupby(GAME_KEYS, as_index=False).agg(
-        numerator=("value", lambda v: v.sum(min_count=1)), denominator=("denominator", "sum")
+        numerator=("value", lambda v: v.sum(min_count=1)),
+        denominator=("denominator", "sum"),
     )
     return trait_rows(events, QB_TRAITS["qb.receiver_independence"])
 
@@ -401,9 +464,13 @@ def qb_traits(
 def _rb_yards_over_expected(
     carries: pd.DataFrame, tables: ExpectationTables, games: pd.DataFrame
 ) -> pd.DataFrame:
-    over = (carries["yards_gained"] - expected_rush_yards(tables, carries)) * carries["weight"]
+    over = (carries["yards_gained"] - expected_rush_yards(tables, carries)) * carries[
+        "weight"
+    ]
     events = per_game(carries, over, carries["weight"])
-    return trait_rows(opponent_adjusted(events, games), RB_TRAITS["rb.yards_over_expected"])
+    return trait_rows(
+        opponent_adjusted(events, games), RB_TRAITS["rb.yards_over_expected"]
+    )
 
 
 def _rb_stuff_avoidance(carries: pd.DataFrame) -> pd.DataFrame:
@@ -414,7 +481,9 @@ def _rb_stuff_avoidance(carries: pd.DataFrame) -> pd.DataFrame:
     carried fewer than five times.
     """
     stuffed = carries["yards_gained"].le(0) * carries["weight"]
-    relative = teammate_relative(per_game(carries, stuffed, carries["weight"]), ["game_id", "team"])
+    relative = teammate_relative(
+        per_game(carries, stuffed, carries["weight"]), ["game_id", "team"]
+    )
     relative["numerator"] = -relative["numerator"]
     return trait_rows(relative, RB_TRAITS["rb.stuff_avoidance"])
 
@@ -444,7 +513,10 @@ def _rb_receiving(rb_targets: pd.DataFrame) -> pd.DataFrame:
 
 
 def _rb_ball_security(
-    carries: pd.DataFrame, rb_targets: pd.DataFrame, fumbles: pd.DataFrame, games: pd.DataFrame
+    carries: pd.DataFrame,
+    rb_targets: pd.DataFrame,
+    fumbles: pd.DataFrame,
+    games: pd.DataFrame,
 ) -> pd.DataFrame:
     """Offense-view WPA of the back's fumbles per touch.
 
@@ -454,7 +526,11 @@ def _rb_ball_security(
     missing WPA (FCS games) counts as zero.
     """
     touches = pd.concat([carries, rb_targets, fumbles], ignore_index=True)
-    cost = touches["play_wpa"].fillna(0.0) * touches["weight"] * touches["role"].eq("fumbler")
+    cost = (
+        touches["play_wpa"].fillna(0.0)
+        * touches["weight"]
+        * touches["role"].eq("fumbler")
+    )
     events = per_game(touches, cost, touches["weight"])
     return trait_rows(opponent_adjusted(events, games), RB_TRAITS["rb.ball_security"])
 
@@ -511,12 +587,18 @@ def _rec_target_share(
     no row. Under poor coverage both sides count receptions. A share is not
     opponent adjusted.
     """
-    appeared = pd.concat([rows[GAME_KEYS], targets[GAME_KEYS]], ignore_index=True).drop_duplicates()
+    appeared = pd.concat(
+        [rows[GAME_KEYS], targets[GAME_KEYS]], ignore_index=True
+    ).drop_duplicates()
     appeared = appeared[appeared["athlete_id"].isin(receivers)]
     own = targets.groupby(GAME_KEYS, as_index=False)["weight"].sum()
     team = targets.groupby(["game_id", "team"], as_index=False)["weight"].sum()
-    events = appeared.merge(own.rename(columns={"weight": "numerator"}), on=GAME_KEYS, how="left").merge(
-        team.rename(columns={"weight": "denominator"}), on=["game_id", "team"], how="inner"
+    events = appeared.merge(
+        own.rename(columns={"weight": "numerator"}), on=GAME_KEYS, how="left"
+    ).merge(
+        team.rename(columns={"weight": "denominator"}),
+        on=["game_id", "team"],
+        how="inner",
     )
     events["numerator"] = events["numerator"].fillna(0.0)
     return trait_rows(events, REC_TRAITS["rec.target_share"])
@@ -527,14 +609,20 @@ def _rec_value_per_target(player_targets: pd.DataFrame) -> pd.DataFrame:
 
     Adjusted EPA is already opponent-adjusted by v4, so there is no ``adjust_rate``.
     """
-    events = per_game(player_targets, player_targets["adjusted_epa"], player_targets["weight"])
+    events = per_game(
+        player_targets, player_targets["adjusted_epa"], player_targets["weight"]
+    )
     return trait_rows(events, REC_TRAITS["rec.value_per_target"])
 
 
 def _rec_explosive(player_targets: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
     """Catches of 20 yards or more per target (per reception under poor coverage)."""
-    explosive = player_targets["is_reception"] & player_targets["yards_gained"].ge(EXPLOSIVE_PASS_YARDS)
-    events = per_game(player_targets, explosive * player_targets["weight"], player_targets["weight"])
+    explosive = player_targets["is_reception"] & player_targets["yards_gained"].ge(
+        EXPLOSIVE_PASS_YARDS
+    )
+    events = per_game(
+        player_targets, explosive * player_targets["weight"], player_targets["weight"]
+    )
     return trait_rows(opponent_adjusted(events, games), REC_TRAITS["rec.explosive"])
 
 
@@ -570,7 +658,9 @@ def _rec_qb_independence(targets: pd.DataFrame, receivers: set[str]) -> pd.DataF
         qualified=("qualified", "sum"),
         targets=("denominator", "sum"),
     )
-    games["denominator"] = games["qualified"].where(games["numerator"].notna(), games["targets"])
+    games["denominator"] = games["qualified"].where(
+        games["numerator"].notna(), games["targets"]
+    )
     return trait_rows(games, REC_TRAITS["rec.qb_independence"])
 
 
@@ -588,7 +678,9 @@ def receiver_traits(
     count receptions instead, and target share becomes reception share.
     """
     rows = offense_rows(ctx)
-    receivers = set().union(*(position_ids(ctx.positions, group) for group in RECEIVER_GROUPS))
+    receivers = set().union(
+        *(position_ids(ctx.positions, group) for group in RECEIVER_GROUPS)
+    )
     targets = target_rows(rows, recovered_targets, poor_coverage)
     player_targets = targets[targets["athlete_id"].isin(receivers)]
     frames = [

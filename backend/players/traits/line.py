@@ -76,14 +76,21 @@ def _ol_protection(all_dropbacks: pd.DataFrame, games: pd.DataFrame) -> pd.DataF
     team = per_game(all_dropbacks, sacked, all_dropbacks["weight"])
     team = team.rename(columns={"numerator": "sacks", "denominator": "dropbacks"})
     league = prior_totals(team, [], ["sacks", "dropbacks"])
-    league["league_rate"] = league["sacks"] / league["dropbacks"].where(league["dropbacks"] > 0)
-    merged = team.merge(league[["model_week", "league_rate"]], on="model_week", how="left")
+    league["league_rate"] = league["sacks"] / league["dropbacks"].where(
+        league["dropbacks"] > 0
+    )
+    merged = team.merge(
+        league[["model_week", "league_rate"]], on="model_week", how="left"
+    )
     merged["numerator"] = merged["dropbacks"] * merged["league_rate"] - merged["sacks"]
     merged["denominator"] = merged["dropbacks"]
     events = merged[[*GAME_KEYS, "numerator", "denominator"]]
     known = events["numerator"].notna()
     adjusted = opponent_adjusted(events[known], games)
-    return trait_rows(pd.concat([adjusted, events[~known]], ignore_index=True), LINE_TRAITS["ol.protection"])
+    return trait_rows(
+        pd.concat([adjusted, events[~known]], ignore_index=True),
+        LINE_TRAITS["ol.protection"],
+    )
 
 
 def _ol_stuff_rate(carries: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
@@ -93,7 +100,9 @@ def _ol_stuff_rate(carries: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
     return trait_rows(opponent_adjusted(events, games), LINE_TRAITS["ol.stuff_rate"])
 
 
-def _ol_short_yardage(carries: pd.DataFrame, tables: ExpectationTables, games: pd.DataFrame) -> pd.DataFrame:
+def _ol_short_yardage(
+    carries: pd.DataFrame, tables: ExpectationTables, games: pd.DataFrame
+) -> pd.DataFrame:
     """Conversions over expected on the team's short-yardage carries."""
     plays = carries[is_short_yardage(carries)]
     events = per_game(plays, conversion_over_expected(plays, tables), plays["weight"])
@@ -131,7 +140,9 @@ def _lone_kickers(box: pd.DataFrame) -> pd.DataFrame:
     """``game_id, team, athlete_id`` for each team-game with exactly one kicker with attempts."""
     fg = box[box["category"].eq("kicking") & box["stat_name"].eq("FG")]
     attempts = pd.to_numeric(fg["stat_text"].str.extract(r"\d+\s*/\s*(\d+)")[0])
-    kickers = fg.loc[attempts.gt(0), ["game_id", "team", "athlete_id"]].drop_duplicates()
+    kickers = fg.loc[
+        attempts.gt(0), ["game_id", "team", "athlete_id"]
+    ].drop_duplicates()
     kickers = kickers.assign(athlete_id=kickers["athlete_id"].astype(str))
     counts = kickers.groupby(["game_id", "team"])["athlete_id"].transform("size")
     return kickers[counts.eq(1)]
@@ -148,12 +159,21 @@ def _k_field_goal(ctx: SeasonContext, tables: ExpectationTables) -> pd.DataFrame
     plays = ctx.plays
     kicks = plays[plays["play_type"].isin(FIELD_GOAL_TYPES)]
     if kicks.empty:
-        return trait_rows(pd.DataFrame(columns=[*GAME_KEYS, "numerator", "denominator"]), KICKING_TRAITS["k.field_goal"])
-    over = kicks["play_type"].eq("Field Goal Good").astype(float) - expected_field_goal(tables, kicks)
-    kicks = kicks.assign(over=over).rename(columns={"offense": "team"})[["game_id", "team", "over"]]
+        return trait_rows(
+            pd.DataFrame(columns=[*GAME_KEYS, "numerator", "denominator"]),
+            KICKING_TRAITS["k.field_goal"],
+        )
+    over = kicks["play_type"].eq("Field Goal Good").astype(float) - expected_field_goal(
+        tables, kicks
+    )
+    kicks = kicks.assign(over=over).rename(columns={"offense": "team"})[
+        ["game_id", "team", "over"]
+    ]
     kicks = kicks.merge(_schedule(ctx.games), on=["game_id", "team"], how="inner")
     kicks = kicks.merge(_lone_kickers(ctx.box), on=["game_id", "team"], how="left")
-    skipped = kicks.loc[kicks["athlete_id"].isna(), ["game_id", "team"]].drop_duplicates()
+    skipped = kicks.loc[
+        kicks["athlete_id"].isna(), ["game_id", "team"]
+    ].drop_duplicates()
     log.info("%d team-games skipped: ambiguous kicker", len(skipped))
     kicks = kicks[kicks["athlete_id"].isin(position_ids(ctx.positions, "K"))]
     events = per_game(kicks, kicks["over"] * kicks["weight"], kicks["weight"])
@@ -164,10 +184,15 @@ def _punt_lines(box: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
     """Punts (``no``) and punt yards (``yds``) per punter and game, with the game's schedule keys."""
     punting = box[box["category"].eq("punting") & box["stat_name"].isin(["NO", "YDS"])]
     wide = punting.pivot_table(
-        index=["athlete_id", "team", "game_id"], columns="stat_name", values="stat", aggfunc="sum"
+        index=["athlete_id", "team", "game_id"],
+        columns="stat_name",
+        values="stat",
+        aggfunc="sum",
     )
     wide = wide.reindex(columns=["NO", "YDS"]).fillna(0.0).reset_index()
-    wide = wide.rename(columns={"NO": "no", "YDS": "yds"}).assign(athlete_id=wide["athlete_id"].astype(str))
+    wide = wide.rename(columns={"NO": "no", "YDS": "yds"}).assign(
+        athlete_id=wide["athlete_id"].astype(str)
+    )
     return wide.merge(_schedule(games), on=["game_id", "team"], how="inner")
 
 
@@ -180,14 +205,20 @@ def _p_punt_average(ctx: SeasonContext) -> pd.DataFrame:
     lines = _punt_lines(ctx.box, ctx.games)
     league = prior_totals(lines, [], ["yds", "no"])
     league["league_average"] = league["yds"] / league["no"].where(league["no"] > 0)
-    lines = lines.merge(league[["model_week", "league_average"]], on="model_week", how="left")
+    lines = lines.merge(
+        league[["model_week", "league_average"]], on="model_week", how="left"
+    )
     punters = lines[lines["athlete_id"].isin(position_ids(ctx.positions, "P"))]
     punters = punters[punters["league_average"].notna() & punters["no"].gt(0)]
-    numerator = (punters["yds"] - punters["no"] * punters["league_average"]) * punters["weight"]
+    numerator = (punters["yds"] - punters["no"] * punters["league_average"]) * punters[
+        "weight"
+    ]
     events = per_game(punters, numerator, punters["no"] * punters["weight"])
     return trait_rows(events, KICKING_TRAITS["p.punt_average"])
 
 
 def kicking_traits(ctx: SeasonContext, tables: ExpectationTables) -> pd.DataFrame:
     """Field goal and punt traits per kicker and game, in the trait frame contract."""
-    return pd.concat([_k_field_goal(ctx, tables), _p_punt_average(ctx)], ignore_index=True)
+    return pd.concat(
+        [_k_field_goal(ctx, tables), _p_punt_average(ctx)], ignore_index=True
+    )

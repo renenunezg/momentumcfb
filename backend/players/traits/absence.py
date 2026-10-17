@@ -45,7 +45,9 @@ def with_without(
     out["raw_difference"] = (out["absent_mean"] - out["present_mean"]).where(estimable)
     weight = present * absent / (present * absent + shrink_games)
     out["impact"] = (out["raw_difference"] * weight).where(estimable)
-    out[["present_games", "absent_games"]] = out[["present_games", "absent_games"]].astype(int)
+    out[["present_games", "absent_games"]] = out[
+        ["present_games", "absent_games"]
+    ].astype(int)
     return out[
         ["athlete_id", "present_games", "absent_games", "raw_difference", "impact"]
     ]

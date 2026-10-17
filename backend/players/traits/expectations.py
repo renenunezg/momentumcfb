@@ -17,13 +17,15 @@ import pyarrow.parquet as pq
 
 DOWN_KEYS = ["down_bucket", "distance_bucket", "field_bucket"]
 FG_KEYS = ["fg_bucket"]
-FIELD_GOAL_TYPES = frozenset({
-    "Field Goal Good",
-    "Field Goal Missed",
-    "Blocked Field Goal",
-    "Missed Field Goal Return",
-    "Blocked Field Goal Touchdown",
-})
+FIELD_GOAL_TYPES = frozenset(
+    {
+        "Field Goal Good",
+        "Field Goal Missed",
+        "Blocked Field Goal",
+        "Missed Field Goal Return",
+        "Blocked Field Goal Touchdown",
+    }
+)
 # Table name to its bucket keys, in the order the serving artifact stores them.
 TABLE_KEYS = {"rush_yards": DOWN_KEYS, "conversion": DOWN_KEYS, "field_goal": FG_KEYS}
 INTEGER_KEYS = ("down_bucket", "fg_bucket")
@@ -61,7 +63,12 @@ def bucket(plays: pd.DataFrame) -> pd.DataFrame:
             default=None,
         )
         out["field_bucket"] = np.select(
-            [yards_to_goal.ge(80), yards_to_goal.ge(40), yards_to_goal.ge(20), yards_to_goal.lt(20)],
+            [
+                yards_to_goal.ge(80),
+                yards_to_goal.ge(40),
+                yards_to_goal.ge(20),
+                yards_to_goal.lt(20),
+            ],
             ["own", "mid", "plus", "red"],
             default=None,
         )
@@ -84,15 +91,21 @@ def fit_expectation_tables(
     seasons = sorted(season for season in plays_by_season if season < before_season)
     if not seasons:
         raise ValueError(f"no season before {before_season} to fit expectations on")
-    plays = bucket(pd.concat([plays_by_season[season] for season in seasons], ignore_index=True))
+    plays = bucket(
+        pd.concat([plays_by_season[season] for season in seasons], ignore_index=True)
+    )
 
     rushes = plays[plays["is_rush"].astype(bool) & plays["is_competitive"].astype(bool)]
     scrimmage = plays[plays["is_competitive"].astype(bool)]
-    kicks = plays[plays["play_type"].isin(FIELD_GOAL_TYPES) & plays["fg_bucket"].notna()]
+    kicks = plays[
+        plays["play_type"].isin(FIELD_GOAL_TYPES) & plays["fg_bucket"].notna()
+    ]
     return ExpectationTables(
         rush_yards=_table(rushes, DOWN_KEYS, rushes["yards_gained"].astype(float)),
         conversion=_table(scrimmage, DOWN_KEYS, scrimmage["is_success"].astype(float)),
-        field_goal=_table(kicks, FG_KEYS, kicks["play_type"].eq("Field Goal Good").astype(float)),
+        field_goal=_table(
+            kicks, FG_KEYS, kicks["play_type"].eq("Field Goal Good").astype(float)
+        ),
         source_seasons=seasons,
     )
 
@@ -101,10 +114,16 @@ def _lookup(table: pd.DataFrame, plays: pd.DataFrame, keys: list[str]) -> pd.Ser
     """The table's mean for each play's bucket; the table's global mean where unseen."""
     if not set(keys) <= set(plays.columns):
         plays = bucket(plays)
-    merged = plays[keys].reset_index(drop=True).merge(
-        table[[*keys, "expected"]], on=keys, how="left"
+    merged = (
+        plays[keys]
+        .reset_index(drop=True)
+        .merge(table[[*keys, "expected"]], on=keys, how="left")
     )
-    mean = (table["expected"] * table["plays"]).sum() / table["plays"].sum() if len(table) else np.nan
+    mean = (
+        (table["expected"] * table["plays"]).sum() / table["plays"].sum()
+        if len(table)
+        else np.nan
+    )
     return pd.Series(merged["expected"].fillna(mean).to_numpy(float), index=plays.index)
 
 
@@ -135,7 +154,11 @@ def _typed(frame: pd.DataFrame) -> pd.DataFrame:
         if column in INTEGER_KEYS:
             out[column] = pd.to_numeric(out[column]).astype("Int64")
         elif column in DOWN_KEYS:
-            out[column] = out[column].map(lambda value: None if pd.isna(value) else str(value)).astype(object)
+            out[column] = (
+                out[column]
+                .map(lambda value: None if pd.isna(value) else str(value))
+                .astype(object)
+            )
     return out
 
 
@@ -144,16 +167,21 @@ def tables_frame(tables: ExpectationTables) -> pd.DataFrame:
     ``expected`` and ``plays``; keys a table does not use are missing."""
     keys = list(dict.fromkeys(key for names in TABLE_KEYS.values() for key in names))
     parts = [getattr(tables, name).assign(table=name) for name in TABLE_KEYS]
-    frame = pd.concat(parts, ignore_index=True).reindex(columns=["table", *keys, "expected", "plays"])
+    frame = pd.concat(parts, ignore_index=True).reindex(
+        columns=["table", *keys, "expected", "plays"]
+    )
     return _typed(frame).astype({"expected": float, "plays": "int64"})
 
 
 def save_expectation_tables(tables: ExpectationTables, path: Path) -> Path:
     """Write the long frame with ``source_seasons`` in the parquet schema metadata."""
     table = pa.Table.from_pandas(tables_frame(tables), preserve_index=False)
-    metadata = {**(table.schema.metadata or {}), SOURCE_SEASONS: json.dumps(
-        [int(season) for season in tables.source_seasons]
-    ).encode()}
+    metadata = {
+        **(table.schema.metadata or {}),
+        SOURCE_SEASONS: json.dumps(
+            [int(season) for season in tables.source_seasons]
+        ).encode(),
+    }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
@@ -170,9 +198,12 @@ def load_expectation_tables(source) -> ExpectationTables:
         raise ValueError("expectation tables have no source_seasons metadata")
     frame = _typed(table.to_pandas())
     parts = {
-        name: frame.loc[frame["table"].eq(name), [*keys, "expected", "plays"]].reset_index(drop=True)
+        name: frame.loc[
+            frame["table"].eq(name), [*keys, "expected", "plays"]
+        ].reset_index(drop=True)
         for name, keys in TABLE_KEYS.items()
     }
     return ExpectationTables(
-        **parts, source_seasons=[int(season) for season in json.loads(metadata[SOURCE_SEASONS])]
+        **parts,
+        source_seasons=[int(season) for season in json.loads(metadata[SOURCE_SEASONS])],
     )

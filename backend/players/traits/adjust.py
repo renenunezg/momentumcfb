@@ -30,7 +30,9 @@ def opponent_rates(events: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
     weekly = (
         _with_week(events, games)
         .dropna(subset=["model_week"])
-        .groupby(["opponent", "model_week"], as_index=False)[["numerator", "denominator"]]
+        .groupby(["opponent", "model_week"], as_index=False)[
+            ["numerator", "denominator"]
+        ]
         .sum()
         .sort_values(["opponent", "model_week"])
     )
@@ -71,5 +73,7 @@ def adjust_rate(events: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
     adjusted = merged["numerator"] - merged["denominator"] * deviation
     out = events.copy()
     out["raw_numerator"] = events["numerator"].to_numpy()
-    out["numerator"] = np.where(deviation.notna(), adjusted, events["numerator"]).astype(float)
+    out["numerator"] = np.where(
+        deviation.notna(), adjusted, events["numerator"]
+    ).astype(float)
     return out

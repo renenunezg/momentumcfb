@@ -83,7 +83,9 @@ def position_groups(frames: pd.DataFrame, positions: pd.DataFrame) -> pd.DataFra
         dominant[["athlete_id", "group"]], on="athlete_id", how="left"
     )
     out["position_group"] = out["position_group"].fillna(out.pop("group"))
-    out.loc[out["athlete_id"].str.startswith(UNIT_PREFIX), "position_group"] = UNIT_GROUP
+    out.loc[out["athlete_id"].str.startswith(UNIT_PREFIX), "position_group"] = (
+        UNIT_GROUP
+    )
     return out
 
 
@@ -101,7 +103,9 @@ def _quantile20(rows: pd.DataFrame, keys: list[str]) -> pd.Series:
 
 def _latest(rows: pd.DataFrame, keys: list[str]) -> pd.Series:
     """The numerator of the row with the latest model week."""
-    last = rows.sort_values("model_week", kind="stable").drop_duplicates(keys, keep="last")
+    last = rows.sort_values("model_week", kind="stable").drop_duplicates(
+        keys, keep="last"
+    )
     return last.set_index(keys)["numerator"]
 
 
@@ -138,7 +142,8 @@ def _snapshot_weeks(games: pd.DataFrame) -> list[tuple[int, int]]:
     """
     weeks = sorted(int(week) for week in games["model_week"].dropna().unique())
     completed = sorted(
-        int(week) for week in games.loc[games["completed"].eq(True), "model_week"].unique()
+        int(week)
+        for week in games.loc[games["completed"].eq(True), "model_week"].unique()
     )
     if not completed:
         return []
@@ -155,7 +160,9 @@ def _snapshot_weeks(games: pd.DataFrame) -> list[tuple[int, int]]:
 def _cumulative(rows: pd.DataFrame, cutoff: int) -> pd.DataFrame:
     through = rows[rows["model_week"].le(cutoff)]
     values = aggregate(through, KEYS).reset_index()
-    played = through.dropna(subset=["game_id"]).groupby("athlete_id")["game_id"].nunique()
+    played = (
+        through.dropna(subset=["game_id"]).groupby("athlete_id")["game_id"].nunique()
+    )
     values["games"] = values["athlete_id"].map(played).fillna(0).astype(int)
     return values
 
@@ -226,7 +233,9 @@ def weekly_trait_snapshots(
 
 
 def split_half_reliability(
-    frames: pd.DataFrame, positions: pd.DataFrame, games_at: tuple[int, ...] = (4, 8, 12)
+    frames: pd.DataFrame,
+    positions: pd.DataFrame,
+    games_at: tuple[int, ...] = (4, 8, 12),
 ) -> pd.DataFrame:
     """Correlation between a trait's odd-game and even-game values per group.
 
@@ -238,7 +247,9 @@ def split_half_reliability(
     rows = frames.astype({"athlete_id": str})
     rows = rows.assign(aggregate=_trait_attribute(rows["trait"], "aggregate"))
     rows = rows[
-        rows["numerator"].notna() & rows["game_id"].notna() & rows["aggregate"].ne("latest")
+        rows["numerator"].notna()
+        & rows["game_id"].notna()
+        & rows["aggregate"].ne("latest")
     ]
     rows = rows.sort_values([*KEYS, "model_week", "game_id"], kind="stable")
     order = rows.groupby(KEYS).cumcount()
