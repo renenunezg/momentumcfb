@@ -13,6 +13,7 @@ def read_season_pbp(season: int) -> pd.DataFrame:
     season_dir = RAW_DIR / "pbp" / str(season)
     files = sorted(season_dir.glob("regular_*.parquet"))
     files.extend(sorted(season_dir.glob("postseason_*.parquet")))
+    files.extend(sorted(season_dir.glob("spring_regular_*.parquet")))
     if not files:
         raise FileNotFoundError(f"no pbp parquet for {season}, run ingest first")
 

@@ -60,7 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      CFB_REQUIRE_DATA_REVISION: "1"
+      # Enable with the paired bundle cutover after the current slate finishes.
+      CFB_REQUIRE_DATA_REVISION: ${{ vars.CFB_REQUIRE_DATA_REVISION || '0' }}
       REQUESTED_SEASON: ${{ inputs.season }}
       FORECAST_WEEK: ${{ inputs.week || '' }}
       CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
@@ -193,9 +194,11 @@ jobs:
           PY
 
       - name: Validate unified historical data revision before CFBD calls
+        if: env.CFB_REQUIRE_DATA_REVISION == '1'
         run: poetry run python -m backend.runtime_revision --season "$SEASON"
 
       - name: Preserve historical data revision receipt
+        if: env.CFB_REQUIRE_DATA_REVISION == '1'
         uses: actions/upload-artifact@v7
         with:
           name: cfb-data-revision-${{ github.run_id }}
