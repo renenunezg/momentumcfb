@@ -384,3 +384,20 @@ jobs:
           path: backend/data/processed/diagnostics/
           if-no-files-found: ignore
           retention-days: 90
+
+      - name: Refresh and publish the compact playoff forecast
+        if: env.SEASON == '2026'
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          VECLIB_MAXIMUM_THREADS: "1"
+        run: poetry run python -m backend.playoffs.refresh --season "$SEASON" --publish
+
+      - name: Preserve playoff forecast validation
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cfb-playoffs-${{ github.run_id }}
+          path: output/cfb_playoffs/
+          if-no-files-found: ignore
+          retention-days: 30
