@@ -41,3 +41,6 @@ backend/data/
 
 # Brainstorm mockups (superpowers visual companion)
 .superpowers/
+
+# Local docs and research notes (never tracked)
+docs/

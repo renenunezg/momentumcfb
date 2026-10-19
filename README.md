@@ -156,7 +156,7 @@ Publishing is a separate, explicit boundary.
 Local model and evaluation commands do not require database write access.
 
 Player-value v4 uses exposure-weighted rush/pass efficiency and a frozen previous-season opponent prior instead of resetting opening opponents to average; the prior is regressed 0.7 of the way from zero toward last season's rating and the ridge alone, with noise estimated from each channel, decides how far observed games move each unit.
-v3 blended the ridge fit a second time toward last season by games played, which left midseason opponent effects about 90 percent previous-season rating; the v4 settings were chosen on 2020 through 2024 walk-forward next-game error and checked on 2025 (`docs/player_value_v4.md`).
+v3 blended the ridge fit a second time toward last season by games played, which left midseason opponent effects about 90 percent previous-season rating; the v4 settings were chosen on 2020 through 2024 walk-forward next-game error and checked on 2025.
 Before activating a new player-value version, run `python -m backend player-prior --season 2026 --runtime-bundle /path/to/player-runtime-2026.zip` where the previous season's raw plays and existing Heisman runtime artifacts are cached.
 The weekly runner requires that reviewed bundle, validates the prior before paid ingestion, and never downloads historical inputs or silently substitutes zero opponent effects.
 

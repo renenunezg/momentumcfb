@@ -47,7 +47,7 @@ FCS_OPPONENT_WEIGHT = 0.5
 # subdivision mean before it anchors the ridge, and the ridge alone decides
 # how far observed games move each unit off that anchor. Both numbers were
 # chosen by walk-forward next-game error on 2020 through 2024 and checked on
-# 2025 (see docs/player_value_v4.md); the surface is flat within about 0.05
+# 2025; the surface is flat within about 0.05
 # of each, so neither carries more precision than the first decimal implies.
 OPPONENT_PRIOR_REGRESSION = 0.7
 OPPONENT_PRIOR_SHARE = 0.3
