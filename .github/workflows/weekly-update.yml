@@ -25,6 +25,10 @@ on:
         description: Run containing the immutable opening-forecast-RUN_ID artifact
         required: false
         type: string
+      published_forecast_run_id:
+        description: Run containing the immutable weekly archive for an already-published-week rerun
+        required: false
+        type: string
       player_runtime_bundle_url:
         description: HTTPS URL of an exported player runtime ZIP for initial bootstrap
         required: false
@@ -257,6 +261,16 @@ jobs:
         # Their outage must not suppress an otherwise valid weekly forecast.
         continue-on-error: true
         run: poetry run python -m backend tier2-snapshot --season "$SEASON" --weather --adjusted --max-calls "$CFBD_MAX_CALLS"
+
+      # A no-op forecast rerun still needs its original archive for the playoff refresh.
+      - name: Restore explicitly pinned published weekly archive
+        if: inputs.published_forecast_run_id != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: weekly-cfb-${{ inputs.published_forecast_run_id }}
+          run-id: ${{ inputs.published_forecast_run_id }}
+          github-token: ${{ github.token }}
+          path: backend/data/processed/weekly/forecast_log/
 
       - name: Retrain and publish next week
         shell: bash
