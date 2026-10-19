@@ -400,8 +400,46 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
 
-      - name: Refresh and publish the compact playoff forecast
+      # A same-week rerun publishes nothing, so a fresh runner has no weekly
+      # archive unless one was pinned above. The newest archive from a run whose
+      # publish step succeeded is the published one; the refresh still verifies
+      # its manifest hashes. Without one the refresh is skipped, not failed.
+      - name: Restore the latest published weekly archive for the playoff refresh
+        id: published-archive
         if: env.SEASON == '2026'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive_dir=backend/data/processed/weekly/forecast_log
+          if compgen -G "$archive_dir/${SEASON}_*.json" > /dev/null; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/weekly-update.yml/runs?status=completed&per_page=30" \
+            --jq ".workflow_runs[] | select(.id != $GITHUB_RUN_ID) | .id")
+          for run_id in $runs; do
+            published=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs" \
+              --jq '.jobs[].steps[] | select(.name == "Retrain and publish next week") | .conclusion')
+            [[ "$published" == "success" ]] || continue
+            artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?name=weekly-cfb-$run_id" \
+              --jq '.artifacts[] | select(.expired | not) | .id')
+            [[ -n "$artifact" ]] || continue
+            candidate=$(mktemp -d)
+            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "weekly-cfb-$run_id" --dir "$candidate"
+            if compgen -G "$candidate/${SEASON}_*.json" > /dev/null; then
+              mkdir -p "$archive_dir"
+              cp -R "$candidate"/. "$archive_dir"/
+              echo "restored the weekly archive published by run $run_id"
+              echo "available=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "no published $SEASON weekly archive found; skipping the playoff refresh"
+          echo "available=false" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh and publish the compact playoff forecast
+        if: env.SEASON == '2026' && steps.published-archive.outputs.available == 'true'
         env:
           MOMENTUMCFB_DB_WRITES: "1"
           OPENBLAS_NUM_THREADS: "1"
