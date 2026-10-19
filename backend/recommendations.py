@@ -629,41 +629,6 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
     return decisions
 
 
-def superseded_picks(existing, decisions, *, now=None):
-    """Open picks a newer model version no longer makes, as (game_id, market).
-
-    ``existing`` holds published recommendations; ``decisions`` is the fresh
-    ``build_recommendations`` frame for the same games. Before kickoff such a
-    pick is replaced by the fresh decision and stops being a pick. Only a
-    different model version that recommends the other side or finds no side
-    above the edge gate supersedes: a line that merely moved keeps the pick,
-    a missing or unpriced fresh decision is not a change of opinion, and a
-    pick whose game has started is settled on its result like any other.
-    """
-    now = _timestamp(now or datetime.now(timezone.utc))
-    fresh = decisions.set_index(["game_id", "market"])
-    keys = set()
-    for pick in existing.itertuples():
-        key = (pick.game_id, pick.market)
-        if (
-            pick.status != "recommended"
-            or pick.outcome != "pending"
-            or not now < _timestamp(pick.start_date)
-            or key not in fresh.index
-        ):
-            continue
-        current = fresh.loc[key]
-        if current["model_version"] != pick.model_version and (
-            (current["status"] == "recommended" and current["side"] != pick.side)
-            or (
-                current["status"] == "no_play"
-                and current["reason"] == "below_edge_threshold"
-            )
-        ):
-            keys.add(key)
-    return keys
-
-
 def closing_line_value(pick, closing):
     """The closing number for the pick's side and the points it beat the close.
 

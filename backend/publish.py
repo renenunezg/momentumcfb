@@ -896,7 +896,9 @@ def publish_players(season: int) -> dict[str, int]:
 
 
 def _publish_recommendations(conn, decisions):
-    from backend.recommendations import RECOMMENDATION_COLUMNS, superseded_picks
+    from datetime import datetime
+
+    from backend.recommendations import RECOMMENDATION_COLUMNS
 
     if decisions.empty:
         return 0
@@ -911,47 +913,19 @@ def _publish_recommendations(conn, decisions):
             return value.tolist()
         raise TypeError(f"Unsupported decision JSON type: {type(value).__name__}")
 
-    for column in ("decision_forecast", "pricing_context"):
-        rows[column] = rows[column].map(
-            lambda value: (
-                json.dumps(value, allow_nan=False, default=parquet_json)
-                if value is not None
-                else None
-            )
-        )
-    existing = pd.read_sql_query(
-        text(
-            "SELECT game_id, market, start_date, status, outcome, side, "
-            f"model_version FROM {CFB_SCHEMA}.recommendations "
-            "WHERE game_id = ANY(:ids) AND status = 'recommended' "
-            "AND outcome = 'pending'"
-        ),
-        conn,
-        params={"ids": [int(g) for g in decisions["game_id"].unique()]},
-    )
-    superseded = superseded_picks(existing, decisions)
-    # Keep the original pick visible as void if the schedule moves, rather
-    # than showing its old price as a recommendation for the new kickoff.
-    conn.execute(
-        text(
-            f"UPDATE {CFB_SCHEMA}.recommendations SET outcome = 'void', "
-            "profit_units = 0, graded_at = clock_timestamp() "
-            "WHERE game_id = :game_id AND market = :market AND start_date <> :start_date "
-            "AND home_team = :home_team AND away_team = :away_team "
-            "AND decision_at < :decision_at "
-            "AND status = 'recommended' AND outcome = 'pending'"
-        ),
-        rows[
-            ["game_id", "market", "start_date", "home_team", "away_team", "decision_at"]
-        ].to_dict("records"),
+    def json_value(value):
+        if isinstance(value, (pd.Timestamp, datetime)):
+            return value.isoformat()
+        return parquet_json(value)
+
+    payload = json.dumps(rows.to_dict("records"), allow_nan=False, default=json_value)
+    records = (
+        f"jsonb_populate_recordset(NULL::{CFB_SCHEMA}.recommendation_decisions, "
+        "CAST(:decisions AS jsonb)) AS fresh"
     )
     columns = ", ".join(RECOMMENDATION_COLUMNS)
-    values = ", ".join(
-        f"CAST(:{c} AS jsonb)"
-        if c in {"decision_forecast", "pricing_context"}
-        else f":{c}"
-        for c in RECOMMENDATION_COLUMNS
-    )
+    values = ", ".join(f"fresh.{c}" for c in RECOMMENDATION_COLUMNS)
+    # Publish one batch, including one cache invalidation, per table.
     updates = ", ".join(
         f"{c} = excluded.{c}"
         for c in RECOMMENDATION_COLUMNS
@@ -959,21 +933,43 @@ def _publish_recommendations(conn, decisions):
     )
     conn.execute(
         text(
-            f"INSERT INTO {CFB_SCHEMA}.recommendations ({columns}) VALUES ({values}) "
+            f"INSERT INTO {CFB_SCHEMA}.recommendation_decisions ({columns}) "
+            f"SELECT {values} FROM {records} WHERE fresh.start_date > clock_timestamp() "
+            f"ON CONFLICT (game_id, market) DO UPDATE SET {updates}, "
+            "published_at = clock_timestamp() "
+            f"WHERE {CFB_SCHEMA}.recommendation_decisions.start_date > clock_timestamp() "
+            "AND excluded.start_date > clock_timestamp() "
+            f"AND excluded.decision_at > {CFB_SCHEMA}.recommendation_decisions.decision_at"
+        ),
+        {"decisions": payload},
+    )
+    # Keep the original pick visible as void if the schedule moves.
+    conn.execute(
+        text(
+            f"UPDATE {CFB_SCHEMA}.recommendations AS original SET outcome = 'void', "
+            f"profit_units = 0, graded_at = clock_timestamp() FROM {records} "
+            "WHERE original.game_id = fresh.game_id AND original.market = fresh.market "
+            "AND original.start_date <> fresh.start_date "
+            "AND original.home_team = fresh.home_team AND original.away_team = fresh.away_team "
+            "AND original.decision_at < fresh.decision_at "
+            "AND original.status = 'recommended' AND original.outcome = 'pending'"
+        ),
+        {"decisions": payload},
+    )
+    conn.execute(
+        text(
+            f"INSERT INTO {CFB_SCHEMA}.recommendations ({columns}) "
+            f"SELECT {values} FROM {records} WHERE fresh.start_date > clock_timestamp() "
             f"ON CONFLICT (game_id, market) DO UPDATE SET {updates}, published_at = clock_timestamp() "
-            # A pick a newer model no longer makes is replaced the same way.
-            f"WHERE ({CFB_SCHEMA}.recommendations.status = 'no_play' OR :superseded) "
+            f"WHERE {CFB_SCHEMA}.recommendations.status = 'no_play' "
             f"AND {CFB_SCHEMA}.recommendations.outcome = 'pending' "
             f"AND {CFB_SCHEMA}.recommendations.start_date > clock_timestamp() "
             f"AND excluded.start_date > clock_timestamp() "
             f"AND excluded.decision_at > {CFB_SCHEMA}.recommendations.decision_at"
         ),
-        [
-            {**row, "superseded": (row["game_id"], row["market"]) in superseded}
-            for row in rows.to_dict("records")
-        ],
+        {"decisions": payload},
     )
-    return len(superseded)
+    return len(rows)
 
 
 def fetch_qb_availability(season):
@@ -1072,6 +1068,13 @@ def ensure_recommendation_schema():
         ) or not required.issubset(_table_columns(conn, "recommendations")):
             raise ValueError(
                 "Apply sql/003_recommendations.sql before refreshing CFB recommendations"
+            )
+        if not _table_exists(conn, "current_recommendations") or not required.issubset(
+            _table_columns(conn, "recommendation_decisions")
+        ):
+            raise ValueError(
+                "Apply sql/20261019183818_current_recommendations.sql before "
+                "refreshing CFB recommendations"
             )
         if not {"closing_point", "clv_points"}.issubset(
             _table_columns(conn, "recommendations")

@@ -363,6 +363,83 @@ def test_adjusted_decision_forecast_survives_database_publication():
                 ).scalar_one()
                 == h2h.pricing_context
             )
+            # A price-driven withdrawal updates the current list, never the ledger.
+            ledger_before = (
+                conn.execute(
+                    text(
+                        "SELECT to_jsonb(r) FROM cfb.recommendations r "
+                        "WHERE game_id=99000001 AND status='recommended' ORDER BY market"
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            withdrawn = build_recommendations(
+                adjusted.assign(model_version="new-model"),
+                offers.assign(price=-10000),
+                decision_at=now + pd.Timedelta(milliseconds=2),
+            )
+            assert withdrawn.status.eq("no_play").all()
+            _publish_recommendations(conn, withdrawn)
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT count(*) FROM cfb.current_recommendations "
+                        "WHERE game_id=99000001 AND status='recommended'"
+                    )
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT to_jsonb(r) FROM cfb.recommendations r "
+                        "WHERE game_id=99000001 AND status='recommended' ORDER BY market"
+                    )
+                )
+                .scalars()
+                .all()
+                == ledger_before
+            )
+            # An older run cannot resurrect a withdrawn recommendation.
+            _publish_recommendations(conn, decisions)
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT count(*) FROM cfb.current_recommendations "
+                        "WHERE game_id=99000001 AND status='recommended'"
+                    )
+                ).scalar_one()
+                == 0
+            )
+            # Anonymous app reads use the same current decisions under RLS.
+            conn.execute(text("SET LOCAL ROLE anon"))
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT count(*) FROM cfb.current_recommendations WHERE game_id=99000001"
+                    )
+                ).scalar_one()
+                == 3
+            )
+            conn.execute(text("RESET ROLE"))
+            # A late publisher cannot insert a decision for a started game.
+            late = decisions.assign(
+                game_id=99000009,
+                start_date=now - pd.Timedelta(seconds=1),
+            )
+            # The ordinary publication path already filters started games;
+            # verify the current-table SQL boundary independently as well.
+            _publish_recommendations(conn, late)
+            assert (
+                conn.execute(
+                    text(
+                        "SELECT count(*) FROM cfb.recommendation_decisions WHERE game_id=99000009"
+                    )
+                ).scalar_one()
+                == 0
+            )
+
             from sqlalchemy.exc import IntegrityError
 
             # Database eligibility enforces the no-moneyline-floor rule too.

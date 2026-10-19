@@ -133,11 +133,11 @@ def handle_refresh_picks(args: Namespace) -> None:
         projections, offers, decision_at=decided_at, games=games
     )
     with engine.begin() as conn:
-        replaced = _publish_recommendations(conn, decisions)
+        published = _publish_recommendations(conn, decisions)
     picks = decisions[decisions["status"].eq("recommended")]
     log.info(
-        f"refreshed {args.season} week {args.week}: {replaced} picks the current "
-        f"model no longer makes replaced, {len(offers)} offers on "
+        f"refreshed {args.season} week {args.week}: {published} current decisions, "
+        f"original picks preserved, {len(offers)} offers on "
         f"{int(matches['matched'].sum()) if not matches.empty else 0} matched events, "
         f"{len(picks)} qualifying picks "
         f"({picks['market'].value_counts().to_dict()}), "
