@@ -787,9 +787,7 @@ def log_war_leaders(data: dict[str, pd.DataFrame], season: int, top: int = 10) -
     measured = pipeline.war_rows(
         final,
         values,
-        war.wins_above_replacement(
-            values, data["credited"], war.season_projections(season)
-        ),
+        war.wins_above_replacement(values),
     )
     leaders = measured.sort_values("value", ascending=False).head(top)
     for rank, row in enumerate(leaders.itertuples(), start=1):
@@ -812,8 +810,7 @@ def score_cached_season(season: int) -> pd.DataFrame:
     ``scored_<season>.parquet``.
 
     Uses the latest grade model whose cutoff precedes ``season``; reads the cached
-    snapshot, target coverage and per-game credit, the season's v4 values and its
-    pregame projections. Nothing is rebuilt and no expectation table is read. The
+    snapshot, target coverage and the season's v4 values. Nothing is rebuilt and no expectation table is read. The
     output has the weekly runner's columns (trait, grade and war rows). A cached
     snapshot that is itself a scored artifact keeps only its trait rows.
     """
@@ -830,8 +827,6 @@ def score_cached_season(season: int) -> pd.DataFrame:
         snapshot,
         model,
         player_values(season),
-        store.read_processed(*season_artifact("credited", season)),
-        war.season_projections(season),
         datetime.now(timezone.utc),
         poor_target_coverage(
             store.read_processed(*season_artifact("target_coverage", season))

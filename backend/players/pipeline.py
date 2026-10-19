@@ -179,8 +179,6 @@ def score_snapshot(
     snapshot: pd.DataFrame,
     model: grade.GradeModel,
     values: pd.DataFrame,
-    credited: pd.DataFrame,
-    projections: pd.DataFrame,
     as_of: datetime,
     poor: bool,
     fbs_schools: set[str],
@@ -188,14 +186,11 @@ def score_snapshot(
     """The scored artifact for one season's weekly trait snapshots (``POSITION_TRAIT_COLUMNS``).
 
     ``snapshot`` carries ``fbs`` (from ``fbs_schools``); ``values`` are the season's v4
-    values, ``credited`` its per-game credit and ``projections`` its pregame
-    projections for WAR.
+    values, which also give WAR.
     """
     snapshot = grade.with_epa_credit(snapshot, values)
     scored = grade_rows(snapshot, model)
-    measured = war_rows(
-        snapshot, values, war.wins_above_replacement(values, credited, projections)
-    )
+    measured = war_rows(snapshot, values, war.wins_above_replacement(values))
     weighted = model.weights[model.weights["weight"].ne(0)]
     weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
     traits = snapshot[TRAIT_SNAPSHOT_COLUMNS].assign(uncertainty=np.nan)
@@ -253,8 +248,6 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         snapshot,
         model,
         backtest.player_values(season),
-        built["credited"],
-        war.season_projections(season),
         as_of,
         poor,
         fbs_schools,
