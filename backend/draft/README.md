@@ -14,8 +14,7 @@ Failures preserve the previous publication and fail the workflow.
 The database's statement trigger invalidates the site's CFB cache.
 
 Each section has its own column, `schema_version`, `board`, `meta`, `players`, `roster`, `history`, and `catalog`, so a reader detoasts only the sections it selects.
-A single upsert writes those columns and the legacy `payload`, which is built from the same values and must equal them by check constraint.
-`payload` is nullable and remains only until the site reads the section columns; then it can be dropped.
+A single upsert writes those columns; the legacy combined `payload` column was dropped once the site read the sections.
 `catalog` is the publisher's own carry-forward of the college roster catalog and is not read by the site.
 
 ```sh

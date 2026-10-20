@@ -214,8 +214,7 @@ def publish(season, bootstrap=None, dry_run=False, output=None):
     if output is not None:
         output.write_text(encoded)
     if not dry_run:
-        # One statement writes every section column and the legacy payload built
-        # from those same values, so a reader of either sees the same edition.
+        # One statement writes every section column, so readers see one edition.
         sections = {
             key: json.dumps(payload[key], allow_nan=False, separators=(",", ":"))
             for key in SECTIONS
@@ -223,22 +222,16 @@ def publish(season, bootstrap=None, dry_run=False, output=None):
         with engine.begin() as connection:
             connection.execute(
                 text("""INSERT INTO cfb.draft_publications (draft_year, schema_version,
-                    board, meta, players, roster, history, catalog, payload, updated_at)
-                SELECT :year, s.schema_version, s.board, s.meta, s.players, s.roster,
-                    s.history, s.catalog,
-                    jsonb_build_object('schema_version', s.schema_version,
-                        'board', s.board, 'meta', s.meta, 'players', s.players,
-                        'roster', s.roster, 'history', s.history, 'catalog', s.catalog),
-                    :now
-                FROM (SELECT CAST(:schema_version AS integer) AS schema_version,
-                    CAST(:board AS jsonb) AS board, CAST(:meta AS jsonb) AS meta,
-                    CAST(:players AS jsonb) AS players, CAST(:roster AS jsonb) AS roster,
-                    CAST(:history AS jsonb) AS history, CAST(:catalog AS jsonb) AS catalog) AS s
+                    board, meta, players, roster, history, catalog, updated_at)
+                VALUES (:year, CAST(:schema_version AS integer),
+                    CAST(:board AS jsonb), CAST(:meta AS jsonb),
+                    CAST(:players AS jsonb), CAST(:roster AS jsonb),
+                    CAST(:history AS jsonb), CAST(:catalog AS jsonb), :now)
                 ON CONFLICT (draft_year) DO UPDATE SET
                     schema_version=EXCLUDED.schema_version, board=EXCLUDED.board,
                     meta=EXCLUDED.meta, players=EXCLUDED.players, roster=EXCLUDED.roster,
                     history=EXCLUDED.history, catalog=EXCLUDED.catalog,
-                    payload=EXCLUDED.payload, updated_at=EXCLUDED.updated_at"""),
+                    updated_at=EXCLUDED.updated_at"""),
                 dict(
                     year=season + 1,
                     schema_version=payload["schema_version"],
