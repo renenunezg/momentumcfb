@@ -25,6 +25,8 @@ PLAYER_COLUMNS = [
     "value_above_replacement",
     "position_rank",
 ]
+# One cfb.draft_publications column per section, so readers detoast only what they select.
+SECTIONS = ("board", "meta", "players", "roster", "history", "catalog")
 HISTORY_COLUMNS = [
     "draft_year",
     "pick",
@@ -119,10 +121,16 @@ def publish(season, bootstrap=None, dry_run=False, output=None):
     now = datetime.now(timezone.utc)
     receipts = []
     with engine.connect() as connection:
-        old = connection.execute(
-            text("SELECT payload FROM cfb.draft_publications WHERE draft_year=:year"),
-            {"year": season + 1},
-        ).scalar_one_or_none()
+        old = (
+            connection.execute(
+                text(
+                    "SELECT catalog, history, meta FROM cfb.draft_publications WHERE draft_year=:year"
+                ),
+                {"year": season + 1},
+            )
+            .mappings()
+            .one_or_none()
+        )
         values = pd.read_sql(
             text(
                 "SELECT * FROM cfb.player_values WHERE season=:season AND week=(SELECT max(week) FROM cfb.player_values WHERE season=:season)"
@@ -206,12 +214,37 @@ def publish(season, bootstrap=None, dry_run=False, output=None):
     if output is not None:
         output.write_text(encoded)
     if not dry_run:
+        # One statement writes every section column and the legacy payload built
+        # from those same values, so a reader of either sees the same edition.
+        sections = {
+            key: json.dumps(payload[key], allow_nan=False, separators=(",", ":"))
+            for key in SECTIONS
+        }
         with engine.begin() as connection:
             connection.execute(
-                text("""INSERT INTO cfb.draft_publications (draft_year, payload, updated_at)
-                VALUES (:year, CAST(:payload AS jsonb), :now)
-                ON CONFLICT (draft_year) DO UPDATE SET payload=EXCLUDED.payload, updated_at=EXCLUDED.updated_at"""),
-                dict(year=season + 1, payload=encoded, now=now),
+                text("""INSERT INTO cfb.draft_publications (draft_year, schema_version,
+                    board, meta, players, roster, history, catalog, payload, updated_at)
+                SELECT :year, s.schema_version, s.board, s.meta, s.players, s.roster,
+                    s.history, s.catalog,
+                    jsonb_build_object('schema_version', s.schema_version,
+                        'board', s.board, 'meta', s.meta, 'players', s.players,
+                        'roster', s.roster, 'history', s.history, 'catalog', s.catalog),
+                    :now
+                FROM (SELECT CAST(:schema_version AS integer) AS schema_version,
+                    CAST(:board AS jsonb) AS board, CAST(:meta AS jsonb) AS meta,
+                    CAST(:players AS jsonb) AS players, CAST(:roster AS jsonb) AS roster,
+                    CAST(:history AS jsonb) AS history, CAST(:catalog AS jsonb) AS catalog) AS s
+                ON CONFLICT (draft_year) DO UPDATE SET
+                    schema_version=EXCLUDED.schema_version, board=EXCLUDED.board,
+                    meta=EXCLUDED.meta, players=EXCLUDED.players, roster=EXCLUDED.roster,
+                    history=EXCLUDED.history, catalog=EXCLUDED.catalog,
+                    payload=EXCLUDED.payload, updated_at=EXCLUDED.updated_at"""),
+                dict(
+                    year=season + 1,
+                    schema_version=payload["schema_version"],
+                    now=now,
+                    **sections,
+                ),
             )
     return dict(
         draft_year=season + 1,
