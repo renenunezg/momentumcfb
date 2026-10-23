@@ -22,7 +22,9 @@ create policy public_read on cfb.live_win_probability
 -- Dispatch only around unfinished games, and only when no worker is alive.
 -- A terminal row ('Final' or 'Off') ends a game's claim on the dispatcher, and
 -- the six-hour bound ends it for a game no worker ever reached.
-select cron.schedule('cfb-live-win-probability-dispatch', '*/5 * * * *', $dispatch$
+-- Minute offset 1: the NHL, NFL, and MLB dispatchers take offsets 0, 2, and 3
+-- so the four never start on the same minute of the shared database.
+select cron.schedule('cfb-live-win-probability-dispatch', '1-59/5 * * * *', $dispatch$
   select net.http_post(
     url := 'https://api.github.com/repos/renenunezg/momentumcfb/dispatches',
     headers := jsonb_build_object(
