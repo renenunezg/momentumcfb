@@ -1,9 +1,17 @@
 """Split each play's EPA among the players the stat feed credits on it.
 
-Shares are fixed, documented assumptions rather than fitted values: there is
-no ground truth for who was responsible on a play, so no dataset can fit
-them directly. They live in one table so a future tuning run against the
-split-half reliability diagnostic can change them without touching code.
+There is no ground truth for who was responsible on a play, so the shares
+are conventions checked against two things the data can measure: whether
+the resulting per-game rates repeat (odd/even split-half and year-to-year on
+2020-2023) and whether they agree with the next NFL draft. The 2026-10-26
+run showed that reliability alone is degenerate (it zeroes rare costly
+events such as interceptions, which repeat poorly per game but are real
+value), so the structure is fixed by hand and only its free parts were
+fitted: the passer takes one share of every pass attempt whatever its
+outcome, and the receiver's share of an incompletion is zero because that
+credit repeated worse than noise and the feed's target tagging varied from
+19% to 90% of incompletions by season. The passer-versus-receiver level and
+the rush share were flat on every criterion and keep their original values.
 Offensive shares sum to at most one, with the remainder attributed to the
 unit. Defensive credit exists only on the disruption plays the feed tags
 (sacks, interceptions, pass breakups, forced and recovered fumbles); the
@@ -18,12 +26,13 @@ import pandas as pd
 # that kind carry no credit, so a fumbled reception charges only the fumbler.
 OFFENSE_SHARES: dict[tuple[str, str], tuple[str, float]] = {
     ("fumble", "Fumble"): ("fumbler", 1.0),
-    ("interception", "Interception Thrown"): ("passer", 0.8),
+    ("interception", "Interception Thrown"): ("passer", 0.6),
     ("sack", "Sack Taken"): ("passer", 0.5),
     ("completion", "Completion"): ("passer", 0.6),
     ("completion", "Reception"): ("receiver", 0.4),
-    ("incompletion", "Incompletion"): ("passer", 0.7),
-    ("incompletion", "Target"): ("target", 0.3),
+    ("incompletion", "Incompletion"): ("passer", 0.6),
+    # A target row carries the receiver's presence and play count, not credit.
+    ("incompletion", "Target"): ("target", 0.0),
     ("rush", "Rush"): ("rusher", 0.7),
     ("return", "Kickoff Return"): ("returner", 1.0),
     ("return", "Punt Return"): ("returner", 1.0),

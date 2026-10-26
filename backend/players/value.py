@@ -31,14 +31,31 @@ from backend.players.ingest import read_season_source, read_weekly
 
 log = logging.getLogger(__name__)
 
-MODEL_VERSION = "cfb_player_value_v4"
-# The opponent prior is built the same way under v3 and v4, so a frozen v3
-# artifact stays valid; only the in-season use of it changed in v4.
-PRIOR_COMPATIBLE_VERSIONS = frozenset({"cfb_player_value_v3", MODEL_VERSION})
+MODEL_VERSION = "cfb_player_value_v5"
+# The opponent prior is built the same way under v3, v4 and v5, so a frozen
+# artifact stays valid; v4 changed the in-season use of it and v5 the credit
+# shares and the shrinkage prior, neither of which enters the prior.
+PRIOR_COMPATIBLE_VERSIONS = frozenset(
+    {"cfb_player_value_v3", "cfb_player_value_v4", MODEL_VERSION}
+)
 # Games are the opportunity unit for replacement and shrinkage: a defender's
 # credited plays are disruption events, not snaps, so plays cannot be the
 # denominator on one side of the ball and the opportunity count on the other.
-PRIOR_GAMES = 4.0
+# The prior is the ratio of game-to-game noise variance to between-player
+# signal variance of per-game credit, estimated on 2020-2023 and checked by
+# the out-of-sample error of predicting the 2025 rate from 2024, where every
+# group but QB beat a flat four games. Defenders' credit is rare events, so
+# their noise is large relative to the spread of true ability.
+PRIOR_GAMES = {
+    "QB": 3.9,
+    "WR": 4.9,
+    "TE": 8.5,
+    "RB": 11.1,
+    "LB": 13.9,
+    "DL": 17.2,
+    "DB": 26.4,
+}
+DEFAULT_PRIOR_GAMES = 4.0
 REPLACEMENT_PERCENTILE = 0.30
 QUALIFYING_GAMES = 6
 MIN_QUALIFIED_PLAYERS = 10
@@ -662,9 +679,10 @@ def _rank_snapshot(week_frame: pd.DataFrame, week: int) -> pd.DataFrame:
         include_groups=False,
     )
     frame["group_mean"] = frame["position_group"].map(group_mean)
+    prior_games = frame["position_group"].map(PRIOR_GAMES).fillna(DEFAULT_PRIOR_GAMES)
     frame["shrunk_per_game"] = (
-        frame["games"] * frame["adjusted_per_game"] + PRIOR_GAMES * frame["group_mean"]
-    ) / (frame["games"] + PRIOR_GAMES)
+        frame["games"] * frame["adjusted_per_game"] + prior_games * frame["group_mean"]
+    ) / (frame["games"] + prior_games)
 
     # Early in the season everyone qualifies; by mid-season a replacement
     # must have played half the weeks so a one-game cameo cannot set it.

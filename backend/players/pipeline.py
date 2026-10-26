@@ -26,6 +26,7 @@ META_COLUMNS = [
     "heisman_model_version",
     "credit_shares",
     "prior_games",
+    "prior_games_by_group",
     "replacement_percentile",
     "qualifying_games",
     "fcs_opponent_weight",
@@ -377,7 +378,8 @@ def run_heisman(season: int, week: int | None, as_of: datetime) -> pd.DataFrame:
                         "defense": DEFENSE_ROLES,
                     }
                 ),
-                "prior_games": value.PRIOR_GAMES,
+                "prior_games": None,
+                "prior_games_by_group": json.dumps(value.PRIOR_GAMES),
                 "replacement_percentile": value.REPLACEMENT_PERCENTILE,
                 "qualifying_games": value.QUALIFYING_GAMES,
                 "fcs_opponent_weight": value.FCS_OPPONENT_WEIGHT,

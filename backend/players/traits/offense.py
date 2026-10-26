@@ -234,7 +234,8 @@ def target_rows(
     A credited target is the receiver's own credit row. A recovered target on
     an incompletion with no target row takes the passer row's game keys,
     weight, and situation, and its EPA and WPA columns are the passer row's
-    scaled from the passer's share to the 0.3 target share: credit and its
+    scaled from the passer's share to the target share (zero since player value
+    v5, so a target carries presence and count but no credit): credit and its
     opponent adjustment are linear in the share, so this is the row the feed
     would have produced. Under poor coverage only receptions count.
     """
