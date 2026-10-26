@@ -884,6 +884,7 @@ def publish_players(season: int) -> dict[str, int]:
                 index=False,
                 chunksize=2000,
             )
+    _reclaim_space(engine, by_season)
     with engine.connect() as conn:
         return {
             table: int(
@@ -893,6 +894,23 @@ def publish_players(season: int) -> dict[str, int]:
             )
             for table in (*by_season, *full_refresh)
         }
+
+
+def _reclaim_space(engine, tables) -> None:
+    """Return the pages a delete-and-append publish leaves behind.
+
+    The season's rows are deleted and re-inserted inside one transaction, so the
+    new rows cannot reuse the old pages and each table settles at about twice
+    its data. VACUUM FULL cannot run inside a transaction, hence autocommit; the
+    tables are tens of megabytes, so the exclusive lock lasts about a second,
+    which the site's timed cache covers. Housekeeping never fails a publish.
+    """
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            for table in tables:
+                conn.execute(text(f"VACUUM FULL {CFB_SCHEMA}.{table}"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"could not reclaim space after the player publish: {exc}")
 
 
 def _publish_recommendations(conn, decisions):
