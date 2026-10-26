@@ -99,6 +99,8 @@ ROLE_GROUPS = {
     "fumble_forcer": "LB",
     "fumble_recoverer": "LB",
 }
+# Groups whose box-score appearance counts as a game played (see box_presence).
+DEFENSIVE_GROUPS = ("DL", "LB", "DB")
 CHANNEL_UNITS = {
     "rush": ("rush_offense", "rush_defense", "rush_plays"),
     "pass": ("pass_offense", "pass_defense", "pass_plays"),
@@ -580,6 +582,52 @@ def box_disruptions(
     )
 
 
+def box_presence(
+    box: pd.DataFrame,
+    credited: pd.DataFrame,
+    games: pd.DataFrame,
+    roster: pd.DataFrame,
+) -> pd.DataFrame:
+    """Zero-credit rows for defenders' box appearances without a credited event.
+
+    A defender with a defensive box row (any stat, a zero included) played the
+    game whether or not he made a credited play. Without this row his per-game
+    rate divides by his event games only, which inflates the rate and the
+    split-half noise for everyone whose production is a handful of events.
+    Only players the roster lists at a defensive position get these rows: a
+    receiver or kicker with a kick-coverage tackle is not thereby present on
+    offense, and the offensive groups stay exactly as the play feed credits them.
+    """
+    defenders = roster[roster["position"].map(POSITION_GROUPS).isin(DEFENSIVE_GROUPS)]
+    defender_ids = set(defenders["id"].astype(str))
+    defensive = box[box["category"].eq("defensive")]
+    seen = defensive[["game_id", "team", "athlete_id", "athlete_name"]].drop_duplicates(
+        ["game_id", "athlete_id"]
+    )
+    seen = seen.assign(athlete_id=seen["athlete_id"].astype(str))
+    seen = seen[seen["athlete_id"].isin(defender_ids)]
+    have = credited[["game_id", "athlete_id"]].drop_duplicates()
+    missing = seen.merge(have, on=["game_id", "athlete_id"], how="left", indicator=True)
+    missing = missing[missing["_merge"].eq("left_only")].drop(columns="_merge")
+    out = missing.merge(games[["game_id", "model_week"]], on="game_id", how="inner")
+    return pd.DataFrame(
+        {
+            "game_id": out["game_id"],
+            "athlete_id": out["athlete_id"],
+            "athlete_name": out["athlete_name"],
+            "team": out["team"],
+            "model_week": out["model_week"],
+            "side": "defense",
+            "role": "box_presence",
+            "plays": 0.0,
+            "raw_epa": 0.0,
+            "adjusted_epa": 0.0,
+            "wpa": 0.0,
+            "weight": 1.0,
+        }
+    )
+
+
 def _position_groups(roster: pd.DataFrame, credited: pd.DataFrame) -> pd.DataFrame:
     positions = roster[["id", "position"]].rename(columns={"id": "athlete_id"})
     positions["athlete_id"] = positions["athlete_id"].astype(str)
@@ -641,6 +689,9 @@ def _rank_snapshot(week_frame: pd.DataFrame, week: int) -> pd.DataFrame:
     frame["value_above_replacement"] = frame["games"] * (
         frame["shrunk_per_game"] - frame["replacement_per_game"]
     )
+    # A defender present only through box_presence rows has set the group mean
+    # and the replacement level; he has nothing credited to rank or publish.
+    frame = frame[frame["event_rows"].gt(0)]
     frame = frame.sort_values(
         ["value_above_replacement", "plays"], ascending=[False, False]
     ).reset_index(drop=True)
@@ -667,6 +718,7 @@ def weekly_snapshots(
             wpa=("wpa", "sum"),
             fcs_plays=("fcs_plays", "sum"),
             games=("game_id", "nunique"),
+            event_rows=("role", lambda roles: int(roles.ne("box_presence").sum())),
         )
         .reset_index()
     )
@@ -696,6 +748,7 @@ def weekly_snapshots(
                 wpa=("wpa", "sum"),
                 fcs_plays=("fcs_plays", "sum"),
                 games=("games", "sum"),
+                event_rows=("event_rows", "sum"),
             )
             .reset_index()
         )
@@ -804,9 +857,11 @@ def build_player_values(season: int, as_of: datetime) -> dict[str, pd.DataFrame]
         "weight",
     ]
     credited = pd.concat([credit[columns], disruptions[columns]], ignore_index=True)
+    roster = read_season_source(season, "roster")
+    presence = box_presence(box, credited, games, roster)
+    credited = pd.concat([credited, presence[columns]], ignore_index=True)
     credited["fcs_plays"] = np.where(credited["weight"].lt(1.0), credited["plays"], 0.0)
 
-    roster = read_season_source(season, "roster")
     teams = read_season_source(season, "teams")
     positions = _position_groups(roster, credited)
     snapshots = weekly_snapshots(credited, positions, teams, season, as_of)

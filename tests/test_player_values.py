@@ -293,6 +293,7 @@ def test_shrinkage_and_replacement_baseline():
             "wpa": 0.0,
             "fcs_plays": 0.0,
             "games": [games] * 11 + [1],
+            "event_rows": 1,
         }
     )
     snapshot = value._rank_snapshot(frame, week=10).set_index("athlete_id")
