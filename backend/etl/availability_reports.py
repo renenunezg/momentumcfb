@@ -297,8 +297,16 @@ def collect_quarterback_reports(
     fetched_at = fetched_at or datetime.now(timezone.utc)
     frames = []
     for conference in CONFERENCES:
-        payload = fetch_conference_report(conference, legacy=legacy, session=session)
-        frame = parse_report(payload, conference)
+        # One conference's outage or malformed reply must not drop the others;
+        # its rows simply stay as the table last saw them.
+        try:
+            payload = fetch_conference_report(
+                conference, legacy=legacy, session=session
+            )
+            frame = parse_report(payload, conference)
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            log.warning("%s: availability archive unavailable: %s", conference, exc)
+            continue
         log.info(
             "%s: %d report rows, weeks %s",
             conference,
@@ -306,6 +314,8 @@ def collect_quarterback_reports(
             sorted(frame["vendor_week"].unique().tolist()),
         )
         frames.append(frame)
+    if not frames:
+        raise RuntimeError("no conference availability archive could be read")
     reports = pd.concat(frames, ignore_index=True)
     quarterbacks = match_quarterbacks(reports, load_roster(season))
     quarterbacks = map_games(quarterbacks, store.read_games(season))
