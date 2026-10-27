@@ -250,6 +250,15 @@ jobs:
       - name: Rebuild features
         run: poetry run python -m backend features --seasons "$SEASON"
 
+      # Power 4 availability reports for starting quarterbacks. The vendor's
+      # public archive is undocumented, so its outage must not suppress an
+      # otherwise valid weekly forecast; the table simply keeps its last rows.
+      - name: Collect quarterback availability reports
+        continue-on-error: true
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
+        run: poetry run python -m backend qb-availability-reports --season "$SEASON" --write
+
       - name: Restore paid-source receipts
         uses: actions/cache@v4
         with:

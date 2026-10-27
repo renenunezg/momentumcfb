@@ -3,6 +3,7 @@
 from argparse import Namespace
 from collections.abc import Callable
 
+from backend.commands.availability import handle_qb_availability_reports
 from backend.commands.grading import (
     handle_diagnose,
     handle_grade,
@@ -71,6 +72,7 @@ HANDLERS: dict[str, Handler] = {
     "cfbd-live-pilot": handle_live_pilot,
     "ingest": handle_ingest,
     "qb-starters": handle_qb_starters,
+    "qb-availability-reports": handle_qb_availability_reports,
     "features": handle_features,
     "fit": handle_fit,
     "weekly-update": handle_weekly_update,

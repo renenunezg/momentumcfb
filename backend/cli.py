@@ -412,6 +412,19 @@ def _add_publish_commands(sub) -> None:
         help="list teams whose last box-score starting quarterback changed",
     )
     qb_starters.add_argument("--season", type=int, required=True)
+    qb_reports = sub.add_parser(
+        "qb-availability-reports",
+        help="collect Power 4 availability reports for starting quarterbacks",
+    )
+    qb_reports.add_argument("--season", type=int, required=True)
+    qb_reports.add_argument(
+        "--write", action="store_true", help="insert or update cfb.qb_availability"
+    )
+    qb_reports.add_argument(
+        "--legacy",
+        action="store_true",
+        help="read the previous season's archive (automatic for past seasons)",
+    )
 
     player_prior = sub.add_parser(
         "player-prior", help="Build prior-season player opponent effects offline"
