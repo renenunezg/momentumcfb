@@ -121,9 +121,15 @@ def apply_qb_availability(
         weights = pd.to_numeric(out["market_total_weight"], errors="raise")
         if not weights.between(0, 1).all():
             raise ValueError("Invalid published total blend weight")
+        total_share = 1 - weights
+        if "market_history_total_weight" in out:
+            # Earlier weeks' totals cannot know this week's report either.
+            total_share = total_share * (
+                1.0 - out["market_history_total_weight"].fillna(0.0)
+            )
         margin = out["market_informed_home_margin"]
         out["market_informed_total"] = np.maximum(
-            out["market_informed_total"] - (1 - weights) * (home_loss + away_loss),
+            out["market_informed_total"] - total_share * (home_loss + away_loss),
             margin.abs(),
         )
         out["market_informed_home_points"] = (out["market_informed_total"] + margin) / 2

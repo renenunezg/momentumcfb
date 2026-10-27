@@ -378,11 +378,13 @@ def handle_market_prior(args: Namespace) -> None:
     )
     loaded = load_market_prior(args.season)
     log.info(
-        "%s market_prior: %d teams from the %d closing lines (chain from %d)",
+        "%s market_prior: %d teams from the %d closing lines (chain from %d), "
+        "%d with a carried total rating",
         args.season,
         len(loaded),
         int(loaded["season"].iloc[0]),
         int(loaded["chain_start_season"].iloc[0]),
+        int(loaded["market_total_rating"].notna().sum()),
     )
     log.info(
         loaded.sort_values("market_rating", ascending=False)[

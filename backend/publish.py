@@ -127,6 +127,8 @@ GAME_PROJECTIONS_OPTIONAL_COLUMNS = [
     "market_informed_home_spread",
     "market_history_home_margin",
     "market_history_weight",
+    "market_history_total",
+    "market_history_total_weight",
     "market_informed_total",
     "market_total_weight",
     "market_informed_home_points",

@@ -52,14 +52,18 @@ def add_market_informed_margins(
     weight: float = DEFAULT_MARKET_WEIGHT,
     history: pd.Series | None = None,
     history_weight: float = 0.0,
+    total_history: pd.Series | None = None,
+    total_history_weight: float = 0.0,
 ) -> pd.DataFrame:
     """Add pure and market-informed margin, total, and score fields.
 
     ``history`` maps game ID to the margin implied by the market-history
     rating (earlier games' closing lines, never this game's). It replaces
     ``history_weight`` of the pure margin on the model side of the blend and
-    also informs games without a current line. The market-informed total
-    moves the model total toward the median posted total, and the
+    also informs games without a current line. ``total_history`` does the
+    same for the total with the market-history total rating, replacing
+    ``total_history_weight`` of the model total. The market-informed total
+    moves that model side toward the median posted total, and the
     market-informed scores are the pair with that total and the
     market-informed margin.
     """
@@ -67,6 +71,8 @@ def add_market_informed_margins(
         raise ValueError(f"market weight must be between 0 and {MARKET_WEIGHT_CAP:g}")
     if not 0 <= history_weight < 1:
         raise ValueError("market history weight must be in [0, 1)")
+    if not 0 <= total_history_weight < 1:
+        raise ValueError("market total history weight must be in [0, 1)")
     required = {"game_id", "home_margin", "home_spread", "model_total"}
     missing = sorted(required - set(projections.columns))
     if missing:
@@ -107,13 +113,27 @@ def add_market_informed_margins(
         if "game_id" in offers
         else {}
     )
+    out["market_history_total"] = (
+        np.nan if total_history is None else out["game_id"].map(total_history)
+    )
+    has_total_history = out["market_history_total"].notna()
+    out["market_history_total_weight"] = np.where(
+        has_total_history, total_history_weight, 0.0
+    )
+    model_total_side = np.where(
+        has_total_history,
+        (1.0 - total_history_weight) * model_total
+        + total_history_weight * out["market_history_total"],
+        model_total,
+    )
     out["market_total_weight"] = np.where(
         market_total.notna(), TOTAL_MARKET_WEIGHT, 0.0
     )
     blended_total = np.where(
         market_total.notna(),
-        (1.0 - TOTAL_MARKET_WEIGHT) * model_total + TOTAL_MARKET_WEIGHT * market_total,
-        model_total,
+        (1.0 - TOTAL_MARKET_WEIGHT) * model_total_side
+        + TOTAL_MARKET_WEIGHT * market_total,
+        model_total_side,
     )
     # A total below the margin would publish a negative score.
     margin = out["market_informed_home_margin"]

@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,9 +20,12 @@ from backend.model.market_blend import (
     align_ratings_to_forecast,
 )
 from backend.model.market_history import (
+    MARKET_TOTAL_PRIOR_COLUMN,
     fit_market_history,
+    fit_market_total_history,
     history_weight,
     load_market_prior,
+    total_history_weight,
 )
 from backend.model.preseason import (
     MISSING_INPUT_COLUMNS,
@@ -33,6 +37,8 @@ from backend.model.preseason import (
 from backend.model.process import load_process_prior
 from backend.model.unit_ratings import fit_unit_ratings
 from backend.odds.markets import compare_priced_offers, flatten_odds_api_offers
+
+log = logging.getLogger(__name__)
 
 MAX_MISSING_INPUT_COUNT = len(MISSING_INPUT_COLUMNS)
 
@@ -389,9 +395,17 @@ def run_weekly_forecast(
             "the Odds API returned no priced spread matched to the forecast week"
         )
     market_prior = load_market_prior(season)
+    if MARKET_TOTAL_PRIOR_COLUMN not in market_prior:
+        log.warning(
+            "%s market_prior predates the market-history total; rebuild it with "
+            "`python -m backend market-prior --season %s` so totals carry a prior",
+            season,
+            season,
+        )
+    season_lines = store.read_lines(season)
     market_fit = fit_market_history(
         games,
-        store.read_lines(season),
+        season_lines,
         forecast_week,
         pd.Timestamp(created_at),
         market_prior,
@@ -399,11 +413,23 @@ def run_weekly_forecast(
     market_projections = (
         market_fit.project(target) if market_fit is not None else pd.DataFrame()
     )
+    total_fit = fit_market_total_history(
+        games,
+        season_lines,
+        forecast_week,
+        pd.Timestamp(created_at),
+        market_prior,
+    )
+    total_projections = (
+        total_fit.project(target) if total_fit is not None else pd.DataFrame()
+    )
     projections = add_market_informed_margins(
         projections,
         offers,
         history=market_projections.get("market_history_home_margin"),
         history_weight=history_weight(forecast_week),
+        total_history=total_projections.get("market_history_total"),
+        total_history_weight=total_history_weight(forecast_week),
     )
     comparisons = compare_priced_offers(projections, offers)
 
@@ -524,6 +550,10 @@ def run_weekly_forecast(
                 market_fit.ratings() if market_fit is not None else pd.DataFrame()
             ),
             "market_line_forecasts": market_projections.reset_index(names="game_id"),
+            "market_total_ratings": (
+                total_fit.ratings() if total_fit is not None else pd.DataFrame()
+            ),
+            "market_total_forecasts": total_projections.reset_index(names="game_id"),
             "process_prior": process_prior,
             "process_training_features": process_team_games[
                 process_team_games["game_id"].isin(
