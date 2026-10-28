@@ -481,6 +481,38 @@ def _add_publish_commands(sub) -> None:
         help="rebuild each season's trait artifacts even when they are cached",
     )
 
+    validation = sub.add_parser(
+        "position-grade-validation",
+        help="score the frozen grade model against its baselines on local artifacts",
+    )
+    validation.add_argument(
+        "--eval-kind",
+        choices=("next_season", "rest_of_season"),
+        required=True,
+        help="next_season takes two consecutive seasons; rest_of_season any seasons",
+    )
+    validation.add_argument("--seasons", type=int, nargs="+", required=True)
+    validation.add_argument(
+        "--holdout-status",
+        required=True,
+        help='what the seasons are to the model, e.g. "pre-registered, untouched"',
+    )
+    validation.add_argument(
+        "--qbr-csv",
+        default=None,
+        help="nflverse college QBR season table; restricts QBs to those with a QBR",
+    )
+    validation.add_argument(
+        "--model",
+        default=None,
+        help="grade model JSON; default: latest before the last season",
+    )
+
+    sub.add_parser(
+        "publish-grade-validation",
+        help="publish every local grade validation row to cfb.player_grade_validation",
+    )
+
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="backend")

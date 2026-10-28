@@ -898,6 +898,52 @@ def publish_players(season: int) -> dict[str, int]:
         }
 
 
+def publish_grade_validation() -> int:
+    """Publish every local grade validation row to ``cfb.player_grade_validation``.
+
+    Rows replace the stored rows with the same key (model version, input value
+    version, evaluation kind, seasons, group), so a rerun of one evaluation never
+    touches another's rows. The table must exist: a validation row that silently
+    went nowhere would leave the site describing an unvalidated grade.
+    """
+    from backend.db import engine
+    from backend.players.traits import validation
+
+    rows = validation.read_validation_artifacts()
+    if rows.empty:
+        raise ValueError(
+            "no grade validation artifact; run position-grade-validation first"
+        )
+    with engine.begin() as conn:
+        if not _table_exists(conn, "player_grade_validation"):
+            raise ValueError(
+                f"{CFB_SCHEMA}.player_grade_validation is absent; apply "
+                "sql/20261027220000_player_grade_validation.sql first"
+            )
+        keys = rows[validation.KEY_COLUMNS].drop_duplicates()
+        where = " AND ".join(
+            f"{column} = :{column}" for column in validation.KEY_COLUMNS
+        )
+        for key in keys.to_dict(orient="records"):
+            conn.execute(
+                text(f"DELETE FROM {CFB_SCHEMA}.player_grade_validation WHERE {where}"),
+                key,
+            )
+        rows.to_sql(
+            "player_grade_validation",
+            con=conn,
+            schema=CFB_SCHEMA,
+            if_exists="append",
+            index=False,
+        )
+    with engine.connect() as conn:
+        return int(
+            conn.execute(
+                text(f"SELECT count(*) FROM {CFB_SCHEMA}.player_grade_validation")
+            ).scalar()
+        )
+
+
 def _reclaim_space(engine, tables) -> None:
     """Return the pages a delete-and-append publish leaves behind.
 

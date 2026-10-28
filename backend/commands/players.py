@@ -145,3 +145,30 @@ def handle_position_traits(args: Namespace) -> None:
     for season in args.seasons:
         scored = run_position_traits(season, datetime.now(timezone.utc))
         log.info(f"position traits {season}: {len(scored)} rows written")
+
+
+def handle_position_grade_validation(args: Namespace) -> None:
+    from pathlib import Path
+
+    from backend.players.traits import validation
+
+    rows = validation.run_validation(
+        args.eval_kind,
+        args.seasons,
+        args.holdout_status,
+        qbr_path=Path(args.qbr_csv) if args.qbr_csv else None,
+        model_path=Path(args.model) if args.model else None,
+    )
+    log.info(
+        "grade validation %s %s:\n%s",
+        args.eval_kind,
+        validation.seasons_label(args.seasons),
+        rows.drop(columns=["model_sha", "computed_at"]).round(3).to_string(index=False),
+    )
+
+
+def handle_publish_grade_validation(args: Namespace) -> None:
+    from backend.publish import publish_grade_validation
+
+    stored = publish_grade_validation()
+    log.info(f"cfb.player_grade_validation: {stored} rows stored")

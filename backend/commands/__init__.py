@@ -39,8 +39,10 @@ from backend.commands.players import (
     handle_ingest_portal,
     handle_player_prior,
     handle_player_values,
+    handle_position_grade_validation,
     handle_position_traits,
     handle_position_traits_fit,
+    handle_publish_grade_validation,
     handle_publish_players,
     handle_qb_starters,
 )
@@ -110,6 +112,8 @@ HANDLERS: dict[str, Handler] = {
     "publish-players": handle_publish_players,
     "position-traits": handle_position_traits,
     "position-traits-fit": handle_position_traits_fit,
+    "position-grade-validation": handle_position_grade_validation,
+    "publish-grade-validation": handle_publish_grade_validation,
 }
 
 
