@@ -9,7 +9,10 @@ from dataclasses import dataclass
 
 # v1 was the 2026-10-16 fit on CFBD's pre-revision EPA; v1.1 is the 2026-10-17 refit
 # of the same code on the revised EPA, the model that has been served since. The
-# string tells served rows apart; it is checked, never derived, on load.
+# string tells served rows apart; it is checked, never derived, on load. Its
+# weights were fit on credit before untagged interceptions were charged to the
+# passer (2026-10-28); the ``epa.credit`` trait is z-scored within each week's
+# pool, so the level shift cancels and only the rank moves reach the grade.
 MODEL_VERSION = "cfb_position_traits_v1.1"
 AGGREGATES = frozenset({"rate", "quantile20", "share_of_games", "latest"})
 

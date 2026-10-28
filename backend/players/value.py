@@ -32,6 +32,10 @@ from backend.players.ingest import read_season_source, read_weekly
 log = logging.getLogger(__name__)
 
 MODEL_VERSION = "cfb_player_value_v5"
+# Since 2026-10-28 v5 credit also charges the passer for the play-by-play
+# interceptions the play-stats feed left untagged (credit.untagged_interceptions).
+# That widens the coverage of an existing share; the shares, the shrinkage prior
+# and the replacement baseline are unchanged, so the version string is too.
 # The opponent prior is built the same way under v3, v4 and v5, so a frozen
 # artifact stays valid; v4 changed the in-season use of it and v5 the credit
 # shares and the shrinkage prior, neither of which enters the prior.
@@ -45,7 +49,10 @@ PRIOR_COMPATIBLE_VERSIONS = frozenset(
 # signal variance of per-game credit, estimated on 2020-2023 and checked by
 # the out-of-sample error of predicting the 2025 rate from 2024, where every
 # group but QB beat a flat four games. Defenders' credit is rare events, so
-# their noise is large relative to the spread of true ability.
+# their noise is large relative to the spread of true ability. Re-estimated on
+# credit with the untagged interceptions charged, the ratio is QB 4.4 and TE 9.0
+# with the rest unchanged, and the 2024 to 2025 error moves under one percent
+# either way, so the values below stand.
 PRIOR_GAMES = {
     "QB": 3.9,
     "WR": 4.9,

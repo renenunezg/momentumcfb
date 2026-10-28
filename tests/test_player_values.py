@@ -411,3 +411,58 @@ def test_opponent_effect_is_the_ridge_fit_around_the_regressed_prior():
             assert abs(late.loc[team, column]) < abs(
                 anchor.set_index("team").loc[team, column]
             )
+
+
+def _pick_play(play_id, game_id, play_type, play_text, offense="Home", defense="Away"):
+    return {
+        **_play(str(play_id), -3.0, offense=offense, defense=defense),
+        "game_id": game_id,
+        "play_type": play_type,
+        "play_text": play_text,
+    }
+
+
+PICK_PLAYS = pd.DataFrame(
+    [
+        _pick_play(101, 1, "Pass Reception", "John Smith pass complete to A. Back"),
+        _pick_play(
+            102, 1, "Interception Return", "John Smith pass intercepted by C. Back"
+        ),
+        _pick_play(103, 1, "Pass Incompletion", "Pat Jones pass incomplete"),
+        _pick_play(104, 1, "Interception", "Pass intercepted by C. Back"),
+        _pick_play(
+            105, 1, "Interception Return", "John Smith pass intercepted by C. Back"
+        ),
+        _pick_play(
+            201, 2, "Interception Return", "Sam Lee pass intercepted by D. Back"
+        ),
+    ]
+)
+PICK_STATS = pd.DataFrame(
+    [
+        {**_stat("101", "qb1", "Home", "Completion"), "athlete_name": "John Smith"},
+        {**_stat("101", "rb1", "Home", "Reception"), "athlete_name": "A. Back"},
+        {**_stat("103", "qb2", "Home", "Incompletion"), "athlete_name": "Pat Jones"},
+        {
+            **_stat("105", "qb1", "Home", "Interception Thrown"),
+            "athlete_name": "John Smith",
+        },
+        {**_stat("105", "cb1", "Away", "Interception"), "athlete_name": "C. Back"},
+    ]
+)
+
+
+def test_untagged_interceptions_are_charged_to_the_passer():
+    credit = assign_play_credit(PICK_STATS, PICK_PLAYS)
+    thrown = credit[
+        credit["role"].eq("passer") & credit["play_id"].isin(["102", "104", "105"])
+    ]
+    charged = thrown.set_index("play_id")["athlete_id"]
+    # The play text names the passer; a text with no roster match falls back to
+    # the offense's passer on the nearest tagged pass (103, Pat Jones).
+    assert charged.to_dict() == {"102": "qb1", "104": "qb2", "105": "qb1"}
+    # A tagged interception is charged once, with the interception share.
+    assert thrown["play_id"].is_unique
+    assert np.allclose(thrown["credit_epa"], -3.0 * 0.6)
+    # Game 2 has no play stats, so its interception stays with the unit.
+    assert not credit["play_id"].eq("201").any()

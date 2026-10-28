@@ -16,7 +16,17 @@ Offensive shares sum to at most one, with the remainder attributed to the
 unit. Defensive credit exists only on the disruption plays the feed tags
 (sacks, interceptions, pass breakups, forced and recovered fumbles); the
 feed never tags tacklers, so every other defensive play belongs to the unit.
+
+The feed also drops interceptions. Relative to completions it tags
+"Interception Thrown" at 1.2-2.0% in 2021-2023 and 3.0-3.9% from 2024, while
+play-by-play has picks on about 4.7% of receptions every season; in 2022-2023
+two thirds of the picks in games the feed covers carry no stat row at all. An
+untagged pick would cost the passer nothing, so in every covered game each
+play-by-play interception without a thrown row is charged to the passer that
+the play text names, or else to the offense's passer on the nearest pass.
 """
+
+import re
 
 import numpy as np
 import pandas as pd
@@ -82,6 +92,79 @@ _KIND_BY_STAT = {
 }
 _KIND_BY_STAT.update({"Kickoff Return": "return", "Punt Return": "return"})
 
+PASSER_STATS = ("Completion", "Incompletion", "Sack Taken", "Interception Thrown")
+_INTERCEPTED_BY = re.compile(r"^\s*(.+?)\s+pass\s+intercepted", re.IGNORECASE)
+_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+STAT_COLUMNS = ["play_id", "athlete_id", "athlete_name", "team", "stat_type", "stat"]
+
+
+def _name_key(name) -> str:
+    letters = re.sub(r"[^a-z ]", "", str(name).lower().replace("-", " "))
+    return " ".join(t for t in letters.split() if t not in _NAME_SUFFIXES)
+
+
+def untagged_interceptions(
+    play_stats: pd.DataFrame, plays: pd.DataFrame
+) -> pd.DataFrame:
+    """Interception Thrown rows for play-by-play picks the feed left untagged.
+
+    Only games the feed covers are filled, so a passer is never charged for a
+    pick in a game where none of his other throws carry credit. The passer is
+    the offense's passer in that game whose name the play text gives, or the
+    offense's passer on the nearest tagged pass when the name does not match.
+    """
+    empty = pd.DataFrame(columns=STAT_COLUMNS)
+    if play_stats.empty or not {"play_type", "play_text"}.issubset(plays.columns):
+        return empty
+    stats = play_stats[STAT_COLUMNS].assign(play_id=lambda d: d["play_id"].astype(str))
+    frame = plays[["id", "game_id", "offense", "play_type", "play_text"]].assign(
+        play_id=lambda d: d["id"].astype(str),
+        order=lambda d: pd.to_numeric(d["id"], errors="coerce"),
+    )
+    covered = frame.loc[frame["play_id"].isin(set(stats["play_id"])), "game_id"]
+    thrown = set(stats.loc[stats["stat_type"].eq("Interception Thrown"), "play_id"])
+    picks = frame[
+        frame["play_type"].astype(str).str.contains("Interception")
+        & frame["game_id"].isin(set(covered))
+        & ~frame["play_id"].isin(thrown)
+    ]
+    if picks.empty:
+        return empty
+    passers = stats[stats["stat_type"].isin(PASSER_STATS)].merge(
+        frame[["play_id", "game_id", "offense", "order"]], on="play_id"
+    )
+    passers = passers[passers["team"].eq(passers["offense"])].assign(
+        key=lambda d: d["athlete_name"].map(_name_key)
+    )
+    by_offense = {key: group for key, group in passers.groupby(["game_id", "offense"])}
+    rows = []
+    for pick in picks.itertuples(index=False):
+        candidates = by_offense.get((pick.game_id, pick.offense))
+        if candidates is None:
+            continue
+        named = _INTERCEPTED_BY.match(str(pick.play_text))
+        matched = (
+            candidates[candidates["key"].eq(_name_key(named.group(1)))]
+            if named
+            else candidates.iloc[0:0]
+        )
+        if matched["athlete_id"].nunique() == 1:
+            passer = matched.iloc[0]
+        else:
+            distance = (candidates["order"] - pick.order).abs()
+            passer = candidates.loc[distance.idxmin()]
+        rows.append(
+            {
+                "play_id": pick.play_id,
+                "athlete_id": passer["athlete_id"],
+                "athlete_name": passer["athlete_name"],
+                "team": pick.offense,
+                "stat_type": "Interception Thrown",
+                "stat": "1",
+            }
+        )
+    return pd.DataFrame(rows, columns=STAT_COLUMNS)
+
 
 def _offense_credit(rows: pd.DataFrame) -> pd.DataFrame:
     rows = rows[rows["stat_type"].isin(_KIND_BY_STAT)].copy()
@@ -133,9 +216,10 @@ def assign_play_credit(play_stats: pd.DataFrame, plays: pd.DataFrame) -> pd.Data
             "is_pass",
         ]
     ].rename(columns={"id": "play_id"})
-    stats = play_stats[
-        ["play_id", "athlete_id", "athlete_name", "team", "stat_type", "stat"]
-    ].copy()
+    stats = pd.concat(
+        [play_stats[STAT_COLUMNS], untagged_interceptions(play_stats, plays)],
+        ignore_index=True,
+    )
     stats["play_id"] = stats["play_id"].astype(str)
     play_columns["play_id"] = play_columns["play_id"].astype(str)
     merged = stats.merge(play_columns, on="play_id", how="inner")
