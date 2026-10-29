@@ -19,6 +19,12 @@ def handle_publish(args: Namespace) -> None:
         log.info(f"cfb.{table}: {count} rows stored")
 
 
+def handle_publish_backtest(args: Namespace) -> None:
+    from backend.publish import publish_backtest
+
+    log.info(f"cfb.backtest_predictions: {publish_backtest()} rows stored")
+
+
 def handle_refresh_picks(args: Namespace) -> None:
     """Re-decide one published week's picks from the frozen projections and
     fresh prices. Published picks stay frozen unless a newer model version no

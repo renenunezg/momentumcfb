@@ -68,7 +68,7 @@ jobs:
           CREATE FUNCTION public.site_revalidate() RETURNS trigger
           LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
           SQL
-          psql -X -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -f sql/baseline/2026_10_05.sql -f sql/020_decision_forecast.sql -f sql/021_site_revalidate.sql -f sql/20261012190441_moneyline_pricing_context.sql -f sql/20261019183818_current_recommendations.sql -f sql/20261029120000_performance_metrics_gap_interval.sql -f sql/20261029121000_recommendation_market_clv.sql
+          psql -X -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -f sql/baseline/2026_10_05.sql -f sql/020_decision_forecast.sql -f sql/021_site_revalidate.sql -f sql/20261012190441_moneyline_pricing_context.sql -f sql/20261019183818_current_recommendations.sql -f sql/20261029120000_performance_metrics_gap_interval.sql -f sql/20261029121000_recommendation_market_clv.sql -f sql/20261029122000_backtest_model_version.sql
       - name: Run tests
         env:
           CFB_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres

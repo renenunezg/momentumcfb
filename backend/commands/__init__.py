@@ -50,6 +50,7 @@ from backend.commands.publishing import (
     handle_fetch_anchors,
     handle_publish,
     handle_publish_anchors,
+    handle_publish_backtest,
     handle_refresh_picks,
 )
 from backend.commands.serving import (
@@ -78,6 +79,7 @@ HANDLERS: dict[str, Handler] = {
     "features": handle_features,
     "fit": handle_fit,
     "weekly-update": handle_weekly_update,
+    "publish-backtest": handle_publish_backtest,
     "calibrate": handle_calibrate,
     "preseason": handle_preseason,
     "srs-prior": handle_srs_prior,

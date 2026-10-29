@@ -8,7 +8,7 @@ tables written here are that API surface:
 - team_unit_ratings     descriptive opponent-adjusted unit companions
 - game_projections      current forecast, one row per game
 - market_comparisons    best priced offer vs model, one row per game
-- backtest_predictions  frozen walk-forward history, full refresh
+- backtest_predictions  served model walk-forward history, full refresh
 - graded_games          frozen live-season grading record, one row per game
 - performance_metrics   live-season aggregates per source and segment
 
@@ -171,23 +171,6 @@ MARKET_COMPARISONS_COLUMNS = [
     "best_offer_model_cover_probability",
     "best_offer_model_fair_price",
     "best_offer_expected_value_per_unit",
-]
-
-BACKTEST_PREDICTIONS_COLUMNS = [
-    "game_id",
-    "season",
-    "week",
-    "week_index",
-    "season_type",
-    "home_team",
-    "away_team",
-    "neutral_site",
-    "home_points",
-    "away_points",
-    "margin",
-    "closing_spread",
-    "model_margin",
-    "actual_margin",
 ]
 
 # Serving anchor artifacts are keyed by artifact week: anchor_week 0 is the
@@ -426,9 +409,42 @@ def load_market_comparisons(
     return _serving_frame(pd.read_parquet(path), MARKET_COMPARISONS_COLUMNS)
 
 
-def load_backtest_predictions() -> pd.DataFrame:
-    path = PROCESSED_DIR / "backtest" / "predictions_filtered.parquet"
-    return _serving_frame(pd.read_parquet(path), BACKTEST_PREDICTIONS_COLUMNS)
+def _replace_backtest(conn, backtest: pd.DataFrame) -> None:
+    """Full refresh: TRUNCATE + append preserves RLS and indexes, and removes
+    earlier model versions' rows. Rows without their model version would be
+    mislabeled by the migration's tag, so a missing column refuses the write."""
+    pending = sorted(
+        set(backtest.columns) - _table_columns(conn, "backtest_predictions")
+    )
+    if pending:
+        raise ValueError(
+            f"cfb.backtest_predictions lacks {pending}; apply "
+            "sql/20261029122000_backtest_model_version.sql first"
+        )
+    conn.execute(text(f"TRUNCATE TABLE {CFB_SCHEMA}.backtest_predictions"))
+    backtest.to_sql(
+        "backtest_predictions",
+        con=conn,
+        schema=CFB_SCHEMA,
+        if_exists="append",
+        index=False,
+    )
+
+
+def publish_backtest() -> int:
+    """Replace cfb.backtest_predictions with the served model's walk-forward."""
+    from backend.db import engine
+    from backend.model.walk_forward_backtest import load_backtest_predictions
+
+    backtest = load_backtest_predictions()
+    with engine.begin() as conn:
+        _replace_backtest(conn, backtest)
+    with engine.connect() as conn:
+        return int(
+            conn.execute(
+                text(f"SELECT count(*) FROM {CFB_SCHEMA}.backtest_predictions")
+            ).scalar()
+        )
 
 
 def publish_serving_anchors(season: int, anchor_week: int) -> int:
@@ -583,7 +599,12 @@ def publish(
         unit_ratings = None
     projections = load_game_projections(source, season, week, run_directory)
     market = load_market_comparisons(source, season, week, run_directory)
-    backtest = load_backtest_predictions() if include_backtest else None
+    if include_backtest:
+        from backend.model.walk_forward_backtest import load_backtest_predictions
+
+        backtest = load_backtest_predictions()
+    else:
+        backtest = None
 
     # Delete projections by game id, not by week, so a game that moved weeks
     # between publishes cannot survive as a duplicate row.
@@ -710,15 +731,7 @@ def publish(
             )
 
         if backtest is not None:
-            # Full refresh: TRUNCATE + append preserves RLS and indexes.
-            conn.execute(text(f"TRUNCATE TABLE {CFB_SCHEMA}.backtest_predictions"))
-            backtest.to_sql(
-                "backtest_predictions",
-                con=conn,
-                schema=CFB_SCHEMA,
-                if_exists="append",
-                index=False,
-            )
+            _replace_backtest(conn, backtest)
 
     # Read back stored totals so the caller reports what the website will see.
     tables = [

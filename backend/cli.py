@@ -339,6 +339,11 @@ def _add_publish_commands(sub) -> None:
         help="skip the full refresh of the backtest history table",
     )
 
+    sub.add_parser(
+        "publish-backtest",
+        help="replace cfb.backtest_predictions with the served model's walk-forward",
+    )
+
     for name, description in (
         ("publish-anchors", "publish a serving anchor artifact to cfb.serving_anchors"),
         ("fetch-anchors", "hydrate a local serving anchor artifact from the database"),

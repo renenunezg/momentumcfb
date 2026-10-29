@@ -282,7 +282,8 @@ def _missing_inputs(frame: pd.DataFrame) -> pd.Series:
     return pd.cut(count, bins=bins, labels=labels, right=False).astype(object)
 
 
-def _classification(frame: pd.DataFrame) -> pd.Series:
+def opponent_classification(frame: pd.DataFrame) -> pd.Series:
+    """FBS vs FBS, FBS vs FCS or FCS vs FCS from the two classifications."""
     fbs_home = frame["home_classification"].eq("fbs")
     fbs_away = frame["away_classification"].eq("fbs")
     return pd.Series(
@@ -312,7 +313,7 @@ def _segment_frames(graded: pd.DataFrame) -> list[tuple[str, str, int, pd.Series
     ]
     keyed = {
         "week": graded["week"].astype(int).astype(str),
-        "opponent_classification": _classification(graded),
+        "opponent_classification": opponent_classification(graded),
         "model_favorite_size": _favorite_size(-graded["pure_home_margin"]),
         "missing_inputs": _missing_inputs(graded),
         "model_version": graded["model_version"].astype(object),

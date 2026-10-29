@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from backend.grading import THIN_SAMPLE_GAMES, _classification
+from backend.grading import THIN_SAMPLE_GAMES, opponent_classification
 from backend.model.distributions import marginal_interval_half_width
 from backend.model.scoring_calibration import bounded_model_total
 
@@ -30,7 +30,7 @@ def scoring_diagnostics(
     forecast_time = pd.to_datetime(out.forecast_as_of, utc=True)
     if not forecast_time.lt(pd.to_datetime(out.start_date, utc=True)).all():
         raise ValueError("diagnostics require pregame frozen forecasts")
-    out["matchup"] = _classification(out)
+    out["matchup"] = opponent_classification(out)
     out["margin_error"] = out.pure_home_margin - out.actual_margin
     out["total_error"] = out.model_total - out.actual_total
     out["home_score_error"] = (out.total_error + out.margin_error) / 2
@@ -156,7 +156,7 @@ def disagreement_audit(
     availability: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     out = projections.copy()
-    out["matchup"] = _classification(out)
+    out["matchup"] = opponent_classification(out)
     out["market_gap"] = out.pure_home_margin + out.market_home_spread
     out["absolute_market_gap"] = out.market_gap.abs()
     for side in ("home", "away"):
@@ -238,7 +238,7 @@ def shadow_totals(
     ):
         raise ValueError("forecasts already include matchup total calibration")
     offsets = pd.read_parquet(offsets_path)
-    out["matchup"] = _classification(out)
+    out["matchup"] = opponent_classification(out)
     adjustment = out.matchup.map(offsets.total_adjustment)
     if adjustment.isna().any() or not np.isfinite(adjustment).all():
         raise ValueError("missing or nonfinite matchup calibration")
