@@ -15,7 +15,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from backend.grading import GRADED_GAME_COLUMNS, compute_performance_metrics
+from backend.grading import (
+    GRADED_GAME_COLUMNS,
+    THIN_SAMPLE_GAMES,
+    compute_performance_metrics,
+)
 from backend.recommendations import CLOSING_LINE_COLUMNS, RECOMMENDATION_COLUMNS
 
 FORECAST_RULE = (
@@ -116,24 +120,28 @@ def export_ledgers(season: int, directory: Path) -> dict[str, int]:
             {"schema": CFB_SCHEMA},
         ).scalars()
         picks = read("recommendations")
-        superseded = pd.concat(
-            [read(table).assign(archive_table=table) for table in archives],
-            ignore_index=True,
-        )
         decisions = read("recommendation_decisions")
-    if not superseded.empty:
-        # A replaced decision never settled; its stored outcome is meaningless.
-        superseded = superseded.assign(outcome=None, profit_units=None, graded_at=None)
-    # Columns a pending migration adds are exported empty, never left out.
-    columns = list(
-        dict.fromkeys([*picks.columns, *RECOMMENDATION_COLUMNS, *CLOSING_LINE_COLUMNS])
-    )
-    picks, superseded, decisions = (
-        frame.reindex(
-            columns=[*columns, *(["archive_table"] if frame is superseded else [])]
-        )
-        for frame in (picks, superseded, decisions)
-    )
+        archived = [read(table).assign(archive_table=table) for table in archives]
+    required = [*RECOMMENDATION_COLUMNS, *CLOSING_LINE_COLUMNS]
+    for name, frame in (
+        ("recommendations", picks),
+        ("recommendation_decisions", decisions),
+    ):
+        missing = sorted(set(required) - set(frame.columns))
+        if missing:
+            raise ValueError(f"cfb.{name} lacks {missing}; apply migrations first")
+    # Archive tables are copies of cfb.recommendations made by hand when a
+    # published slate was replaced before kickoff (cfb.recommendations_archive_
+    # 20261012_week7_v8 holds the policy v8 week-7 slate replaced by v11 on
+    # 2026-10-12). No migration creates them, so the export reads whichever
+    # exist. They keep the columns of their day; later columns are empty, and a
+    # replaced decision never settled, so its stored outcome is cleared.
+    columns = [*picks.columns, "archive_table"]
+    superseded = (
+        pd.concat(archived, ignore_index=True).reindex(columns=columns)
+        if archived
+        else pd.DataFrame(columns=columns)
+    ).assign(outcome=None, profit_units=None, graded_at=None)
     started = pd.to_datetime(decisions["start_date"], utc=True).le(
         pd.Timestamp.now(tz="UTC")
     )
@@ -266,7 +274,7 @@ def pick_summary(picks: pd.DataFrame) -> pd.DataFrame:
                 ),
                 "roi": profit / staked if staked else np.nan,
                 "win_rate": wins / (wins + losses) if wins + losses else np.nan,
-                "thin_sample": wins + losses + pushes < 30,
+                "thin_sample": wins + losses + pushes < THIN_SAMPLE_GAMES,
             }
         )
     return pd.DataFrame(rows)

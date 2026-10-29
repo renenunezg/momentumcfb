@@ -16,10 +16,9 @@ import pandas as pd
 from backend.config import PROCESSED_DIR
 from backend.etl import store
 from backend.model.distributions import marginal_cdf, marginal_interval_half_width
-from backend.recommendations import PRICING_MARGIN_SD
+from backend.recommendations import CLOSING_SOURCE, PRICING_MARGIN_SD
 from backend.serving.market import flatten_closing_lines, flatten_closing_totals
 
-CLOSING_SOURCE = "cfbd_lines_median"
 SCORE_SOURCE = "cfbd_games"
 LEGACY_PROBABILITY_METHOD = (
     "P(home margin > 0) from the frozen pregame margin marginal: "
@@ -497,10 +496,12 @@ def compute_performance_metrics(
                     difference = (model_error - market_error).to_numpy(float)
                     row["market_mae"] = float(market_error.mean())
                     row["model_minus_market_mae"] = float(difference.mean())
-                    (
-                        row["model_minus_market_mae_lo_95"],
-                        row["model_minus_market_mae_hi_95"],
-                    ) = _paired_interval(difference)
+                    # A thin segment gets no interval rather than a degenerate one.
+                    if len(difference) >= THIN_SAMPLE_GAMES:
+                        (
+                            row["model_minus_market_mae_lo_95"],
+                            row["model_minus_market_mae_hi_95"],
+                        ) = _paired_interval(difference)
                     # A tie is not closer: ties stay in the denominator.
                     row["closer_than_market_share"] = float(
                         (model_error < market_error).mean()
