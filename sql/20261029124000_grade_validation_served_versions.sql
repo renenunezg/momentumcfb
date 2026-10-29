@@ -14,5 +14,7 @@ update cfb.player_grade_validation
    set served_model_versions = grade_model_version
  where served_model_versions is null;
 alter table cfb.player_grade_validation
-    alter column served_model_versions set not null;
+    alter column served_model_versions set not null,
+    add constraint player_grade_validation_holdout_status check (holdout_status in (
+        '2025 inspected during development', 'pre-registered, untouched'));
 commit;

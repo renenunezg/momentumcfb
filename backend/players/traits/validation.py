@@ -56,6 +56,7 @@ BOOTSTRAP_SEED = 20261027
 MIN_QBR_SEASON_PLAYS = 200
 HOLDOUT_INSPECTED = "2025 inspected during development"
 HOLDOUT_PREREGISTERED = "pre-registered, untouched"
+HOLDOUT_STATUSES = (HOLDOUT_INSPECTED, HOLDOUT_PREREGISTERED)
 # The 2026 rest-of-season test, registered on 2026-10-27 while local 2026 data ended
 # at week 1: the served model file (cfb_position_traits_v1.1, the 2026-10-17 weights
 # under their own version string) and the value model that feeds it. A run that
@@ -447,6 +448,10 @@ def run_validation(
     With ``qbr_path`` the quarterback population is the graded quarterbacks with a
     QBR, logged, so every QB column shares one population.
     """
+    if holdout_status not in HOLDOUT_STATUSES:
+        raise ValueError(
+            f"holdout status {holdout_status!r} is not one of {HOLDOUT_STATUSES}"
+        )
     seasons = sorted(int(season) for season in seasons)
     if eval_kind == NEXT_SEASON and (len(seasons) != 2 or seasons[1] != seasons[0] + 1):
         raise ValueError(f"{NEXT_SEASON} needs two consecutive seasons, got {seasons}")
