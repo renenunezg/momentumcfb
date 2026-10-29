@@ -65,6 +65,13 @@ PREREGISTERED_MODEL_SHA = (
     "3d85cb825df4d23113b51ef05470bf285ac7ea47e13f34d7d160a6591b01d6cd"
 )
 PREREGISTERED_VALUE_VERSION = "cfb_player_value_v5"
+# The version strings a grade model file's weights have been served under. The
+# 2026-10-17 weights were served as cfb_position_traits_v1 (file 272d3e51) until
+# the 2026-10-26 publish, then re-stamped cfb_position_traits_v1.1 (file 3d85cb82)
+# with byte-identical weights; served rows published before the re-stamp read v1.
+SERVED_AS = {
+    PREREGISTERED_MODEL_SHA: ("cfb_position_traits_v1", "cfb_position_traits_v1.1"),
+}
 PREDICTORS = ["grade", "epa_credit", "games", "value_above_replacement", "qbr"]
 REQUIRED = ["grade", "epa_credit", "games", "value_above_replacement", "target"]
 SPEARMAN_COLUMNS = {
@@ -521,6 +528,17 @@ def run_validation(
     rows.to_parquet(out, index=False)
     log.info("grade validation rows written to %s", out)
     return rows
+
+
+def with_served_versions(rows: pd.DataFrame) -> pd.DataFrame:
+    """Name every version string the evaluated weights were served under, so a
+    served row stamped with an earlier string can be matched to its evaluation."""
+    return rows.assign(
+        served_model_versions=[
+            ", ".join(SERVED_AS.get(sha, (version,)))
+            for sha, version in zip(rows["model_sha"], rows["grade_model_version"])
+        ]
+    )
 
 
 def read_validation_artifacts() -> pd.DataFrame:

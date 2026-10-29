@@ -950,11 +950,18 @@ def publish_grade_validation() -> int:
         raise ValueError(
             "no grade validation artifact; run position-grade-validation first"
         )
+    rows = validation.with_served_versions(rows)
     with engine.begin() as conn:
         if not _table_exists(conn, "player_grade_validation"):
             raise ValueError(
                 f"{CFB_SCHEMA}.player_grade_validation is absent; apply "
                 "sql/20261027220000_player_grade_validation.sql first"
+            )
+        if "served_model_versions" not in _table_columns(
+            conn, "player_grade_validation"
+        ):
+            raise ValueError(
+                "apply sql/20261029124000_grade_validation_served_versions.sql first"
             )
         keys = rows[validation.KEY_COLUMNS].drop_duplicates()
         where = " AND ".join(
