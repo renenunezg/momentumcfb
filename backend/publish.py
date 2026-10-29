@@ -793,7 +793,13 @@ def publish_grading(season: int) -> dict[str, int]:
                 {"s": season},
             )
             if not rows.empty:
-                rows.to_sql(
+                # Columns added by an unapplied migration wait for it rather
+                # than failing the weekly publish.
+                stored = _table_columns(conn, table)
+                pending = [c for c in rows.columns if c not in stored]
+                if pending:
+                    log.warning(f"cfb.{table} lacks {pending}; apply its migration")
+                rows[[c for c in rows.columns if c in stored]].to_sql(
                     table,
                     con=conn,
                     schema=CFB_SCHEMA,

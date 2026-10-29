@@ -36,6 +36,10 @@ PROBABILITY_METHOD = (
 PREDICTION_SOURCES = ("pure_model", "market_informed", "closing_market")
 COVERAGE_LEVELS = (0.5, 0.8, 0.9)
 THIN_SAMPLE_GAMES = 30
+# Paired bootstrap over games for the model-minus-market MAE gap. The seed is
+# fixed so a rerun on the same graded rows publishes the same interval.
+BOOTSTRAP_DRAWS = 4000
+BOOTSTRAP_SEED = 20261029
 
 GRADED_GAME_COLUMNS = [
     "game_id",
@@ -103,6 +107,8 @@ PERFORMANCE_METRIC_COLUMNS = [
     "games_with_market",
     "market_mae",
     "model_minus_market_mae",
+    "model_minus_market_mae_lo_95",
+    "model_minus_market_mae_hi_95",
     "closer_than_market_share",
     "probability_games",
     "brier_score",
@@ -125,7 +131,16 @@ def _home_win_probability(frame: pd.DataFrame) -> pd.Series:
 
 
 def _correct_legacy_probabilities(frame: pd.DataFrame) -> pd.DataFrame:
-    """Repair derived values using frozen parameters without changing forecasts."""
+    """Repair derived values using frozen parameters without changing forecasts.
+
+    Rows graded before 2026-09-07 stored a home win probability that read the
+    frozen margin_sd as the Student t scale instead of its standard deviation,
+    which overstated confidence. The frozen inputs (pure_home_margin, margin_sd,
+    degrees_of_freedom) are kept as published; only the derived probability and
+    its probability_method are recomputed with the corrected scale, so Brier
+    and log loss for those rows reflect the corrected formula, not the value
+    that was stored at the time. No forecast input is ever rewritten here.
+    """
     out = frame.copy()
     legacy = out["probability_method"].eq(LEGACY_PROBABILITY_METHOD)
     if legacy.any():
@@ -219,7 +234,9 @@ def build_graded_games(
             "n_spread_offers": merged["n_spread_offers"],
             "n_total_offers": merged["n_total_offers"],
             "closing_source": np.where(
-                merged["closing_spread"].notna(), CLOSING_SOURCE, None
+                merged["closing_spread"].notna() | merged["closing_total"].notna(),
+                CLOSING_SOURCE,
+                None,
             ),
             "home_points": merged["home_points"].astype(int),
             "away_points": merged["away_points"].astype(int),
@@ -278,6 +295,16 @@ def _classification(frame: pd.DataFrame) -> pd.Series:
     )
 
 
+def _model_version_order(graded: pd.DataFrame) -> list[str]:
+    """Model versions in the order they first graded a game."""
+    first = (
+        graded.dropna(subset=["model_version"])
+        .groupby("model_version")["start_date"]
+        .min()
+    )
+    return [str(v) for v in first.sort_values(kind="stable").index]
+
+
 def _segment_frames(graded: pd.DataFrame) -> list[tuple[str, str, int, pd.Series]]:
     """Yield (kind, label, order, mask) for every segment with any games."""
     segments: list[tuple[str, str, int, pd.Series]] = [
@@ -288,11 +315,13 @@ def _segment_frames(graded: pd.DataFrame) -> list[tuple[str, str, int, pd.Series
         "opponent_classification": _classification(graded),
         "model_favorite_size": _favorite_size(-graded["pure_home_margin"]),
         "missing_inputs": _missing_inputs(graded),
+        "model_version": graded["model_version"].astype(object),
     }
     orders = {
         "opponent_classification": ["FBS vs FBS", "FBS vs FCS", "FCS vs FCS"],
         "model_favorite_size": ["under 7", "7 to 14", "14 to 21", "21 or more"],
         "missing_inputs": ["none", "1 to 3", "4 or more"],
+        "model_version": _model_version_order(graded),
     }
     for kind, labels in keyed.items():
         present = [label for label in labels.dropna().unique()]
@@ -311,15 +340,30 @@ def _source_columns(graded: pd.DataFrame, source: str) -> tuple[pd.Series, pd.Se
     if source == "market_informed":
         # Games published before the blended total existed have none to grade.
         return graded["market_informed_home_margin"], graded["market_informed_total"]
-    return -graded["closing_spread"], graded["closing_total"]
+    if source == "closing_market":
+        return -graded["closing_spread"], graded["closing_total"]
+    raise ValueError(f"unknown prediction source {source!r}")
 
 
 def _margin_sd(frame: pd.DataFrame, source: str) -> pd.Series:
     """The pure model's frozen predictive sd, or for the market-informed line
-    the dispersion its picks are priced with."""
+    and the closing line the dispersion picks are priced with, so the published
+    line and its benchmark share one probability scale."""
     if source == "pure_model":
         return frame["margin_sd"]
-    return pd.Series(PRICING_MARGIN_SD, index=frame.index)
+    if source in ("market_informed", "closing_market"):
+        return pd.Series(PRICING_MARGIN_SD, index=frame.index)
+    raise ValueError(f"unknown prediction source {source!r}")
+
+
+def _paired_interval(difference: np.ndarray) -> tuple[float, float]:
+    """95 percent percentile interval of the mean of per-game differences,
+    resampling games with replacement."""
+    rng = np.random.default_rng(BOOTSTRAP_SEED)
+    draws = rng.integers(0, len(difference), size=(BOOTSTRAP_DRAWS, len(difference)))
+    means = difference[draws].mean(axis=1)
+    low, high = np.percentile(means, [2.5, 97.5])
+    return float(low), float(high)
 
 
 def _coverage(
@@ -383,39 +427,39 @@ def compute_performance_metrics(
                 "games_with_market": None,
                 "market_mae": None,
                 "model_minus_market_mae": None,
+                "model_minus_market_mae_lo_95": None,
+                "model_minus_market_mae_hi_95": None,
                 "closer_than_market_share": None,
                 "probability_games": None,
                 "brier_score": None,
                 "log_loss": None,
                 "computed_at": computed_at,
             }
+            prediction = margin_prediction[frame.index]
+            sd = _margin_sd(frame, source)
             if source != "closing_market":
-                prediction = margin_prediction[frame.index]
-                sd = _margin_sd(frame, source)
                 for level in COVERAGE_LEVELS:
                     row[f"coverage_{int(level * 100)}"] = _coverage(
                         frame, prediction, sd, level
                     )
-                probability = (
-                    frame["home_win_probability"]
-                    if source == "pure_model"
-                    else pd.Series(
-                        marginal_cdf(prediction, sd, frame["degrees_of_freedom"]),
-                        index=frame.index,
-                    )
-                ).dropna()
-                if not probability.empty:
-                    won = (frame.loc[probability.index, "actual_margin"] > 0).astype(
-                        float
-                    )
-                    clipped = probability.clip(1e-6, 1 - 1e-6)
-                    row["probability_games"] = int(len(probability))
-                    row["brier_score"] = float(((probability - won) ** 2).mean())
-                    row["log_loss"] = float(
-                        -(
-                            won * np.log(clipped) + (1 - won) * np.log(1 - clipped)
-                        ).mean()
-                    )
+            # The closing line is scored on the published line's scale, over
+            # the games it has a line for, so the two rows compare directly.
+            probability = (
+                frame["home_win_probability"]
+                if source == "pure_model"
+                else pd.Series(
+                    marginal_cdf(prediction, sd, frame["degrees_of_freedom"]),
+                    index=frame.index,
+                )
+            ).dropna()
+            if not probability.empty:
+                won = (frame.loc[probability.index, "actual_margin"] > 0).astype(float)
+                clipped = probability.clip(1e-6, 1 - 1e-6)
+                row["probability_games"] = int(len(probability))
+                row["brier_score"] = float(((probability - won) ** 2).mean())
+                row["log_loss"] = float(
+                    -(won * np.log(clipped) + (1 - won) * np.log(1 - clipped)).mean()
+                )
             if source != "closing_market":
                 benchmarked = frame[frame["closing_spread"].notna()]
                 row["games_with_market"] = int(len(benchmarked))
@@ -427,10 +471,14 @@ def compute_performance_metrics(
                     market_error = (
                         -benchmarked["closing_spread"] - benchmarked["actual_margin"]
                     ).abs()
+                    difference = (model_error - market_error).to_numpy(float)
                     row["market_mae"] = float(market_error.mean())
-                    row["model_minus_market_mae"] = float(
-                        model_error.mean() - market_error.mean()
-                    )
+                    row["model_minus_market_mae"] = float(difference.mean())
+                    (
+                        row["model_minus_market_mae_lo_95"],
+                        row["model_minus_market_mae_hi_95"],
+                    ) = _paired_interval(difference)
+                    # A tie is not closer: ties stay in the denominator.
                     row["closer_than_market_share"] = float(
                         (model_error < market_error).mean()
                     )
