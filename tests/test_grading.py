@@ -19,6 +19,7 @@ def _projection(game_id, as_of, margin=7.0):
         "season": 2026,
         "week": 1,
         "as_of": as_of,
+        "published_at": None,
         "model_version": "test",
         "start_date": "2026-08-29T16:00:00+00:00",
         "home_team_id": 1,

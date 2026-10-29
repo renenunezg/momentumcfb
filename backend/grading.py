@@ -181,13 +181,12 @@ def build_graded_games(
     frozen["start_date"] = pd.to_datetime(frozen["start_date"], utc=True)
     frozen["as_of"] = pd.to_datetime(frozen["as_of"], utc=True)
     # Only a projection published before kickoff is a grade-able forecast.
-    # Rows published before the database stamped publication carry no
-    # published_at; for them the forecast's as_of is the evidence.
-    published = (
-        pd.to_datetime(frozen["published_at"], utc=True)
-        if "published_at" in frozen
-        else pd.Series(pd.NaT, index=frozen.index, dtype="datetime64[ns, UTC]")
-    )
+    # Rows published before the database stamped publication have a null
+    # published_at; for them the forecast's as_of is the evidence. A record
+    # without the column at all is not the published contract.
+    if "published_at" not in frozen:
+        raise ValueError("published projections lack published_at")
+    published = pd.to_datetime(frozen["published_at"], utc=True)
     frozen["published_at"] = published
     frozen = frozen[
         frozen["as_of"].lt(frozen["start_date"])

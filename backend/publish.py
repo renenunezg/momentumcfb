@@ -18,9 +18,12 @@ indexes survive; ``to_sql(if_exists="replace")`` would drop them.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from datetime import datetime
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
@@ -777,16 +780,15 @@ def fetch_graded_games(season: int) -> pd.DataFrame:
     with engine.connect() as conn:
         if not _table_exists(conn, "graded_games"):
             return pd.DataFrame(columns=GRADED_GAME_COLUMNS)
-        stored = _table_columns(conn, "graded_games")
         return pd.read_sql_query(
             text(
                 "SELECT "
-                + ", ".join(c for c in GRADED_GAME_COLUMNS if c in stored)
+                + ", ".join(GRADED_GAME_COLUMNS)
                 + f" FROM {CFB_SCHEMA}.graded_games WHERE season = :s ORDER BY game_id"
             ),
             conn,
             params={"s": season},
-        ).reindex(columns=GRADED_GAME_COLUMNS)
+        )
 
 
 def publish_grading(season: int) -> dict[str, int]:
@@ -823,13 +825,10 @@ def publish_grading(season: int) -> dict[str, int]:
             ("performance_metrics", metric_rows),
         ):
             if not rows.empty:
-                # Columns added by an unapplied migration wait for it rather
-                # than failing the weekly publish.
-                stored = _table_columns(conn, table)
-                pending = [c for c in rows.columns if c not in stored]
-                if pending:
-                    log.warning(f"cfb.{table} lacks {pending}; apply its migration")
-                rows[[c for c in rows.columns if c in stored]].to_sql(
+                missing = sorted(set(rows.columns) - _table_columns(conn, table))
+                if missing:
+                    raise ValueError(f"cfb.{table} lacks {missing}; apply migrations")
+                rows.to_sql(
                     table,
                     con=conn,
                     schema=CFB_SCHEMA,
@@ -963,15 +962,17 @@ def publish_grade_validation() -> int:
             raise ValueError(
                 "apply sql/20261029124000_grade_validation_served_versions.sql first"
             )
+        # One DELETE for every replaced key, so revalidation fires once.
         keys = rows[validation.KEY_COLUMNS].drop_duplicates()
-        where = " AND ".join(
-            f"{column} = :{column}" for column in validation.KEY_COLUMNS
+        conn.execute(
+            text(
+                f"DELETE FROM {CFB_SCHEMA}.player_grade_validation AS v "
+                f"USING jsonb_populate_recordset(NULL::{CFB_SCHEMA}.player_grade_validation, "
+                "CAST(:keys AS jsonb)) AS k WHERE "
+                + " AND ".join(f"v.{c} = k.{c}" for c in validation.KEY_COLUMNS)
+            ),
+            {"keys": _jsonb_rows(keys)},
         )
-        for key in keys.to_dict(orient="records"):
-            conn.execute(
-                text(f"DELETE FROM {CFB_SCHEMA}.player_grade_validation WHERE {where}"),
-                key,
-            )
         rows.to_sql(
             "player_grade_validation",
             con=conn,
@@ -1004,38 +1005,34 @@ def _reclaim_space(engine, tables) -> None:
         log.warning(f"could not reclaim space after the player publish: {exc}")
 
 
-def _publish_recommendations(conn, decisions):
-    from datetime import datetime
+def _json_value(value):
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
+    # Arrow restores nested JSON lists as ndarrays at the artifact boundary.
+    if isinstance(value, (np.ndarray, np.generic)):
+        return value.tolist()
+    raise TypeError(f"Unsupported recommendation JSON type: {type(value).__name__}")
 
+
+def _jsonb_rows(rows: pd.DataFrame) -> str:
+    """Serving rows as one JSON array, for a single set-based statement."""
+    return json.dumps(rows.to_dict("records"), allow_nan=False, default=_json_value)
+
+
+def _publish_recommendations(conn, decisions):
     from backend.recommendations import RECOMMENDATION_COLUMNS
 
     if decisions.empty:
         return 0
-    # Columns added by an unapplied migration wait for it on both tables.
     stored = _table_columns(conn, "recommendations") & _table_columns(
         conn, "recommendation_decisions"
     )
-    pending = [c for c in RECOMMENDATION_COLUMNS if c not in stored]
-    if pending:
-        log.warning(f"cfb recommendation tables lack {pending}; apply the migration")
-    columns_written = [c for c in RECOMMENDATION_COLUMNS if c in stored]
+    missing = [c for c in RECOMMENDATION_COLUMNS if c not in stored]
+    if missing:
+        raise ValueError(f"cfb recommendation tables lack {missing}; apply migrations")
+    columns_written = RECOMMENDATION_COLUMNS
     rows = _serving_frame(decisions, columns_written)
-    import json
-
-    import numpy as np
-
-    def parquet_json(value):
-        # Arrow restores nested JSON lists as ndarrays at the artifact boundary.
-        if isinstance(value, (np.ndarray, np.generic)):
-            return value.tolist()
-        raise TypeError(f"Unsupported decision JSON type: {type(value).__name__}")
-
-    def json_value(value):
-        if isinstance(value, (pd.Timestamp, datetime)):
-            return value.isoformat()
-        return parquet_json(value)
-
-    payload = json.dumps(rows.to_dict("records"), allow_nan=False, default=json_value)
+    payload = _jsonb_rows(rows)
     records = (
         f"jsonb_populate_recordset(NULL::{CFB_SCHEMA}.recommendation_decisions, "
         "CAST(:decisions AS jsonb)) AS fresh"
@@ -1117,6 +1114,8 @@ def fetch_recommendations(season):
 
 
 def publish_recommendation_grades(season):
+    """Settle picks and record closing lines, one set-based statement each, so
+    the site's statement-level revalidation fires once per step, not per pick."""
     from backend.db import engine
     from backend.etl import store
     from backend.recommendations import (
@@ -1134,79 +1133,72 @@ def publish_recommendation_grades(season):
         backfill = pd.DataFrame(columns=["game_id", "market", "decision_at"])
     if grades.empty and backfill.empty:
         return 0
+    key = (
+        "r.game_id = f.game_id AND r.market = f.market "
+        "AND r.decision_at = f.decision_at AND r.season = :season"
+    )
+    rows = (
+        f"jsonb_populate_recordset(NULL::{CFB_SCHEMA}.recommendations, "
+        "CAST(:rows AS jsonb)) AS f"
+    )
     settled = 0
     with engine.begin() as conn:
-        stored = _table_columns(conn, "recommendations")
-        closing_columns = [c for c in CLOSING_LINE_COLUMNS if c in stored]
-        market_columns = [c for c in MARKET_CLV_COLUMNS if c in stored]
-        if len(closing_columns) < len(CLOSING_LINE_COLUMNS):
-            log.warning("cfb.recommendations lacks the market CLV columns")
-        closing_updates = ", ".join(f"{c} = :{c}" for c in closing_columns)
+        missing = sorted(
+            set(SETTLEMENT_COLUMNS) - _table_columns(conn, "recommendations")
+        )
+        if missing:
+            raise ValueError(f"cfb.recommendations lacks {missing}; apply migrations")
         if not grades.empty:
+            settlement = [
+                c
+                for c in SETTLEMENT_COLUMNS
+                if c not in ("game_id", "market", "decision_at")
+            ]
             settled = conn.execute(
                 text(
-                    f"UPDATE {CFB_SCHEMA}.recommendations SET outcome = :outcome, "
-                    "home_points = :home_points, away_points = :away_points, "
-                    f"profit_units = :profit_units, graded_at = :graded_at, {closing_updates} "
-                    "WHERE game_id = :game_id AND market = :market AND decision_at = :decision_at "
-                    "AND season = :season "
-                    "AND outcome = 'pending'"
+                    f"UPDATE {CFB_SCHEMA}.recommendations AS r SET "
+                    + ", ".join(f"{c} = f.{c}" for c in settlement)
+                    + f" FROM {rows} WHERE {key} AND r.outcome = 'pending'"
                 ),
-                _serving_frame(
-                    grades,
-                    [
-                        c
-                        for c in SETTLEMENT_COLUMNS
-                        if c in stored or c == "decision_at"
-                    ],
-                )
-                .assign(season=season)
-                .to_dict("records"),
+                {
+                    "rows": _jsonb_rows(_serving_frame(grades, SETTLEMENT_COLUMNS)),
+                    "season": season,
+                },
             ).rowcount
         if not backfill.empty:
-            # Picks settled before closing lines were recorded receive theirs
-            # once, and picks settled before the decision-median comparison
-            # receive only those fields once; the database trigger admits no
-            # other change to a settled pick.
-            records = (
-                _serving_frame(
-                    backfill, ["game_id", "market", "decision_at", *closing_columns]
-                )
-                .assign(season=season)
-                .to_dict("records")
-            )
-            key = (
-                "WHERE game_id = :game_id AND market = :market "
-                "AND decision_at = :decision_at AND season = :season "
-                "AND outcome IN ('win', 'loss', 'push') "
-            )
+            # Picks settled before closing lines, or before the decision-median
+            # comparison, were recorded receive each missing field once; a
+            # recorded field keeps its value and the database trigger admits
+            # no other change to a settled pick.
             conn.execute(
                 text(
-                    f"UPDATE {CFB_SCHEMA}.recommendations SET {closing_updates} "
-                    + key
-                    + "AND closing_source IS NULL"
+                    f"UPDATE {CFB_SCHEMA}.recommendations AS r SET "
+                    + ", ".join(
+                        f"{c} = coalesce(r.{c}, f.{c})" for c in CLOSING_LINE_COLUMNS
+                    )
+                    + f" FROM {rows} WHERE {key} "
+                    "AND r.outcome IN ('win', 'loss', 'push') "
+                    "AND (r.closing_source IS NULL OR ("
+                    + " AND ".join(f"r.{c} IS NULL" for c in MARKET_CLV_COLUMNS)
+                    + "))"
                 ),
-                records,
-            )
-            if market_columns:
-                conn.execute(
-                    text(
-                        f"UPDATE {CFB_SCHEMA}.recommendations SET "
-                        + ", ".join(f"{c} = :{c}" for c in market_columns)
-                        + " "
-                        + key
-                        + "AND closing_source IS NOT NULL AND "
-                        + " AND ".join(f"{c} IS NULL" for c in market_columns)
+                {
+                    "rows": _jsonb_rows(
+                        _serving_frame(
+                            backfill,
+                            ["game_id", "market", "decision_at", *CLOSING_LINE_COLUMNS],
+                        )
                     ),
-                    records,
-                )
+                    "season": season,
+                },
+            )
     return settled
 
 
 def ensure_recommendation_schema():
     """Fail before paid data refreshes when the serving migration is missing."""
     from backend.db import engine
-    from backend.recommendations import RECOMMENDATION_COLUMNS
+    from backend.recommendations import CLOSING_LINE_COLUMNS, RECOMMENDATION_COLUMNS
 
     with engine.connect() as conn:
         required = set(RECOMMENDATION_COLUMNS) | {
@@ -1234,6 +1226,35 @@ def ensure_recommendation_schema():
                 "Apply sql/009_recommendation_closing_line_value.sql before "
                 "refreshing CFB recommendations"
             )
+        # The 2026-10-29 serving contract: grading, CLV and the publish stamp.
+        for migration, table, columns in (
+            (
+                "sql/20261029120000_performance_metrics_gap_interval.sql",
+                "performance_metrics",
+                PERFORMANCE_METRIC_COLUMNS,
+            ),
+            (
+                "sql/20261029121000_recommendation_market_clv.sql",
+                "recommendations",
+                CLOSING_LINE_COLUMNS,
+            ),
+            (
+                "sql/20261029123000_forecast_freeze.sql",
+                "graded_games",
+                GRADED_GAME_COLUMNS,
+            ),
+            (
+                "sql/20261029123000_forecast_freeze.sql",
+                "game_projections",
+                ["published_at"],
+            ),
+        ):
+            missing = sorted(set(columns) - _table_columns(conn, table))
+            if missing:
+                raise ValueError(
+                    f"cfb.{table} lacks {missing}; apply {migration} before "
+                    "refreshing CFB recommendations"
+                )
         if not conn.execute(
             text(
                 "SELECT EXISTS (SELECT 1 FROM pg_constraint "
