@@ -6,13 +6,9 @@ CLAUDE.md
 .env
 .env.*
 !.env.example
-frontend/.env*
 .claude/
 .cursor/
 .python-version
-
-# Frontend source lives in the momentumweb repository
-frontend/
 
 # Python
 __pycache__/
@@ -42,5 +38,7 @@ backend/data/
 # Brainstorm mockups (superpowers visual companion)
 .superpowers/
 
-# Local docs and research notes (never tracked)
+# Local docs, research and run output (never tracked)
 docs/
+research/
+output/
