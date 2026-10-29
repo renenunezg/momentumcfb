@@ -180,7 +180,7 @@ def flatten_odds_api_offers(
     return frame, pd.DataFrame(matches)
 
 
-def _american_profit(price: float) -> float:
+def american_profit(price: float) -> float:
     return price / 100.0 if price > 0 else 100.0 / abs(price)
 
 
@@ -233,7 +233,7 @@ def priced_candidates(projection, game_offers: pd.DataFrame) -> list[dict]:
                 projection.degrees_of_freedom,
             )
         )
-        expected_value = probability * _american_profit(float(offer.price)) - (
+        expected_value = probability * american_profit(float(offer.price)) - (
             1.0 - probability
         )
         candidates.append(

@@ -17,7 +17,7 @@ from backend.model.spread_pricing import (
     spread_margin,
     spread_win_loss,
 )
-from backend.odds.markets import _american_profit, priced_candidates
+from backend.odds.markets import american_profit, priced_candidates
 
 POLICY_VERSION = "cfb-picks-v11"
 # Minimum points the priced line must sit beyond the offered price's
@@ -270,8 +270,8 @@ def _moneyline_reference(candidates, latest, now, start):
         if any(_offer_reason(c, group, now, start) is not None for c in group):
             continue
         home, away = sides["home"][0], sides["away"][0]
-        h = 1.0 / (1.0 + _american_profit(home["price"]))
-        a = 1.0 / (1.0 + _american_profit(away["price"]))
+        h = 1.0 / (1.0 + american_profit(home["price"]))
+        a = 1.0 / (1.0 + american_profit(away["price"]))
         if not 1.0 <= h + a <= 1.20:
             continue
         pairs.append(
@@ -519,7 +519,7 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
                 ):
                     continue
                 win, push, loss = _probabilities(market_projection, candidate)
-                profit = _american_profit(candidate["price"])
+                profit = american_profit(candidate["price"])
                 implied = 1 / (profit + 1)
                 edge = win / (win + loss) - implied
                 ev = win * profit - loss
@@ -685,8 +685,8 @@ def _recorded_decision_market(pick):
 
 
 def _vig_free_probability(side_price, other_price):
-    side = 1.0 / (1.0 + _american_profit(side_price))
-    other = 1.0 / (1.0 + _american_profit(other_price))
+    side = 1.0 / (1.0 + american_profit(side_price))
+    other = 1.0 / (1.0 + american_profit(other_price))
     return side / (side + other)
 
 
@@ -845,7 +845,7 @@ def grade_recommendations(recommendations, games, closing=None, *, graded_at=Non
             if pick.market == "h2h" and balance == 0:
                 result = "void"
         profit = (
-            pick.stake_units * _american_profit(pick.price)
+            pick.stake_units * american_profit(pick.price)
             if result == "win"
             else -pick.stake_units
             if result == "loss"
