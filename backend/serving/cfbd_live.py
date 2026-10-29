@@ -15,6 +15,7 @@ import pandas as pd
 
 from backend.cfbd.snapshots import capture, read_snapshot
 from backend.features.ingame import build_process_evidence
+from backend.model.ingame import MODEL_VERSION as INGAME_MODEL_VERSION
 from backend.model.ingame import build_serving_inputs, win_probability
 
 ACTIVE = {"in progress", "in_progress", "inprogress", "live"}
@@ -98,7 +99,7 @@ def score_snapshot(receipt, anchor, params, *, max_age_seconds=180):
         reason="inactive",
         source_age_seconds=None,
         request_seconds=receipt["request_seconds"],
-        model_version="ingame_baseline_v1",
+        model_version=INGAME_MODEL_VERSION,
     )
     if str(payload.get("status", "")).lower() not in ACTIVE:
         return result

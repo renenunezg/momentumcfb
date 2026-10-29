@@ -11,6 +11,9 @@ import pandas as pd
 
 from backend.etl.ingest import to_snake
 from backend.features.scoring import build_weekly_scoring_games
+from backend.model.forecast_calibration import (
+    MODEL_VERSION as FORECAST_MODEL_VERSION,
+)
 from backend.model.forecast_calibration import apply_forecast_calibration
 from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.preseason import scoring_priors_from_ratings
@@ -436,7 +439,7 @@ def build(args):
         schema_version=1,
         season=2026,
         status="published",
-        model="joint_scoring_v14",
+        model=FORECAST_MODEL_VERSION,
         model_as_of=state.cutoff.isoformat(),
         results_as_of=cutoff.isoformat(),
         ap_week=ap_week,
