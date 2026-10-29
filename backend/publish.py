@@ -777,15 +777,16 @@ def fetch_graded_games(season: int) -> pd.DataFrame:
     with engine.connect() as conn:
         if not _table_exists(conn, "graded_games"):
             return pd.DataFrame(columns=GRADED_GAME_COLUMNS)
+        stored = _table_columns(conn, "graded_games")
         return pd.read_sql_query(
             text(
                 "SELECT "
-                + ", ".join(GRADED_GAME_COLUMNS)
+                + ", ".join(c for c in GRADED_GAME_COLUMNS if c in stored)
                 + f" FROM {CFB_SCHEMA}.graded_games WHERE season = :s ORDER BY game_id"
             ),
             conn,
             params={"s": season},
-        )
+        ).reindex(columns=GRADED_GAME_COLUMNS)
 
 
 def publish_grading(season: int) -> dict[str, int]:
@@ -797,14 +798,30 @@ def publish_grading(season: int) -> dict[str, int]:
     metric_rows = _serving_frame(metrics, PERFORMANCE_METRIC_COLUMNS)
 
     with engine.begin() as conn:
+        # A graded game is written once and never rewritten; the database
+        # refuses updates and deletes once its freeze trigger is applied.
+        stored_ids = set(
+            conn.execute(
+                text(
+                    f"SELECT game_id FROM {CFB_SCHEMA}.graded_games WHERE season = :s"
+                ),
+                {"s": season},
+            ).scalars()
+        )
+        missing = stored_ids - set(graded_rows["game_id"].astype(int))
+        if missing:
+            raise ValueError(
+                f"the local grading artifact lacks {len(missing)} stored games; "
+                "run grade again so it starts from the stored rows"
+            )
+        conn.execute(
+            text(f"DELETE FROM {CFB_SCHEMA}.performance_metrics WHERE season = :s"),
+            {"s": season},
+        )
         for table, rows in (
-            ("graded_games", graded_rows),
+            ("graded_games", graded_rows[~graded_rows["game_id"].isin(stored_ids)]),
             ("performance_metrics", metric_rows),
         ):
-            conn.execute(
-                text(f"DELETE FROM {CFB_SCHEMA}.{table} WHERE season = :s"),
-                {"s": season},
-            )
             if not rows.empty:
                 # Columns added by an unapplied migration wait for it rather
                 # than failing the weekly publish.

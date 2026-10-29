@@ -60,6 +60,7 @@ GRADED_GAME_COLUMNS = [
     "away_missing_input_count",
     "model_version",
     "forecast_as_of",
+    "forecast_published_at",
     "pure_home_margin",
     "market_informed_home_margin",
     "market_weight",
@@ -180,7 +181,18 @@ def build_graded_games(
     frozen["start_date"] = pd.to_datetime(frozen["start_date"], utc=True)
     frozen["as_of"] = pd.to_datetime(frozen["as_of"], utc=True)
     # Only a projection published before kickoff is a grade-able forecast.
-    frozen = frozen[frozen["as_of"].lt(frozen["start_date"])]
+    # Rows published before the database stamped publication carry no
+    # published_at; for them the forecast's as_of is the evidence.
+    published = (
+        pd.to_datetime(frozen["published_at"], utc=True)
+        if "published_at" in frozen
+        else pd.Series(pd.NaT, index=frozen.index, dtype="datetime64[ns, UTC]")
+    )
+    frozen["published_at"] = published
+    frozen = frozen[
+        frozen["as_of"].lt(frozen["start_date"])
+        & (published.isna() | published.lt(frozen["start_date"]))
+    ]
     frozen = frozen.drop_duplicates("game_id", keep="last")
 
     merged = completed.merge(
@@ -217,6 +229,7 @@ def build_graded_games(
             "away_missing_input_count": merged["away_missing_input_count"],
             "model_version": merged["model_version"],
             "forecast_as_of": merged["as_of"],
+            "forecast_published_at": merged["published_at"],
             "pure_home_margin": merged["pure_home_margin"].fillna(
                 merged["home_margin"]
             ),
@@ -261,7 +274,13 @@ def _graded_frame(new: pd.DataFrame, existing: pd.DataFrame | None) -> pd.DataFr
     if not parts:
         return pd.DataFrame(columns=GRADED_GAME_COLUMNS)
     out = _correct_legacy_probabilities(pd.concat(parts, ignore_index=True))
-    for column in ("start_date", "forecast_as_of", "source_ingested_at", "graded_at"):
+    for column in (
+        "start_date",
+        "forecast_as_of",
+        "forecast_published_at",
+        "source_ingested_at",
+        "graded_at",
+    ):
         out[column] = pd.to_datetime(out[column], utc=True)
     return out.sort_values(["start_date", "game_id"], kind="stable", ignore_index=True)
 

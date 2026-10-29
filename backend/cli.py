@@ -380,11 +380,6 @@ def _add_publish_commands(sub) -> None:
         default=None,
         help="freeze prospective shadow totals from a historical calibration",
     )
-    grade.add_argument(
-        "--regrade",
-        action="store_true",
-        help="rebuild every graded row instead of keeping stored grades",
-    )
 
     publish_grading = sub.add_parser(
         "publish-grading",

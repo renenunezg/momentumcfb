@@ -30,7 +30,8 @@ def handle_grade(args: Namespace) -> None:
     store.write_processed(
         projections, "players", "published_projections", f"{args.season}.parquet"
     )
-    existing = None if args.regrade else fetch_graded_games(args.season)
+    # Stored grades are frozen records; only newly completed games are added.
+    existing = fetch_graded_games(args.season)
     graded = build_graded_games(args.season, projections, existing)
 
     picks = fetch_recommendations(args.season)
@@ -80,7 +81,7 @@ def handle_grade(args: Namespace) -> None:
         },
     )
 
-    kept = 0 if existing is None else len(existing)
+    kept = len(existing)
     log.info(
         f"graded {len(graded)} {args.season} games "
         f"({len(graded) - kept} new, {kept} kept); "
