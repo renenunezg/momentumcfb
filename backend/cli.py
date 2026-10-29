@@ -387,6 +387,15 @@ def _add_publish_commands(sub) -> None:
     )
     publish_grading.add_argument("--season", type=int, required=True)
 
+    ledger = sub.add_parser(
+        "ledger",
+        help="export the public forecast and pick ledgers, or rebuild the "
+        "performance page from them alone",
+    )
+    ledger.add_argument("action", choices=("export", "rebuild"))
+    ledger.add_argument("--season", type=int, required=True)
+    ledger.add_argument("--directory", required=True)
+
     ingest_players = sub.add_parser(
         "ingest-players",
         help="snapshot CFBD rosters, rankings, box scores, and play stats",

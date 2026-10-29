@@ -413,7 +413,11 @@ def compute_performance_metrics(
     computed_at = computed_at or datetime.now(timezone.utc)
     if graded.empty:
         return pd.DataFrame(columns=PERFORMANCE_METRIC_COLUMNS)
-    graded = _correct_legacy_probabilities(graded)
+    # A fixed game order makes the bootstrap interval independent of how the
+    # rows arrive (database, artifact or public ledger).
+    graded = _correct_legacy_probabilities(graded).sort_values(
+        "game_id", kind="stable", ignore_index=True
+    )
     season = int(graded["season"].iloc[0])
     rows = []
     for source in PREDICTION_SOURCES:

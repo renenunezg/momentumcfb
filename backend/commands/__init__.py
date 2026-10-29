@@ -7,6 +7,7 @@ from backend.commands.availability import handle_qb_availability_reports
 from backend.commands.grading import (
     handle_diagnose,
     handle_grade,
+    handle_ledger,
     handle_publish_grading,
 )
 from backend.commands.ingame import (
@@ -105,6 +106,7 @@ HANDLERS: dict[str, Handler] = {
     "grade": handle_grade,
     "diagnose": handle_diagnose,
     "publish-grading": handle_publish_grading,
+    "ledger": handle_ledger,
     "ingest-players": handle_ingest_players,
     "ingest-portal": handle_ingest_portal,
     "player-prior": handle_player_prior,

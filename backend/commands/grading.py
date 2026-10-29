@@ -115,6 +115,40 @@ def handle_publish_grading(args: Namespace) -> None:
         log.info(f"cfb.{table}: {count} rows stored for season {args.season}")
 
 
+def handle_ledger(args: Namespace) -> None:
+    from pathlib import Path
+
+    from backend.ledger import export_ledgers, rebuild_from_ledgers
+
+    directory = Path(args.directory)
+    if args.action == "export":
+        counts = export_ledgers(args.season, directory)
+        log.info(f"wrote {args.season} ledgers to {directory}: {counts}")
+        return
+    metrics, summary = rebuild_from_ledgers(args.season, directory)
+    overall = metrics[metrics["segment_kind"].eq("overall")]
+    log.info(
+        overall[
+            [
+                "prediction_source",
+                "games",
+                "margin_mae",
+                "model_minus_market_mae",
+                "model_minus_market_mae_lo_95",
+                "model_minus_market_mae_hi_95",
+                "brier_score",
+            ]
+        ].to_string(index=False)
+    )
+    picks = summary[summary["segment_kind"].eq("overall")]
+    log.info(
+        picks[["picks", "wins", "losses", "pushes", "profit_units", "roi"]].to_string(
+            index=False
+        )
+    )
+    log.info(f"wrote the rebuilt performance page numbers to {directory}")
+
+
 def handle_diagnose(args: Namespace) -> None:
     from pathlib import Path
 
