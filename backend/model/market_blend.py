@@ -46,6 +46,12 @@ def _consensus_home_spread(offers: pd.DataFrame) -> pd.Series:
     )
 
 
+def consensus_home_spread(game_offers: pd.DataFrame) -> float:
+    """Median posted home spread across one game's offers, or NaN without one."""
+    medians = _consensus_home_spread(game_offers)
+    return float(medians.iloc[0]) if len(medians) == 1 else float("nan")
+
+
 def add_market_informed_margins(
     projections: pd.DataFrame,
     offers: pd.DataFrame,

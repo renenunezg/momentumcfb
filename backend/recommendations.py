@@ -9,7 +9,7 @@ from scipy.optimize import brentq
 from scipy.stats import t
 
 from backend.model.distributions import marginal_cdf, marginal_scale
-from backend.model.market_blend import consensus_total
+from backend.model.market_blend import consensus_home_spread, consensus_total
 from backend.model.spread_pricing import (
     SPREAD_CALIBRATION_VERSION,
     SPREAD_METHOD,
@@ -83,9 +83,28 @@ RECOMMENDATION_COLUMNS = [
     "model_home_margin",
     "model_total",
     "market_total",
+    "decision_market_point",
+    "decision_market_probability",
     "margin_sd",
     "total_sd",
     "degrees_of_freedom",
+]
+# Closing line value has two readings. clv_points compares the price taken,
+# the best of every book in the feed, with the CFBD median close, so line
+# shopping alone makes it positive. The clv_market_* fields compare the median
+# posted line (or vig-free median moneyline) at decision time with the CFBD
+# median close: whether the market itself moved toward the pick.
+MARKET_CLV_COLUMNS = [
+    "closing_probability",
+    "clv_market_points",
+    "clv_market_probability",
+]
+CLOSING_LINE_COLUMNS = [
+    "closing_point",
+    "closing_price",
+    "closing_source",
+    "clv_points",
+    *MARKET_CLV_COLUMNS,
 ]
 SETTLEMENT_COLUMNS = [
     "game_id",
@@ -96,16 +115,7 @@ SETTLEMENT_COLUMNS = [
     "away_points",
     "profit_units",
     "graded_at",
-    "closing_point",
-    "closing_price",
-    "closing_source",
-    "clv_points",
-]
-CLOSING_LINE_COLUMNS = [
-    "closing_point",
-    "closing_price",
-    "closing_source",
-    "clv_points",
+    *CLOSING_LINE_COLUMNS,
 ]
 CLOSING_SOURCE = "cfbd_lines_median"
 
@@ -391,6 +401,7 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
         # recorded availability-adjusted decision forecast. The
         # median posted total at decision time is recorded for reference.
         market_total = consensus_total(game_offers)
+        market_home_spread = consensus_home_spread(game_offers)
         priced_projection = projection._replace(
             margin_sd=PRICING_MARGIN_SD,
             total_sd=PRICING_TOTAL_SD,
@@ -560,6 +571,13 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
                     status="recommended" if block is None else "no_play",
                     reason=block or "qualifying_edge",
                     stake_units=1.0 if block is None else 0.0,
+                    **_decision_market(
+                        market,
+                        best["side"],
+                        market_home_spread,
+                        market_total,
+                        market_probability,
+                    ),
                 )
                 if market == "spreads" and spread_inputs is not None:
                     direction = 1.0 if best["side"] == "home" else -1.0
@@ -629,24 +647,89 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
     return decisions
 
 
+def _decision_market(market, side, home_spread, total, home_probability):
+    """The median market on the selected side when the decision was made:
+    the posted line for spreads and totals, the vig-free probability for
+    moneylines. Missing medians stay null rather than defaulting."""
+    point = probability = None
+    if market == "spreads" and np.isfinite(home_spread):
+        point = home_spread if side == "home" else -home_spread
+    elif market == "totals" and np.isfinite(total):
+        point = total
+    elif market == "h2h" and home_probability is not None:
+        probability = home_probability if side == "home" else 1.0 - home_probability
+    return dict(decision_market_point=point, decision_market_probability=probability)
+
+
+def _present(value):
+    return value is not None and not pd.isna(value)
+
+
+def _recorded_decision_market(pick):
+    """The decision-time median for a pick, preferring the recorded column and
+    otherwise reading the same quantity from fields frozen at decision time:
+    the median posted total, or the moneyline's vig-free median reference."""
+    point = getattr(pick, "decision_market_point", None)
+    probability = getattr(pick, "decision_market_probability", None)
+    if not _present(point) and pick.market == "totals":
+        point = getattr(pick, "market_total", None)
+    if not _present(probability) and pick.market == "h2h":
+        context = getattr(pick, "pricing_context", None)
+        home = context.get("market_home_probability") if context else None
+        if _present(home):
+            probability = home if pick.side == "home" else 1.0 - home
+    return (
+        float(point) if _present(point) else None,
+        float(probability) if _present(probability) else None,
+    )
+
+
+def _vig_free_probability(side_price, other_price):
+    side = 1.0 / (1.0 + _american_profit(side_price))
+    other = 1.0 / (1.0 + _american_profit(other_price))
+    return side / (side + other)
+
+
 def closing_line_value(pick, closing):
-    """The closing number for the pick's side and the points it beat the close.
+    """The closing number for the pick's side and how the pick compares to it.
 
     ``closing`` is indexed by game_id with the CFBD median closing_spread,
-    closing_total and closing_home_moneyline/closing_away_moneyline. Positive
-    clv_points means the market moved toward the pick after the decision.
-    Spreads and totals compare lines; a moneyline records only the closing
-    price for its side because its value lives in the price.
+    closing_total and closing_home_moneyline/closing_away_moneyline.
+    clv_points is the taken line minus the close (spreads and totals).
+    clv_market_points is the decision-time median line minus the close, and
+    clv_market_probability is the closing vig-free probability of the pick's
+    side minus its decision-time vig-free median; both are positive when the
+    market moved toward the pick after the decision. A moneyline records its
+    closing price and, with both closing sides, its closing probability.
     """
     empty = dict.fromkeys(CLOSING_LINE_COLUMNS)
     if closing is None or pick.game_id not in closing.index:
         return empty
     row = closing.loc[pick.game_id]
+    decision_point, decision_probability = _recorded_decision_market(pick)
     if pick.market == "h2h":
         price = row.get(f"closing_{pick.side}_moneyline")
         if price is None or pd.isna(price):
             return empty
-        return dict(empty, closing_price=float(price), closing_source=CLOSING_SOURCE)
+        other = row.get(
+            f"closing_{'away' if pick.side == 'home' else 'home'}_moneyline"
+        )
+        probability = (
+            _vig_free_probability(float(price), float(other))
+            if _present(other)
+            else None
+        )
+        return dict(
+            empty,
+            closing_price=float(price),
+            closing_source=CLOSING_SOURCE,
+            closing_probability=probability,
+            clv_market_probability=(
+                probability - decision_probability
+                if probability is not None and decision_probability is not None
+                else None
+            ),
+        )
     if pick.market == "spreads":
         spread = row.get("closing_spread")
         if spread is None or pd.isna(spread):
@@ -657,6 +740,9 @@ def closing_line_value(pick, closing):
             closing_point=point,
             closing_source=CLOSING_SOURCE,
             clv_points=float(pick.point) - point,
+            clv_market_points=(
+                decision_point - point if decision_point is not None else None
+            ),
         )
     total = row.get("closing_total")
     if total is None or pd.isna(total):
@@ -667,16 +753,25 @@ def closing_line_value(pick, closing):
         closing_point=float(total),
         closing_source=CLOSING_SOURCE,
         clv_points=direction * (float(total) - float(pick.point)),
+        clv_market_points=(
+            direction * (float(total) - decision_point)
+            if decision_point is not None
+            else None
+        ),
     )
 
 
 def closing_line_backfill(recommendations, closing):
     """Closing numbers for settled picks that were graded before closing
-    lines were recorded. Rows carry only the closing fields."""
+    lines, or before the decision-median comparison, were recorded. Rows
+    carry only the closing fields; the publisher writes each field once."""
+    missing_market = (
+        recommendations.reindex(columns=MARKET_CLV_COLUMNS).isna().all(axis=1)
+    )
     settled = recommendations[
         recommendations["status"].eq("recommended")
         & recommendations["outcome"].isin(["win", "loss", "push"])
-        & recommendations["closing_source"].isna()
+        & (recommendations["closing_source"].isna() | missing_market)
     ]
     rows = [
         dict(
@@ -690,7 +785,12 @@ def closing_line_backfill(recommendations, closing):
     frame = pd.DataFrame(
         rows, columns=["game_id", "market", "decision_at", *CLOSING_LINE_COLUMNS]
     )
-    return frame[frame["closing_source"].notna()].reset_index(drop=True)
+    # A pick that already has its close and gains no market comparison (a
+    # spread decided before the decision median was recorded) has nothing new.
+    recorded = settled["closing_source"].notna().to_numpy()
+    adds_market = frame[MARKET_CLV_COLUMNS].notna().any(axis=1).to_numpy()
+    keep = frame["closing_source"].notna().to_numpy() & (~recorded | adds_market)
+    return frame[keep].reset_index(drop=True)
 
 
 def grade_recommendations(recommendations, games, closing=None, *, graded_at=None):

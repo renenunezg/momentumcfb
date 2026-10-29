@@ -974,7 +974,15 @@ def _publish_recommendations(conn, decisions):
 
     if decisions.empty:
         return 0
-    rows = _serving_frame(decisions, RECOMMENDATION_COLUMNS)
+    # Columns added by an unapplied migration wait for it on both tables.
+    stored = _table_columns(conn, "recommendations") & _table_columns(
+        conn, "recommendation_decisions"
+    )
+    pending = [c for c in RECOMMENDATION_COLUMNS if c not in stored]
+    if pending:
+        log.warning(f"cfb recommendation tables lack {pending}; apply the migration")
+    columns_written = [c for c in RECOMMENDATION_COLUMNS if c in stored]
+    rows = _serving_frame(decisions, columns_written)
     import json
 
     import numpy as np
@@ -995,13 +1003,11 @@ def _publish_recommendations(conn, decisions):
         f"jsonb_populate_recordset(NULL::{CFB_SCHEMA}.recommendation_decisions, "
         "CAST(:decisions AS jsonb)) AS fresh"
     )
-    columns = ", ".join(RECOMMENDATION_COLUMNS)
-    values = ", ".join(f"fresh.{c}" for c in RECOMMENDATION_COLUMNS)
+    columns = ", ".join(columns_written)
+    values = ", ".join(f"fresh.{c}" for c in columns_written)
     # Publish one batch, including one cache invalidation, per table.
     updates = ", ".join(
-        f"{c} = excluded.{c}"
-        for c in RECOMMENDATION_COLUMNS
-        if c not in {"game_id", "market"}
+        f"{c} = excluded.{c}" for c in columns_written if c not in {"game_id", "market"}
     )
     conn.execute(
         text(
@@ -1076,7 +1082,11 @@ def fetch_recommendations(season):
 def publish_recommendation_grades(season):
     from backend.db import engine
     from backend.etl import store
-    from backend.recommendations import CLOSING_LINE_COLUMNS, SETTLEMENT_COLUMNS
+    from backend.recommendations import (
+        CLOSING_LINE_COLUMNS,
+        MARKET_CLV_COLUMNS,
+        SETTLEMENT_COLUMNS,
+    )
 
     grades = store.read_processed("grading", f"recommendations_{season}.parquet")
     try:
@@ -1087,9 +1097,14 @@ def publish_recommendation_grades(season):
         backfill = pd.DataFrame(columns=["game_id", "market", "decision_at"])
     if grades.empty and backfill.empty:
         return 0
-    closing_updates = ", ".join(f"{c} = :{c}" for c in CLOSING_LINE_COLUMNS)
     settled = 0
     with engine.begin() as conn:
+        stored = _table_columns(conn, "recommendations")
+        closing_columns = [c for c in CLOSING_LINE_COLUMNS if c in stored]
+        market_columns = [c for c in MARKET_CLV_COLUMNS if c in stored]
+        if len(closing_columns) < len(CLOSING_LINE_COLUMNS):
+            log.warning("cfb.recommendations lacks the market CLV columns")
+        closing_updates = ", ".join(f"{c} = :{c}" for c in closing_columns)
         if not grades.empty:
             settled = conn.execute(
                 text(
@@ -1100,27 +1115,54 @@ def publish_recommendation_grades(season):
                     "AND season = :season "
                     "AND outcome = 'pending'"
                 ),
-                _serving_frame(grades, SETTLEMENT_COLUMNS)
+                _serving_frame(
+                    grades,
+                    [
+                        c
+                        for c in SETTLEMENT_COLUMNS
+                        if c in stored or c == "decision_at"
+                    ],
+                )
                 .assign(season=season)
                 .to_dict("records"),
             ).rowcount
         if not backfill.empty:
             # Picks settled before closing lines were recorded receive theirs
-            # once; the database trigger admits no other change to a settled pick.
+            # once, and picks settled before the decision-median comparison
+            # receive only those fields once; the database trigger admits no
+            # other change to a settled pick.
+            records = (
+                _serving_frame(
+                    backfill, ["game_id", "market", "decision_at", *closing_columns]
+                )
+                .assign(season=season)
+                .to_dict("records")
+            )
+            key = (
+                "WHERE game_id = :game_id AND market = :market "
+                "AND decision_at = :decision_at AND season = :season "
+                "AND outcome IN ('win', 'loss', 'push') "
+            )
             conn.execute(
                 text(
                     f"UPDATE {CFB_SCHEMA}.recommendations SET {closing_updates} "
-                    "WHERE game_id = :game_id AND market = :market AND decision_at = :decision_at "
-                    "AND season = :season AND closing_source IS NULL "
-                    "AND outcome IN ('win', 'loss', 'push')"
+                    + key
+                    + "AND closing_source IS NULL"
                 ),
-                _serving_frame(
-                    backfill,
-                    ["game_id", "market", "decision_at", *CLOSING_LINE_COLUMNS],
-                )
-                .assign(season=season)
-                .to_dict("records"),
+                records,
             )
+            if market_columns:
+                conn.execute(
+                    text(
+                        f"UPDATE {CFB_SCHEMA}.recommendations SET "
+                        + ", ".join(f"{c} = :{c}" for c in market_columns)
+                        + " "
+                        + key
+                        + "AND closing_source IS NOT NULL AND "
+                        + " AND ".join(f"{c} IS NULL" for c in market_columns)
+                    ),
+                    records,
+                )
     return settled
 
 
