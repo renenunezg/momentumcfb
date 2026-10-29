@@ -1,13 +1,20 @@
-"""The served pure model's walk-forward backtest, as published to
+"""The core joint scoring model's walk-forward backtest, as published to
 cfb.backtest_predictions.
 
 Rows come from the joint scoring walk-forward stored at
 ``calibration/joint_scoring_predictions.parquet`` (``CALIBRATION_ARTIFACT``):
 one FBS vs FBS prediction per game, each fitted only on games that started
 before it. The benchmark is the CFBD median closing spread, resolved exactly
-as live grading resolves it. The artifact must carry the joint scoring model
-version the weekly forecast serves, so a stale walk-forward cannot be
-published under the current model's name.
+as live grading resolves it.
+
+The rows are ``joint_scoring_v13``, the core fit the weekly forecast runs
+(``joint_scoring.MODEL_VERSION``). Live forecasts are stamped
+``joint_scoring_v14`` after the frozen final-mean calibration in
+``backend/model/forecast_calibration.py`` adds a process margin adjustment and
+a median total offset, which this walk-forward does not apply. The backtest
+and the live record are two populations from two versions, not one series.
+The artifact must carry the current core version, so a stale walk-forward
+cannot be published under the current model's name.
 """
 
 import pandas as pd
