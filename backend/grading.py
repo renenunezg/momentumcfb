@@ -1,13 +1,17 @@
 """Grade frozen published projections against final scores and closing lines.
 
 Inputs are records frozen before the result was known: the projection row
-published before kickoff, the CFBD closing line, and the final score. A game
-is graded once; later runs keep stored rows and add newly completed games.
-The closing line is a benchmark graded alongside the model, never an input.
+published before kickoff, the closing line, and the final score. A game is
+graded once; later runs keep stored rows and add newly completed games. The
+closing line is a benchmark graded alongside the model, never an input. It is
+the captured ``cfb.closing_lines`` row when the kickoff capture recorded one,
+labelled by its source, else the CFBD provider median labelled
+``cfbd_lines_median``; every metric row reports how many games came from each.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import numpy as np
@@ -113,6 +117,7 @@ PERFORMANCE_METRIC_COLUMNS = [
     "probability_games",
     "brier_score",
     "log_loss",
+    "closing_source_games",
     "computed_at",
 ]
 
@@ -149,17 +154,67 @@ def _correct_legacy_probabilities(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+CLOSING_COLUMNS = [
+    "game_id",
+    "closing_spread",
+    "closing_total",
+    "n_spread_offers",
+    "n_total_offers",
+    "closing_source",
+]
+
+
+def resolve_closing_lines(
+    lines: pd.DataFrame, captured: pd.DataFrame | None = None
+) -> pd.DataFrame:
+    """One closing spread and total per game with the source that supplied it.
+
+    A game the kickoff capture recorded in ``cfb.closing_lines`` takes that
+    row whole, under the capture's own source label; every other game takes
+    the CFBD provider median under ``cfbd_lines_median``. The two are never
+    mixed within a game, so a row's source names both of its numbers.
+    """
+    cfbd = flatten_closing_lines(lines).merge(
+        flatten_closing_totals(lines), on="game_id", how="outer"
+    )
+    cfbd["closing_source"] = CLOSING_SOURCE
+    if captured is None or captured.empty:
+        return cfbd.reindex(columns=CLOSING_COLUMNS)
+    if captured["game_id"].duplicated().any():
+        raise ValueError("captured closing lines carry more than one row for a game")
+    recorded = captured[captured["home_spread"].notna() | captured["total"].notna()]
+    recorded = pd.DataFrame(
+        {
+            "game_id": recorded["game_id"].astype(int),
+            "closing_spread": recorded["home_spread"].astype(float),
+            "closing_total": recorded["total"].astype(float),
+            "n_spread_offers": recorded["n_spread_offers"],
+            "n_total_offers": recorded["n_total_offers"],
+            "closing_source": recorded["source"].astype(str),
+        }
+    )
+    fallback = cfbd[~cfbd["game_id"].isin(recorded["game_id"])]
+    return (
+        pd.concat([recorded, fallback], ignore_index=True)
+        .reindex(columns=CLOSING_COLUMNS)
+        .sort_values("game_id", kind="stable", ignore_index=True)
+    )
+
+
 def build_graded_games(
     season: int,
     projections: pd.DataFrame,
     existing: pd.DataFrame | None = None,
     graded_at: datetime | None = None,
+    captured: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Grade every completed game with a pregame published projection.
 
     ``projections`` is the published cfb.game_projections record for the
-    season. Existing frozen inputs are preserved; the legacy probability
-    scale calculation is repaired from those inputs when present.
+    season; ``captured`` the season's ``cfb.closing_lines`` rows, preferred
+    over the CFBD median where present. Existing frozen inputs are preserved;
+    the legacy probability scale calculation is repaired from those inputs
+    when present.
     """
     graded_at = graded_at or datetime.now(timezone.utc)
     games = store.read_games(season)
@@ -202,10 +257,9 @@ def build_graded_games(
     if merged.empty:
         return _graded_frame(pd.DataFrame(), existing)
 
-    closing = flatten_closing_lines(lines).merge(
-        flatten_closing_totals(lines), on="game_id", how="outer"
+    merged = merged.merge(
+        resolve_closing_lines(lines, captured), on="game_id", how="left"
     )
-    merged = merged.merge(closing, on="game_id", how="left")
 
     out = pd.DataFrame(
         {
@@ -244,11 +298,9 @@ def build_graded_games(
             "closing_total": merged["closing_total"],
             "n_spread_offers": merged["n_spread_offers"],
             "n_total_offers": merged["n_total_offers"],
-            "closing_source": np.where(
-                merged["closing_spread"].notna() | merged["closing_total"].notna(),
-                CLOSING_SOURCE,
-                None,
-            ),
+            "closing_source": merged["closing_source"]
+            .astype(object)
+            .where(merged["closing_source"].notna(), None),
             "home_points": merged["home_points"].astype(int),
             "away_points": merged["away_points"].astype(int),
             "score_source": SCORE_SOURCE,
@@ -404,6 +456,14 @@ def _error_stats(prediction: pd.Series, actual: pd.Series) -> dict[str, float | 
     }
 
 
+def _closing_source_games(frame: pd.DataFrame) -> str:
+    """Graded games per closing source among the frame's games with a closing
+    spread, as a JSON object; the populations are reported, never pooled."""
+    benchmarked = frame[frame["closing_spread"].notna()]
+    counts = benchmarked["closing_source"].value_counts()
+    return json.dumps({str(k): int(v) for k, v in sorted(counts.items())})
+
+
 def compute_performance_metrics(
     graded: pd.DataFrame, computed_at: datetime | None = None
 ) -> pd.DataFrame:
@@ -455,6 +515,7 @@ def compute_performance_metrics(
                 "probability_games": None,
                 "brier_score": None,
                 "log_loss": None,
+                "closing_source_games": _closing_source_games(frame),
                 "computed_at": computed_at,
             }
             prediction = margin_prediction[frame.index]

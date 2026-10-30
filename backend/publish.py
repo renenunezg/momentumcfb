@@ -10,6 +10,7 @@ tables written here are that API surface:
 - market_comparisons    best priced offer vs model, one row per game
 - backtest_predictions  served model walk-forward history, full refresh
 - graded_games          frozen live-season grading record, one row per game
+- closing_lines         captured pregame closing line, one row per game, written once
 - performance_metrics   live-season aggregates per source and segment
 
 Writes are DELETE plus append (TRUNCATE for full refreshes) so policies and
@@ -500,6 +501,75 @@ def publish_serving_anchors(season: int, anchor_week: int) -> int:
                 ),
                 {"s": season, "w": anchor_week},
             ).scalar()
+        )
+
+
+def publish_closing_lines(
+    season: int, *, forecast_directory: str | None = None
+) -> tuple[int, int]:
+    """Write one ``cfb.closing_lines`` row per frozen market anchor, once.
+
+    Returns (rows built, rows inserted). A game already recorded keeps its
+    row; the database refuses any later change and any row fetched after
+    its start or recorded more than a day after it.
+    """
+    from backend.db import engine
+    from backend.odds.kickoff import capture_closing_lines
+    from backend.serving.closing_lines import CLOSING_LINES_COLUMNS
+
+    built = capture_closing_lines(season, forecast_directory=forecast_directory)
+    rows = _serving_frame(built, CLOSING_LINES_COLUMNS)
+    if rows.empty:
+        return 0, 0
+    with engine.begin() as conn:
+        missing = sorted(
+            set(CLOSING_LINES_COLUMNS) - _table_columns(conn, "closing_lines")
+        )
+        if missing:
+            raise ValueError(f"cfb.closing_lines lacks {missing}; apply migrations")
+        # The freeze trigger judges every row it sees, so a game recorded on
+        # an earlier run is left out here rather than re-offered to it.
+        stored = set(
+            conn.execute(
+                text(
+                    f"SELECT game_id FROM {CFB_SCHEMA}.closing_lines WHERE season = :s"
+                ),
+                {"s": season},
+            ).scalars()
+        )
+        rows = rows[~rows["game_id"].astype(int).isin(stored)]
+        if rows.empty:
+            return len(built), 0
+        inserted = conn.execute(
+            text(
+                f"INSERT INTO {CFB_SCHEMA}.closing_lines ("
+                + ", ".join(CLOSING_LINES_COLUMNS)
+                + ") SELECT "
+                + ", ".join(CLOSING_LINES_COLUMNS)
+                + f" FROM jsonb_populate_recordset(NULL::{CFB_SCHEMA}.closing_lines, "
+                "CAST(:rows AS jsonb)) ON CONFLICT (game_id) DO NOTHING"
+            ),
+            {"rows": _jsonb_rows(rows)},
+        ).rowcount
+    return len(built), int(inserted)
+
+
+def fetch_closing_lines(season: int) -> pd.DataFrame:
+    """The captured closing lines of one season; empty before the table exists."""
+    from backend.db import engine
+    from backend.serving.closing_lines import CLOSING_LINES_COLUMNS
+
+    with engine.connect() as conn:
+        if not _table_exists(conn, "closing_lines"):
+            return pd.DataFrame(columns=CLOSING_LINES_COLUMNS)
+        return pd.read_sql_query(
+            text(
+                "SELECT "
+                + ", ".join(CLOSING_LINES_COLUMNS)
+                + f" FROM {CFB_SCHEMA}.closing_lines WHERE season = :s ORDER BY game_id"
+            ),
+            conn,
+            params={"s": season},
         )
 
 
@@ -1242,6 +1312,11 @@ def ensure_recommendation_schema():
                 "sql/20261029121000_recommendation_market_clv.sql",
                 "recommendations",
                 CLOSING_LINE_COLUMNS,
+            ),
+            (
+                "sql/20261030120000_closing_lines.sql",
+                "performance_metrics",
+                ["closing_source_games"],
             ),
             (
                 "sql/20261029123000_forecast_freeze.sql",

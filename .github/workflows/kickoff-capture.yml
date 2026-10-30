@@ -234,6 +234,19 @@ jobs:
           MOMENTUMCFB_DB_WRITES: "1"
         run: poetry run python -m backend publish-anchors --season "$SEASON" --week 0
 
+      # The same validated snapshot, recorded once per game as the shared
+      # closing-line contract. No provider is polled here.
+      - name: Record the captured closing lines
+        if: env.VALIDATE_ONLY != 'true'
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
+        run: |
+          arguments=(--season "$SEASON")
+          if [[ -n "${FORECAST_DIRECTORY:-}" ]]; then
+            arguments+=(--forecast-directory "$FORECAST_DIRECTORY")
+          fi
+          poetry run python -m backend publish-closing-lines "${arguments[@]}"
+
       - name: Preserve capture audit artifacts
         if: always()
         uses: actions/upload-artifact@v7

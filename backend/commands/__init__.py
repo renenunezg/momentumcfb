@@ -52,6 +52,7 @@ from backend.commands.publishing import (
     handle_publish,
     handle_publish_anchors,
     handle_publish_backtest,
+    handle_publish_closing_lines,
     handle_refresh_picks,
 )
 from backend.commands.serving import (
@@ -101,6 +102,7 @@ HANDLERS: dict[str, Handler] = {
     "live-replay": handle_live_replay,
     "publish": handle_publish,
     "publish-anchors": handle_publish_anchors,
+    "publish-closing-lines": handle_publish_closing_lines,
     "refresh-picks": handle_refresh_picks,
     "fetch-anchors": handle_fetch_anchors,
     "grade": handle_grade,

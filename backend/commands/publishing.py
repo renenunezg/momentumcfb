@@ -161,6 +161,18 @@ def handle_publish_anchors(args: Namespace) -> None:
     )
 
 
+def handle_publish_closing_lines(args: Namespace) -> None:
+    from backend.publish import publish_closing_lines
+
+    built, inserted = publish_closing_lines(
+        args.season, forecast_directory=args.forecast_directory
+    )
+    log.info(
+        f"cfb.closing_lines: {inserted} of {built} captured closing lines "
+        f"newly recorded for season {args.season}"
+    )
+
+
 def handle_fetch_anchors(args: Namespace) -> None:
     from backend.publish import fetch_serving_anchors
 

@@ -92,8 +92,8 @@ RECOMMENDATION_COLUMNS = [
 # Closing line value has two readings. clv_points compares the price taken,
 # the best of every book in the feed, with the CFBD median close, so line
 # shopping alone makes it positive. The clv_market_* fields compare the median
-# posted line (or vig-free median moneyline) at decision time with the CFBD
-# median close: whether the market itself moved toward the pick.
+# posted line (or vig-free median moneyline) at decision time with the close
+# (captured, else the CFBD median): whether the market moved toward the pick.
 MARKET_CLV_COLUMNS = [
     "closing_probability",
     "clv_market_points",
@@ -690,11 +690,29 @@ def _vig_free_probability(side_price, other_price):
     return side / (side + other)
 
 
-def closing_line_value(pick, closing):
+def _captured_close(pick, captured):
+    """The captured closing point, side price and source for a spread or total
+    pick, or None when the kickoff capture recorded no such line."""
+    if captured is None or pick.game_id not in captured.index:
+        return None
+    row = captured.loc[pick.game_id]
+    if pick.market == "spreads":
+        point, price = row.get("home_spread"), row.get(f"spread_{pick.side}_price")
+    else:
+        point, price = row.get("total"), row.get(f"{pick.side}_price")
+    if not _present(point):
+        return None
+    return float(point), float(price) if _present(price) else None, str(row["source"])
+
+
+def closing_line_value(pick, closing, captured=None):
     """The closing number for the pick's side and how the pick compares to it.
 
     ``closing`` is indexed by game_id with the CFBD median closing_spread,
-    closing_total and closing_home_moneyline/closing_away_moneyline.
+    closing_total and closing_home_moneyline/closing_away_moneyline;
+    ``captured`` by game_id with the ``cfb.closing_lines`` rows, which a
+    spread or total pick prefers, recording that row's source and side price.
+    A moneyline keeps the CFBD median.
     clv_points is the taken line minus the close (spreads and totals).
     clv_market_points is the decision-time median line minus the close, and
     clv_market_probability is the closing vig-free probability of the pick's
@@ -703,10 +721,38 @@ def closing_line_value(pick, closing):
     closing price and, with both closing sides, its closing probability.
     """
     empty = dict.fromkeys(CLOSING_LINE_COLUMNS)
+    decision_point, decision_probability = _recorded_decision_market(pick)
+    recorded = _captured_close(pick, captured) if pick.market != "h2h" else None
+    if recorded is not None:
+        point, price, source = recorded
+        if pick.market == "spreads":
+            point = point if pick.side == "home" else -point
+            return dict(
+                empty,
+                closing_point=point,
+                closing_price=price,
+                closing_source=source,
+                clv_points=float(pick.point) - point,
+                clv_market_points=(
+                    decision_point - point if decision_point is not None else None
+                ),
+            )
+        direction = 1.0 if pick.side == "over" else -1.0
+        return dict(
+            empty,
+            closing_point=point,
+            closing_price=price,
+            closing_source=source,
+            clv_points=direction * (point - float(pick.point)),
+            clv_market_points=(
+                direction * (point - decision_point)
+                if decision_point is not None
+                else None
+            ),
+        )
     if closing is None or pick.game_id not in closing.index:
         return empty
     row = closing.loc[pick.game_id]
-    decision_point, decision_probability = _recorded_decision_market(pick)
     if pick.market == "h2h":
         price = row.get(f"closing_{pick.side}_moneyline")
         if price is None or pd.isna(price):
@@ -761,7 +807,7 @@ def closing_line_value(pick, closing):
     )
 
 
-def closing_line_backfill(recommendations, closing):
+def closing_line_backfill(recommendations, closing, captured=None):
     """Closing numbers for settled picks that were graded before closing
     lines, or before the decision-median comparison, were recorded. Rows
     carry only the closing fields; the publisher writes each field once."""
@@ -778,7 +824,7 @@ def closing_line_backfill(recommendations, closing):
             game_id=pick.game_id,
             market=pick.market,
             decision_at=pick.decision_at,
-            **closing_line_value(pick, closing),
+            **closing_line_value(pick, closing, captured),
         )
         for pick in settled.itertuples()
     ]
@@ -793,10 +839,13 @@ def closing_line_backfill(recommendations, closing):
     return frame[keep].reset_index(drop=True)
 
 
-def grade_recommendations(recommendations, games, closing=None, *, graded_at=None):
+def grade_recommendations(
+    recommendations, games, closing=None, captured=None, *, graded_at=None
+):
     """Settle recorded picks only; never infer a past recommendation from EV.
 
-    ``closing`` optionally supplies the CFBD median closing lines so every
+    ``closing`` optionally supplies the CFBD median closing lines and
+    ``captured`` the kickoff capture's ``cfb.closing_lines`` rows, so every
     settled pick records its closing line value alongside the outcome.
     """
     now = _timestamp(graded_at or datetime.now(timezone.utc))
@@ -862,7 +911,7 @@ def grade_recommendations(recommendations, games, closing=None, *, graded_at=Non
                 profit_units=profit,
                 graded_at=now,
                 **(
-                    closing_line_value(pick, closing)
+                    closing_line_value(pick, closing, captured)
                     if result in ("win", "loss", "push")
                     else dict.fromkeys(CLOSING_LINE_COLUMNS)
                 ),

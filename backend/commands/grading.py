@@ -14,6 +14,7 @@ def handle_grade(args: Namespace) -> None:
         write_grading_artifacts,
     )
     from backend.publish import (
+        fetch_closing_lines,
         fetch_graded_games,
         fetch_published_projections,
         fetch_recommendations,
@@ -32,7 +33,10 @@ def handle_grade(args: Namespace) -> None:
     )
     # Stored grades are frozen records; only newly completed games are added.
     existing = fetch_graded_games(args.season)
-    graded = build_graded_games(args.season, projections, existing)
+    # The kickoff capture's closing line is preferred; the CFBD median is the
+    # labelled fallback for games it did not capture.
+    captured = fetch_closing_lines(args.season)
+    graded = build_graded_games(args.season, projections, existing, captured=captured)
 
     picks = fetch_recommendations(args.season)
     lines = store.read_lines(args.season)
@@ -42,11 +46,14 @@ def handle_grade(args: Namespace) -> None:
         .merge(flatten_closing_moneylines(lines), on="game_id", how="outer")
         .set_index("game_id")
     )
-    settlements = grade_recommendations(picks, store.read_games(args.season), closing)
+    captured_by_game = captured.set_index("game_id")
+    settlements = grade_recommendations(
+        picks, store.read_games(args.season), closing, captured_by_game
+    )
     store.write_processed(
         settlements, "grading", f"recommendations_{args.season}.parquet"
     )
-    backfill = closing_line_backfill(picks, closing)
+    backfill = closing_line_backfill(picks, closing, captured_by_game)
     store.write_processed(
         backfill, "grading", f"recommendation_closing_{args.season}.parquet"
     )
@@ -85,7 +92,8 @@ def handle_grade(args: Namespace) -> None:
     log.info(
         f"graded {len(graded)} {args.season} games "
         f"({len(graded) - kept} new, {kept} kept); "
-        f"{int(graded['closing_spread'].notna().sum())} with a closing spread"
+        f"{int(graded['closing_spread'].notna().sum())} with a closing spread "
+        f"by source {graded['closing_source'].value_counts().to_dict()}"
     )
     overall = metrics[
         metrics["segment_kind"].eq("overall")

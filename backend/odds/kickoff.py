@@ -7,7 +7,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from math import ceil, isfinite
+from math import ceil
 
 import pandas as pd
 
@@ -29,6 +29,11 @@ from backend.odds.live import (
 from backend.serving.anchors import (
     load_serving_anchors,
     serving_anchor_artifact,
+)
+from backend.serving.closing_lines import (
+    build_closing_lines,
+    closing_source,
+    paired_closing_totals,
 )
 from backend.serving.market import MARKET_ANCHOR_WEEK, build_live_market_anchors
 
@@ -673,7 +678,7 @@ def check_live_preflight(
     return problems, warnings, details
 
 
-def _window_schedule(season: int, forecast_directory: str | None) -> pd.DataFrame:
+def window_schedule(season: int, forecast_directory: str | None) -> pd.DataFrame:
     if forecast_directory:
         return load_weekly_capture_forecast(forecast_directory, season)[
             "schedule_coverage"
@@ -754,7 +759,7 @@ def check_kickoff_readiness(
         target, plan, market_plan = _plan_target(
             season,
             frames,
-            _window_schedule(season, forecast_directory),
+            window_schedule(season, forecast_directory),
             now,
             game_ids=game_ids,
             cluster_minutes=cluster_minutes,
@@ -810,46 +815,11 @@ def format_readiness(result: KickoffReadiness) -> str:
 def _paired_total_provider_updates(
     totals: pd.DataFrame, spread_providers: set[str]
 ) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
-    required = {
-        "provider_key",
-        "provider_last_update",
-        "selection",
-        "point",
-        "price",
+    paired = paired_closing_totals(totals, spread_providers)
+    return {
+        row.provider_key: (row.oldest_update, row.latest_update)
+        for row in paired.itertuples(index=False)
     }
-    if totals.empty or not required.issubset(totals.columns):
-        return {}
-    valid: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
-    for provider, group in totals.groupby("provider_key", dropna=True):
-        provider_key = str(provider)
-        if provider_key not in spread_providers:
-            continue
-        candidate = group.copy()
-        candidate["provider_last_update"] = pd.to_datetime(
-            candidate["provider_last_update"], utc=True, errors="coerce"
-        )
-        candidate["point"] = pd.to_numeric(candidate["point"], errors="coerce")
-        candidate["price"] = pd.to_numeric(candidate["price"], errors="coerce")
-        candidate = candidate.dropna(
-            subset=["provider_last_update", "selection", "point", "price"]
-        )
-        candidate = candidate[
-            candidate["point"].map(lambda value: isfinite(float(value)))
-            & candidate["price"].map(lambda value: isfinite(float(value)))
-        ]
-        candidate = candidate.sort_values(
-            "provider_last_update", kind="stable"
-        ).drop_duplicates("selection", keep="last")
-        paired = candidate[candidate["selection"].isin(["over", "under"])]
-        if set(paired["selection"]) != {"over", "under"}:
-            continue
-        if paired["point"].nunique() != 1:
-            continue
-        valid[provider_key] = (
-            paired["provider_last_update"].min(),
-            paired["provider_last_update"].max(),
-        )
-    return valid
 
 
 def _closing_spread_check(
@@ -1027,23 +997,14 @@ def validate_completed_window(
     offers["fetched_at"] = pd.to_datetime(
         offers["fetched_at"], utc=True, errors="coerce"
     )
-    kickoff_by_game = dict.fromkeys(target.game_ids)
     if schedule is None:
         schedule = load_division_one_schedule(int(anchors["season"].iloc[0]))
-    schedule = schedule.copy()
-    schedule["start_date"] = pd.to_datetime(
-        schedule["start_date"], utc=True, errors="coerce"
-    )
-    kickoff_by_game.update(
-        schedule[schedule["game_id"].isin(target.game_ids)]
-        .set_index("game_id")["start_date"]
-        .to_dict()
-    )
-    provider_kickoffs = _provider_kickoffs(events, target.game_ids)
+    scheduled_kickoffs = _scheduled_kickoffs(schedule, target.game_ids)
+    kickoffs = target_kickoffs(events, target.game_ids, schedule)
 
     for game_id, label in zip(target.game_ids, target.labels):
-        scheduled = kickoff_by_game.get(game_id)
-        kickoff = provider_kickoffs.get(game_id, scheduled)
+        scheduled = scheduled_kickoffs.get(game_id)
+        kickoff = kickoffs.get(game_id)
         if kickoff is None or pd.isna(kickoff):
             problems.append(f"{label} has no kickoff timestamp")
             continue
@@ -1067,6 +1028,28 @@ def validate_completed_window(
         if detail:
             details.append(detail)
     return problems, details
+
+
+def _scheduled_kickoffs(
+    schedule: pd.DataFrame, game_ids: tuple[int, ...]
+) -> dict[int, pd.Timestamp]:
+    schedule = schedule[schedule["game_id"].isin(game_ids)]
+    starts = pd.to_datetime(schedule["start_date"], utc=True, errors="coerce")
+    return {
+        int(game_id): start
+        for game_id, start in zip(schedule["game_id"], starts)
+        if pd.notna(start)
+    }
+
+
+def target_kickoffs(
+    events: pd.DataFrame, game_ids: tuple[int, ...], schedule: pd.DataFrame
+) -> dict[int, pd.Timestamp]:
+    """The kickoff each target's closing line is judged against: the one the
+    provider committed to when the game went live, else the frozen schedule."""
+    kickoffs = _scheduled_kickoffs(schedule, game_ids)
+    kickoffs.update(_provider_kickoffs(events, game_ids))
+    return kickoffs
 
 
 def _provider_kickoffs(
@@ -1167,6 +1150,36 @@ def _freeze_market_anchors(
     return built, target_details
 
 
+def capture_closing_lines(
+    season: int, *, forecast_directory: str | None = None
+) -> pd.DataFrame:
+    """The ``cfb.closing_lines`` rows of the frozen week-0 market anchors.
+
+    Reads the stored snapshots and the anchor artifact kickoff-run validated;
+    the kickoff each row is judged against is the one that validation used.
+    No provider is polled.
+    """
+    problems, frames = verify_live_snapshots(season)
+    if problems:
+        raise ValueError("; ".join(problems))
+    # The loader round-trip is the artifact's validity proof.
+    load_serving_anchors("serving", season=season, week=MARKET_ANCHOR_WEEK)
+    anchors = store.read_processed(*serving_anchor_artifact(season, MARKET_ANCHOR_WEEK))
+    schedule = window_schedule(season, forecast_directory)
+    events = frames["events"].copy()
+    events["fetched_at"] = pd.to_datetime(
+        events["fetched_at"], utc=True, errors="coerce"
+    )
+    game_ids = tuple(int(game_id) for game_id in anchors["game_id"])
+    return build_closing_lines(
+        anchors,
+        frames["offers"],
+        target_kickoffs(events, game_ids, schedule),
+        season=season,
+        source=closing_source(odds_source()),
+    )
+
+
 def run_kickoff_window(
     season: int,
     week: int = 1,
@@ -1214,7 +1227,7 @@ def run_kickoff_window(
     for detail in details:
         progress(f"OK: {detail}")
 
-    schedule = _window_schedule(season, forecast_directory)
+    schedule = window_schedule(season, forecast_directory)
     replay_problems, frames = verify_live_snapshots(season)
     if replay_problems:
         raise ValueError("; ".join(replay_problems))

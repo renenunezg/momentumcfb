@@ -359,6 +359,19 @@ def _add_publish_commands(sub) -> None:
             "projection artifact",
         )
 
+    closing_lines = sub.add_parser(
+        "publish-closing-lines",
+        help="record the frozen week-0 market capture in cfb.closing_lines, "
+        "one row per game, written once",
+    )
+    closing_lines.add_argument("--season", type=int, required=True)
+    closing_lines.add_argument(
+        "--forecast-directory",
+        default=None,
+        help="frozen forecast directory kickoff-run validated against; the "
+        "stored Division I schedule otherwise",
+    )
+
     grade = sub.add_parser(
         "grade",
         help="grade completed games against the frozen published projection "
