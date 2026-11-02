@@ -7,7 +7,11 @@ import pandas as pd
 import pytest
 
 from backend import grading
-from backend.recommendations import CLOSING_SOURCE, closing_line_value
+from backend.recommendations import (
+    CLOSING_SOURCE,
+    closing_line_backfill,
+    closing_line_value,
+)
 from backend.serving.closing_lines import (
     CLOSING_LINES_COLUMNS,
     ESPN_SOURCE,
@@ -342,3 +346,36 @@ def test_clv_prefers_the_captured_point_and_price_and_keeps_cfbd_moneylines():
     )
     over = closing_line_value(pick(1, "totals", "over", 44.0), closing, no_total)
     assert over["closing_point"] == 46.5 and over["closing_source"] == CLOSING_SOURCE
+
+
+def test_backfill_measures_market_clv_only_against_the_recorded_close():
+    # Auburn-Southern Miss 2026: the under was settled against a 56.5 close
+    # and the CFBD median later moved to 56.75; writing -0.25 beside the kept
+    # 56.5 broke the recommendation_market_clv check.
+    def picks(game_ids):
+        return pd.DataFrame(
+            {
+                "game_id": game_ids,
+                "market": "totals",
+                "decision_at": pd.Timestamp("2026-09-10T00:29:00Z"),
+                "status": "recommended",
+                "outcome": "win",
+                "side": "under",
+                "point": 57.0,
+                "market_total": 56.5,
+                "decision_market_point": None,
+                "decision_market_probability": None,
+                "closing_point": 56.5,
+                "closing_price": None,
+                "closing_source": CLOSING_SOURCE,
+                "clv_points": 0.5,
+                "closing_probability": None,
+                "clv_market_points": None,
+                "clv_market_probability": None,
+            }
+        )
+
+    closing = pd.DataFrame({"closing_total": [56.75, 56.5]}, index=[1, 2])
+    backfill = closing_line_backfill(picks([1, 2]), closing)
+    assert backfill["game_id"].tolist() == [2]
+    assert backfill["clv_market_points"].tolist() == [0.0]

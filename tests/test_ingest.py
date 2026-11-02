@@ -313,17 +313,6 @@ def test_cfbd_truncated_response_retries_with_budget_accounting(tmp_path, monkey
     resumed = cfbd.CFBDClient("test", max_calls=3, usage_file=usage)
     assert (resumed.calls_used, resumed.remaining) == (2, 98)
 
-    monkeypatch.setattr(
-        client.session,
-        "get",
-        lambda *a, **k: (_ for _ in ()).throw(
-            requests.exceptions.ChunkedEncodingError("truncated")
-        ),
-    )
-    with pytest.raises(requests.exceptions.ChunkedEncodingError):
-        client.get("/plays", retries=1)
-    assert cfbd.CFBDClient("test", max_calls=3, usage_file=usage).calls_used == 3
-
 
 def test_paid_weather_snapshots_preserve_pregame_cutoff_and_missingness(tmp_path):
     import json

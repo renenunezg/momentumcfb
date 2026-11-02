@@ -835,7 +835,23 @@ def closing_line_backfill(recommendations, closing, captured=None):
     # spread decided before the decision median was recorded) has nothing new.
     recorded = settled["closing_source"].notna().to_numpy()
     adds_market = frame[MARKET_CLV_COLUMNS].notna().any(axis=1).to_numpy()
-    keep = frame["closing_source"].notna().to_numpy() & (~recorded | adds_market)
+
+    # The publisher keeps a recorded close, so its market comparison is only
+    # valid against that same close; a CFBD median that has since moved
+    # leaves the pick without one rather than mixing two closes.
+    def matches(column):
+        fresh = frame[column].to_numpy(dtype=float)
+        stored = settled[column].to_numpy(dtype=float)
+        return np.isclose(fresh, stored, rtol=0, atol=1e-9)
+
+    same_close = np.where(
+        settled["market"].eq("h2h").to_numpy(),
+        matches("closing_price"),
+        matches("closing_point"),
+    )
+    keep = frame["closing_source"].notna().to_numpy() & (
+        ~recorded | (adds_market & same_close)
+    )
     return frame[keep].reset_index(drop=True)
 
 

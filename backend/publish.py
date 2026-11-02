@@ -1094,23 +1094,6 @@ def _jsonb_rows(rows: pd.DataFrame) -> str:
     return json.dumps(rows.to_dict("records"), allow_nan=False, default=_json_value)
 
 
-def _recommendation_settlement_rows(grades, columns):
-    rows = _serving_frame(grades, columns)
-    for column in ("home_points", "away_points"):
-
-        def score(value):
-            if value is None:
-                return None
-            if not np.isfinite(value) or value < 0 or value != int(value):
-                raise ValueError(f"invalid final score: {value}")
-            return int(value)
-
-        rows[column] = pd.Series(
-            [score(value) for value in rows[column]], index=rows.index, dtype=object
-        )
-    return rows
-
-
 def _publish_recommendations(conn, decisions):
     from backend.recommendations import RECOMMENDATION_COLUMNS
 
@@ -1253,8 +1236,15 @@ def publish_recommendation_grades(season):
                     + f" FROM {rows} WHERE {key} AND r.outcome = 'pending'"
                 ),
                 {
+                    # Integer score columns reject a JSON 43.0; the cast
+                    # also refuses a fractional score.
                     "rows": _jsonb_rows(
-                        _recommendation_settlement_rows(grades, SETTLEMENT_COLUMNS)
+                        _serving_frame(
+                            grades.astype(
+                                {"home_points": "Int64", "away_points": "Int64"}
+                            ),
+                            SETTLEMENT_COLUMNS,
+                        )
                     ),
                     "season": season,
                 },
