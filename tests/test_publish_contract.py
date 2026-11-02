@@ -9,6 +9,24 @@ from backend.odds.markets import compare_priced_offers
 from backend.publish import MARKET_COMPARISONS_COLUMNS, _serving_frame
 
 
+def test_recommendation_settlement_serializes_scores_as_nullable_integers():
+    import json
+
+    from backend.publish import _jsonb_rows, _recommendation_settlement_rows
+
+    grades = pd.DataFrame({"home_points": [10.0, None], "away_points": [7.0, 0.0]})
+    rows = _recommendation_settlement_rows(grades, ["home_points", "away_points"])
+    payload = _jsonb_rows(rows)
+    assert json.loads(payload) == [
+        {"home_points": 10, "away_points": 7},
+        {"home_points": None, "away_points": 0},
+    ]
+    assert "10.0" not in payload
+    grades.loc[0, "home_points"] = 10.5
+    with pytest.raises(ValueError, match="invalid final score"):
+        _recommendation_settlement_rows(grades, ["home_points", "away_points"])
+
+
 def test_market_ratings_publish_only_with_the_matching_model_snapshot(
     tmp_path, monkeypatch
 ):
