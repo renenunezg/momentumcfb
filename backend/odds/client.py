@@ -7,6 +7,22 @@ import requests
 
 ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
 NCAAF_SPORT_KEY = "americanfootball_ncaaf"
+# Every free book the `us` region returned for CFB in 2026, plus Pinnacle (an
+# `eu` book) as the sharp reference. The Odds API charges up to 10 named
+# bookmakers as one region per market, so the list keeps the quota cost of the
+# `us` region it replaces. ODDS_API_BOOKMAKERS overrides the list.
+DEFAULT_BOOKMAKERS = (
+    "betmgm",
+    "betonlineag",
+    "betrivers",
+    "betus",
+    "bovada",
+    "draftkings",
+    "fanduel",
+    "lowvig",
+    "mybookieag",
+    "pinnacle",
+)
 
 
 class OddsAPIError(RuntimeError):
@@ -57,11 +73,13 @@ class OddsAPIClient:
         if not key:
             raise OddsAPIError("ODDS_API_KEY is not set")
         self.api_key = key
-        self.regions = regions or os.getenv("ODDS_API_REGIONS") or "us"
+        regions = regions or os.getenv("ODDS_API_REGIONS") or ""
+        self.regions = regions or "us"
         configured = bookmakers or os.getenv("ODDS_API_BOOKMAKERS") or ""
+        # A configured region queries every book in it instead of the list.
         self.bookmakers = tuple(
             value.strip() for value in configured.split(",") if value.strip()
-        )
+        ) or (() if regions else DEFAULT_BOOKMAKERS)
         self.session = requests.Session()
 
     @property

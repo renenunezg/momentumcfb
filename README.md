@@ -74,6 +74,7 @@ Both were rejected, and the baseline was retained.
 
 College football schedules, play-by-play, teams, talent, returning production, recruiting, transfers, coaches, and historical lines come from [CollegeFootballData](https://collegefootballdata.com/).
 The Odds API is used for timestamped sportsbook snapshots near kickoff.
+Snapshots query ten named books (the free `us` books plus Pinnacle) at the quota cost of one region; every snapshot, including the kickoff capture, keeps each book's quote, so picks can be compared with Pinnacle's close.
 CFBD lines remain an audit source when timestamped market data is unavailable.
 
 Raw and processed Parquet artifacts are stored under `backend/data/` and are not committed.
