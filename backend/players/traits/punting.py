@@ -22,6 +22,7 @@ import re
 
 import pandas as pd
 
+from backend.features.possessions import PUNT_TYPES as POSSESSION_PUNT_TYPES
 from backend.players.traits import TraitSpec, register
 from backend.players.traits.context import SeasonContext
 from backend.players.traits.defense import opponents
@@ -33,9 +34,10 @@ from backend.players.traits.offense import (
 )
 from backend.players.traits.targets import normalize_name
 
-PUNT_TYPES = frozenset(
-    {"Punt", "Blocked Punt", "Punt Return Touchdown", "Blocked Punt Touchdown"}
-)
+# Scrimmage punts: a free kick after a safety is not one. CFBD has typed a
+# returned punt "Punt Return" since 2025; the seasons the grade was fit on typed
+# it "Punt", so leaving the type out would drop returned punts from 2025 on.
+PUNT_TYPES = POSSESSION_PUNT_TYPES - {"Punt (Safety)"}
 TOUCHBACK_YARDS = 20.0
 PUNT_TRAITS = {
     spec.name: register(spec)
@@ -138,16 +140,13 @@ def _resolve(
     return next(iter(hit)) if hit and len(hit) == 1 else None
 
 
-def punt_plays(
-    ctx: SeasonContext, play_types: frozenset[str] = PUNT_TYPES
-) -> pd.DataFrame:
+def punt_plays(ctx: SeasonContext) -> pd.DataFrame:
     """Unblocked punts with a parsed distance, attributed to a punter.
 
     Columns: the trait game keys, ``weight``, ``gross``, ``returned_yards``,
-    ``touchback``, ``fair_catch``, ``no_return``. The traits read ``PUNT_TYPES``,
-    which leaves out the punts CFBD types ``Punt Return``.
+    ``touchback``, ``fair_catch``, ``no_return``.
     """
-    plays = ctx.plays[ctx.plays["play_type"].isin(play_types)]
+    plays = ctx.plays[ctx.plays["play_type"].isin(PUNT_TYPES)]
     text = plays["play_text"]
     named = [punter_name(value) for value in text]
     gross = text.str.extract(_GROSS)[0].astype(float)

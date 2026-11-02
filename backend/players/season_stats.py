@@ -32,7 +32,7 @@ from backend.players.traits.offense import (
     rec_target_share,
     target_rows,
 )
-from backend.players.traits.punting import PUNT_TYPES, TOUCHBACK_YARDS, punt_plays
+from backend.players.traits.punting import TOUCHBACK_YARDS, punt_plays
 from backend.players.traits.snapshots import UNIT_PREFIX
 from backend.players.traits.targets import athlete_ids, recover_targets
 
@@ -327,10 +327,10 @@ def _lines(ctx: SeasonContext, game_ids: set) -> pd.DataFrame:
 def _punters(ctx: SeasonContext, box: pd.DataFrame, game_ids: set) -> pd.DataFrame:
     """Box punting, with net yards the NCAA way: gross less returns less 20 per touchback.
 
-    Return yards come from the punt play text (``punt_plays``), returned punts
-    included; it skips blocked punts and punts whose punter it cannot name.
+    Return yards come from the punt play text (``punt_plays``), which skips
+    blocked punts and punts whose punter it cannot name.
     """
-    punts = punt_plays(ctx, PUNT_TYPES | {"Punt Return"})
+    punts = punt_plays(ctx)
     punts = punts[punts["game_id"].isin(game_ids)]
     returned = punts.groupby(punts["athlete_id"].astype(str))["returned_yards"].sum()
     out = box[["punts", "punt_yds", "inside_20", "touchbacks"]].join(
