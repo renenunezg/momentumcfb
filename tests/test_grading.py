@@ -9,6 +9,10 @@ from scipy import stats
 
 from backend import grading
 from backend.model.calibration import _interval_coverage
+from backend.model.spread_pricing import (
+    SPREAD_CALIBRATION_VERSION,
+    SPREAD_MODEL_WEIGHT,
+)
 from backend.odds.markets import OFFER_COLUMNS, compare_priced_offers
 from backend.recommendations import PRICING_MARGIN_SD
 
@@ -436,12 +440,15 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         r["recommendation_tier"] == "edge_qualified"
         for r in decisions.loc[decisions.status.eq("recommended"), "pricing_context"]
     )
-    # Spread pricing preserves 20% of model opinion and a frozen market reference.
+    # Spread pricing keeps the fitted share of model opinion and a frozen market reference.
     indexed = projections.set_index("game_id")
-    expected = -0.8 * indexed.market_home_spread + 0.2 * indexed.pure_home_margin
+    expected = (
+        -(1 - SPREAD_MODEL_WEIGHT) * indexed.market_home_spread
+        + SPREAD_MODEL_WEIGHT * indexed.pure_home_margin
+    )
     spreads = decisions[decisions.market.eq("spreads")]
     assert np.allclose(spreads.model_home_margin, spreads.game_id.map(expected))
-    # An archived history rating contributes within the 20% model component.
+    # An archived history rating contributes within the model component.
     history = (
         build_recommendations(
             projections.iloc[:1].assign(
@@ -454,10 +461,10 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         .iloc[0]
     )
     assert history.model_home_margin == pytest.approx(
-        0.8 * 12 + 0.2 * (0.65 * 14 + 0.35 * 4)
+        (1 - SPREAD_MODEL_WEIGHT) * 12 + SPREAD_MODEL_WEIGHT * (0.65 * 14 + 0.35 * 4)
     )
     assert history.pricing_context["published_home_margin"] == 13
-    assert history.pricing_context["calibration_version"] == "spread_keys_020_v1"
+    assert history.pricing_context["calibration_version"] == SPREAD_CALIBRATION_VERSION
     # Missing season type remains unknown; a schedule provides the flag
     # without changing selection or inferring the stage from a week number.
     assert history.pricing_context["is_postseason"] is None
@@ -474,7 +481,7 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         if row.market == "spreads":
             edge = row.pricing_context["spread_edge_breakdown"]
             assert edge["model_contribution_points"] == pytest.approx(
-                0.2 * edge["model_disagreement_points"]
+                SPREAD_MODEL_WEIGHT * edge["model_disagreement_points"]
             )
             assert sum(
                 edge[k]
@@ -488,7 +495,8 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
     from backend.model.spread_pricing import spread_win_loss
 
     win, loss = spread_win_loss(7, 15.35, 500, 7)
-    assert [win, loss] == pytest.approx([0.44512897515057426, 0.5073914035183481])
+    # The keys size the push without moving the median off the line.
+    assert [win, loss] == pytest.approx([0.47615200985252837, 0.47615200985252837])
     assert 1 - win - loss > 0.04
     for threshold in (-7.5, -7, 0, 3, 3.5, 7, 80, 100):
         home = spread_win_loss(7, 15.35, 500, threshold)

@@ -140,10 +140,8 @@ GAME_PROJECTIONS_OPTIONAL_COLUMNS = [
 ]
 
 # The newest migration that replaces the recommendations eligibility check.
-RECOMMENDATION_ELIGIBILITY_CONSTRAINT = "recommendation_eligibility_v11"
-RECOMMENDATION_ELIGIBILITY_MIGRATION = (
-    "sql/20261012190441_moneyline_pricing_context.sql"
-)
+RECOMMENDATION_ELIGIBILITY_CONSTRAINT = "recommendation_eligibility_v12"
+RECOMMENDATION_ELIGIBILITY_MIGRATION = "sql/20261102120000_spread_cover_weight.sql"
 
 MARKET_COMPARISONS_COLUMNS = [
     "game_id",

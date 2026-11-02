@@ -185,7 +185,7 @@ Older forecasts without `market_total_weight` cannot be safely reconstructed fro
 
 ## Research recommendation policy
 
-CFB picks v11 keeps recommendations enabled and grades each recorded pick at one flat research unit.
+CFB picks v12 keeps recommendations enabled and grades each recorded pick at one flat research unit.
 The moneyline market reference is the median of fresh same-book home/away implied probabilities after proportional vig removal.
 Each book contributes once, both sides must share the event, kickoff, capture, and update timestamp, and only the latest capture can supply the reference and selected price.
 Conflicting duplicates, missing pairs, and pairs with implied probability sums outside 1.00 to 1.20 are excluded.
@@ -195,17 +195,20 @@ The 20 percent weight is an explicit research policy, not a claim that historica
 A moneyline needs positive estimated EV and at least two probability-equivalent points of edge, using the existing margin dispersion and distribution to convert probability gaps into the previous policy's point scale.
 These points are a selection yardstick, not a forecast margin.
 Moneylines cannot be promoted to meet the volume floor.
-Spreads price a separate margin with 20 percent model/history and 80 percent frozen market reference; the published point forecast is unchanged.
-Frozen symmetric integer-margin weights in `backend/model/spread_pricing.json` increase football key-number and push mass, fitted on 2020-2022 development data and checked on 2023-2025 historical proxy data.
+Spreads price a separate margin with 0.75 percent model/history and 99.25 percent frozen market reference; the published point forecast is unchanged.
+That weight minimizes win/push/loss log loss at the posted line on 2020-2022 (`examples/fit_spread_cover_weight.py`, week-clustered standard error about 0.1): the model side carries no measurable cover information beyond the median market, so a spread pick needs an offered line away from that reference.
+Policy v11 priced spreads at 20 percent, which was worse than the market alone on both 2020-2022 and 2023-2025.
+Frozen symmetric integer-margin weights in `backend/model/spread_pricing.json`, fitted on 2020-2022 development data and checked on 2023-2025 historical proxy data, size the push at integer lines.
+The win/loss split stays with the unkeyed distribution, so the market line remains the median: when the keys also split win and loss (v11), they priced 3.5 to 10.5 point underdogs to cover 0.52 to 0.54 at the median close against 0.45 to 0.50 realized.
 This improves historical probability scores but does not establish profitable executable edges.
 Spread pricing fixes dispersion at 15.35 and Student-t degrees of freedom at 500, matching the calibration contract.
 Totals retain the published 50/50 market blend and 15.93-point pricing dispersion.
 The 15-pick research target remains enabled for positive-EV spreads and totals, with one unit per pick.
-Policy v11 first shortlists up to the remaining target, then caps each market's exploratory additions at half that shortfall, rounded up.
+The policy first shortlists up to the remaining target, then caps each market's exploratory additions at half that shortfall, rounded up.
 Capped picks are not replaced, so a batch can finish below 15 recommendations; qualified picks are never capped.
 Every recommendation records `edge_qualified` or `exploratory` in its pricing context; performance summaries separate these groups using the frozen reason, with unknown older reasons labeled `legacy`.
 Spreads additionally record the pricing margin, model/history component, frozen market margin and timestamp, published margin, and calibration version.
-The selected-side spread edge breaks into the 20 percent model contribution, the offered-line difference from the frozen market reference, and the price/distribution adjustment; these sum to the recorded edge.
+The selected-side spread edge breaks into the model contribution, the offered-line difference from the frozen market reference, and the price/distribution adjustment; these sum to the recorded edge.
 Quote differences do not prove line movement because the reference and offer can come from different books or times.
 Decision context records regular season, postseason, or unknown, along with postseason and differing-spread-quote research flags.
 These flags describe the forecast context and do not disable recommendations or imply known player absences.

@@ -5,6 +5,10 @@ import pytest
 
 from backend.model.market_blend import add_market_informed_margins
 from backend.model.preseason import _flatten_cfbd_offers
+from backend.model.spread_pricing import (
+    SPREAD_CALIBRATION_VERSION,
+    SPREAD_MODEL_WEIGHT,
+)
 from backend.odds.markets import compare_priced_offers
 from backend.publish import MARKET_COMPARISONS_COLUMNS, _serving_frame
 
@@ -290,7 +294,8 @@ def test_adjusted_decision_forecast_survives_database_publication():
     offers["point"] = pd.to_numeric(offers.point).astype(float)
     spread_offers = offers[offers.provider_key.eq("a")].copy()
     spread_offers["market"] = "spreads"
-    spread_offers["point"] = spread_offers.selection.map({"home": -3.0, "away": 3.0})
+    # The quote sits 3.5 points off the -6 reference, the edge a v12 spread needs.
+    spread_offers["point"] = spread_offers.selection.map({"home": -2.5, "away": 2.5})
     spread_offers["price"] = -110
     offers = pd.concat([offers, spread_offers], ignore_index=True)
     decisions = build_recommendations(adjusted, offers, decision_at=now)
@@ -333,13 +338,18 @@ def test_adjusted_decision_forecast_survives_database_publication():
             assert len(h2h.pricing_context["reference_pairs"]) == 3
             assert h2h.pricing_context["decision_batch_game_stake_units"] == 2
             spread = next(row for row in saved if row.market == "spreads")
-            assert spread.pricing_context["calibration_version"] == "spread_keys_020_v1"
+            assert (
+                spread.pricing_context["calibration_version"]
+                == SPREAD_CALIBRATION_VERSION
+            )
             assert spread.pricing_context["recommendation_tier"] == "edge_qualified"
             assert spread.pricing_context["is_postseason"] is True
             assert spread.pricing_context["floor_backfill"] is False
             assert spread.pricing_context["spread_edge_breakdown"][
                 "model_contribution_points"
-            ] == pytest.approx(0.2 * (adjusted.pure_home_margin.iloc[0] - 6.0))
+            ] == pytest.approx(
+                SPREAD_MODEL_WEIGHT * (adjusted.pure_home_margin.iloc[0] - 6.0)
+            )
             assert (
                 conn.execute(
                     text(

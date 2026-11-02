@@ -8,9 +8,13 @@ import numpy as np
 
 from backend.model.distributions import marginal_cdf
 
-SPREAD_MODEL_WEIGHT = 0.20
-SPREAD_METHOD = "market_history_margin_blend_keys_v1"
-SPREAD_CALIBRATION_VERSION = "spread_keys_020_v1"
+# Fitted on 2020-2022 win/push/loss log loss at the posted line
+# (examples/fit_spread_cover_weight.py); week-clustered se about 0.1. The
+# model side carries no measurable cover information beyond the median
+# market, so spread edges come from quotes away from that reference.
+SPREAD_MODEL_WEIGHT = 0.0075
+SPREAD_METHOD = "market_history_margin_blend_push_keys_v2"
+SPREAD_CALIBRATION_VERSION = "spread_keys_cover_v2"
 
 
 @lru_cache(maxsize=1)
@@ -56,7 +60,14 @@ def spread_margin(projection):
 
 
 def spread_win_loss(mean, sd, df, threshold):
-    """Coherent integer-margin masses, with original tails outside +/-80."""
+    """Key-number push mass with the unkeyed marginal's win/loss split.
+
+    The symmetric key weights pile mass on small margins, which lie on the
+    underdog's side of any line past 3. Letting them split win and loss moved
+    the median off the market line: at the median close they priced 3.5 to
+    10.5 point underdogs to cover 0.52 to 0.54 against 0.45 to 0.50 realized
+    in 2020-2025. They now size only the push at integer lines.
+    """
     grid = np.arange(-80, 81)
     masses = marginal_cdf(grid + 0.5 - mean, sd, df) - marginal_cdf(
         grid - 0.5 - mean, sd, df
@@ -65,7 +76,6 @@ def spread_win_loss(mean, sd, df, threshold):
     normalizer = 1 + adjustment.sum()
     win = marginal_cdf(mean - np.floor(threshold) - 0.5, sd, df)
     loss = marginal_cdf(np.ceil(threshold) - 0.5 - mean, sd, df)
-    return (
-        float((win + adjustment[grid > threshold].sum()) / normalizer),
-        float((loss + adjustment[grid < threshold].sum()) / normalizer),
-    )
+    push = (1 - win - loss + adjustment[grid == threshold].sum()) / normalizer
+    share = win / (win + loss)
+    return float((1 - push) * share), float((1 - push) * (1 - share))

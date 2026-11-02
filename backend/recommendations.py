@@ -19,7 +19,7 @@ from backend.model.spread_pricing import (
 )
 from backend.odds.markets import american_profit, priced_candidates
 
-POLICY_VERSION = "cfb-picks-v11"
+POLICY_VERSION = "cfb-picks-v12"
 # Minimum points the priced line must sit beyond the offered price's
 # break-even line. Measured in margin or total points, the same yardstick for
 # favourites and underdogs, so a mispriced tail cannot clear the gate on one
@@ -153,7 +153,7 @@ def _priced_mean_sd(projection, offer):
 def _probabilities(projection, offer):
     """Round the frozen continuous marginal to integer scores, retaining pushes.
 
-    Spreads use the 20% model/history pricing margin with frozen key weights;
+    Spreads use the fitted model/history pricing margin with frozen key weights;
     totals retain the published total. Moneylines blend the model
     margin with the paired market's equivalent margin and have no push mass.
     """
@@ -302,7 +302,7 @@ def _moneyline_reference(candidates, latest, now, start):
 def build_recommendations(projections, offers, *, decision_at=None, games=None):
     """One best eligible side per game and market, or an explicit No Play.
 
-    Spreads use a separate 20% model/history pricing margin; totals retain the
+    Spreads use a separate fitted model/history pricing margin; totals retain the
     published market-informed total. A late QB report creates a separately recorded
     decision forecast without rewriting the published original. Each
     pick records the median posted total at decision time.
