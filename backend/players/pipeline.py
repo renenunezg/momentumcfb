@@ -11,7 +11,7 @@ import pandas as pd
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.etl import store
-from backend.players import artifacts, heisman, season_stats, value
+from backend.players import artifacts, heisman, qbr, season_stats, value
 from backend.players.credit import DEFENSE_ROLES, OFFENSE_SHARES
 from backend.players.ingest import players_dir, read_season_source, read_weekly
 from backend.players.traits import MODEL_VERSION, backtest, expectations, grade, war
@@ -267,6 +267,7 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         read_weekly(season, "play_stats"),
         published[~published["kind"].isin(["graded", "measured"])],
         poor,
+        qbr.read_season_qbr(season),
     )
     store.write_processed(lines, *season_stats_artifact(season))
     log.info(

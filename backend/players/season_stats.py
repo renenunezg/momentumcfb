@@ -11,10 +11,11 @@ feed. Two values come from the trait code so they cannot disagree with it:
 target share is the ``rec.target_share`` trait's own computation (competitive,
 FCS-weighted plays) and rush yards over expected use the frozen expectation
 table behind ``rb.yards_over_expected``. ``games`` is the trait rows' count.
+``espn_qbr`` is ESPN's season Total QBR (``backend.players.qbr``).
 
-CFBD's play-by-play carries no air yards, completion probability, QB hits,
-pressures or punt EPA, the season's Total QBR is not ingested, and there is no
-coverage data, so those keys are null.
+Pressures are sacks plus ESPN's box hurries: CFB data has no QB hits. CFBD's
+play-by-play carries no air yards, completion probability or punt EPA, and
+there is no coverage data, so those keys are null.
 """
 
 import numpy as np
@@ -81,14 +82,14 @@ STAT_KEYS: dict[str, tuple[tuple[str, int], ...]] = {
         "punt_epa*10",
     ),
 }  # fmt: skip
-# Keys the CFB sources cannot fill, and ratios, which have no value without a
-# denominator. Every other key is a count or a sum, zero for a player without
-# the event.
-RATIOS = frozenset({"target_share"})
+# Keys the CFB sources cannot fill, and ratios and ratings, which have no value
+# without a denominator or a rating. Every other key is a count or a sum, zero
+# for a player without the event.
+RATIOS = frozenset({"target_share", "espn_qbr"})
 UNAVAILABLE = frozenset(
     {
-        "cpoe", "adot", "espn_qbr", "yac", "qb_hits", "pressures", "cov_targets",
-        "cov_cmp", "cov_yds", "cov_td", "cov_int", "pressures_allowed", "punt_epa",
+        "cpoe", "adot", "yac", "qb_hits", "cov_targets", "cov_cmp", "cov_yds",
+        "cov_td", "cov_int", "punt_epa",
     }
 )  # fmt: skip
 BOX_STATS = {
@@ -106,6 +107,7 @@ BOX_STATS = {
     ("defensive", "SOLO"): "solo",
     ("defensive", "TFL"): "tfl",
     ("defensive", "SACKS"): "sacks_made",
+    ("defensive", "QB HUR"): "hurries",
     ("defensive", "PD"): "pbu",
     ("interceptions", "INT"): "int_caught",
     ("punting", "NO"): "punts",
@@ -115,32 +117,41 @@ BOX_STATS = {
 }
 
 
-def _box_totals(box: pd.DataFrame) -> pd.DataFrame:
-    """Season box totals per athlete, one column per ``BOX_STATS`` value plus ``cmp, att``.
+GAME_KEYS = ["athlete_id", "team", "game_id"]
 
-    A row the feed repeats verbatim within a game is counted once.
+
+def _box_games(box: pd.DataFrame) -> pd.DataFrame:
+    """Box lines per athlete, team and game: ``BOX_STATS`` values, ``cmp, att`` and ``pressures``.
+
+    A row the feed repeats verbatim within a game is counted once. A pressure
+    is a sack or a hurry; a shared sack, half a sack in the box, is one
+    pressure for each defender sharing it, so a game's sacks round up.
     """
-    box = box.drop_duplicates(
-        ["game_id", "team", "athlete_id", "category", "stat_name", "stat_text"]
-    )
+    box = box.drop_duplicates([*GAME_KEYS, "category", "stat_name", "stat_text"])
+    box = box.assign(athlete_id=box["athlete_id"].astype(str))
     keys = list(zip(box["category"], box["stat_name"]))
     rows = box.assign(column=[BOX_STATS.get(key) for key in keys]).dropna(
         subset=["column"]
     )
-    totals = rows.pivot_table(
-        index="athlete_id", columns="column", values="stat", aggfunc="sum"
+    lines = rows.pivot_table(
+        index=GAME_KEYS, columns="column", values="stat", aggfunc="sum"
     ).reindex(columns=list(BOX_STATS.values()))
     passing = box[box["category"].eq("passing") & box["stat_name"].eq("C/ATT")]
     split = passing["stat_text"].str.extract(r"^(\d+)/(\d+)$").astype(float)
     attempts = (
         split.set_axis(["cmp", "att"], axis=1)
-        .assign(athlete_id=passing["athlete_id"])
-        .groupby("athlete_id")[["cmp", "att"]]
+        .assign(**{key: passing[key] for key in GAME_KEYS})
+        .groupby(GAME_KEYS)[["cmp", "att"]]
         .sum()
     )
-    out = totals.join(attempts, how="outer")
-    out.index = out.index.astype(str)
-    return out.fillna(0.0)
+    out = lines.join(attempts, how="outer").fillna(0.0)
+    out["pressures"] = np.ceil(out["sacks_made"]) + out["hurries"]
+    return out.reset_index()
+
+
+def _box_totals(games: pd.DataFrame) -> pd.DataFrame:
+    """Season totals per athlete of the ``_box_games`` columns."""
+    return games.drop(columns=["team", "game_id"]).groupby("athlete_id").sum()
 
 
 def _feed_plays(
@@ -173,7 +184,9 @@ def _per_athlete(rows: pd.DataFrame, **sums: pd.Series) -> pd.DataFrame:
     return frame.groupby("athlete_id").sum()
 
 
-def _quarterbacks(feed: pd.DataFrame, box: pd.DataFrame) -> pd.DataFrame:
+def _quarterbacks(
+    feed: pd.DataFrame, box: pd.DataFrame, qbr: pd.DataFrame
+) -> pd.DataFrame:
     """Box passing and rushing, sacks taken, and EPA over dropbacks plus runs.
 
     Every dropback (completion, incompletion, interception, sack) and every
@@ -194,7 +207,8 @@ def _quarterbacks(feed: pd.DataFrame, box: pd.DataFrame) -> pd.DataFrame:
     epa = _per_athlete(
         plays, epa_plays=pd.Series(1.0, index=plays.index), epa_total=plays["epa"]
     )
-    return out.join(epa, how="outer")
+    espn = qbr.set_index("athlete_id")["total_qbr"].rename("espn_qbr")
+    return out.join(epa, how="outer").join(espn, how="outer")
 
 
 def _targets(feed: pd.DataFrame, recovered: pd.DataFrame) -> pd.DataFrame:
@@ -280,9 +294,9 @@ def _defenders(
     credited = ctx.credited[
         ctx.credited["side"].eq("defense") & ctx.credited["game_id"].isin(game_ids)
     ]
-    out = box[["tackles", "solo", "tfl", "sacks_made", "pbu", "int_caught"]].rename(
-        columns={"sacks_made": "sacks", "int_caught": "int"}
-    )
+    out = box[
+        ["tackles", "solo", "tfl", "sacks_made", "pressures", "pbu", "int_caught"]
+    ].rename(columns={"sacks_made": "sacks", "int_caught": "int"})
     out = out.join(
         _per_athlete(forced, ff=pd.Series(1.0, index=forced.index)), how="outer"
     )
@@ -293,8 +307,12 @@ def _defenders(
     return out.join(credit, how="outer")
 
 
-def _lines(ctx: SeasonContext, game_ids: set) -> pd.DataFrame:
-    """Team carries, stuffs, line yards, dropbacks and sacks per ``unit:{team}``."""
+def _lines(ctx: SeasonContext, box_games: pd.DataFrame, game_ids: set) -> pd.DataFrame:
+    """Team carries, stuffs, line yards, dropbacks, sacks and pressures per ``unit:{team}``.
+
+    Pressures allowed are the sacks plus the hurries the opposing defenders' box
+    lines credit in the team's games.
+    """
     plays = ctx.plays[ctx.plays["is_scrimmage"] & ctx.plays["game_id"].isin(game_ids)]
     carries = plays[plays["play_type"].isin(RUSH_TYPES)]
     measured = carries[carries["yards_gained"].notna()]
@@ -320,8 +338,28 @@ def _lines(ctx: SeasonContext, game_ids: set) -> pd.DataFrame:
         ],
         axis=1,
     )
+    out = out.astype(float).fillna(0.0)
+    hurries = (
+        box_games.merge(_opponents(ctx.games), on=["game_id", "team"], how="inner")
+        .groupby("opponent")["hurries"]
+        .sum()
+    )
+    out["pressures_allowed"] = out["sacks_allowed"] + hurries.reindex(out.index).fillna(
+        0.0
+    )
     out.index = UNIT_PREFIX + out.index.astype(str)
-    return out.astype(float)
+    return out
+
+
+def _opponents(games: pd.DataFrame) -> pd.DataFrame:
+    """``game_id, team, opponent`` for both teams of every game."""
+    home = games[["game_id", "home_team", "away_team"]].set_axis(
+        ["game_id", "team", "opponent"], axis=1
+    )
+    away = games[["game_id", "away_team", "home_team"]].set_axis(
+        ["game_id", "team", "opponent"], axis=1
+    )
+    return pd.concat([home, away], ignore_index=True)
 
 
 def _punters(ctx: SeasonContext, box: pd.DataFrame, game_ids: set) -> pd.DataFrame:
@@ -374,8 +412,12 @@ def season_stat_lines(
     play_stats: pd.DataFrame,
     published: pd.DataFrame,
     poor_coverage: bool,
+    qbr: pd.DataFrame,
 ) -> pd.DataFrame:
     """One ``STAT_LINE_COLUMNS`` row per athlete in ``published``.
+
+    ``qbr`` is the season's ESPN Total QBR (``backend.players.qbr``); a
+    quarterback ESPN does not rate has a null ``espn_qbr``.
 
     ``published`` is the snapshot week's published trait rows; they give the
     population, each athlete's group and games, and the week. Only games of
@@ -386,17 +428,18 @@ def season_stat_lines(
     week = int(published["week"].max())
     games = ctx.games
     game_ids = set(games.loc[games["model_week"].le(week), "game_id"])
-    box = _box_totals(ctx.box[ctx.box["game_id"].isin(game_ids)])
+    box_games = _box_games(ctx.box[ctx.box["game_id"].isin(game_ids)])
+    box = _box_totals(box_games)
     play_stats = play_stats[play_stats["game_id"].isin(game_ids)]
     feed = _feed_plays(ctx, play_stats, game_ids)
     recovered = recover_targets(ctx.plays, play_stats, ctx.roster)
     targets = _targets(feed, recovered)
     by_group = {
-        "QB": _quarterbacks(feed, box),
+        "QB": _quarterbacks(feed, box, qbr),
         "RB": _running_backs(feed, box, targets, tables),
         "WR": _receivers(ctx, box, targets, recovered, poor_coverage, game_ids),
         "DL": _defenders(feed, box, ctx, game_ids),
-        "OL": _lines(ctx, game_ids),
+        "OL": _lines(ctx, box_games, game_ids),
         "P": _punters(ctx, box, game_ids),
     }
     for alias, source in (("TE", "WR"), ("LB", "DL"), ("DB", "DL")):

@@ -141,8 +141,12 @@ def handle_position_traits(args: Namespace) -> None:
     from datetime import datetime, timezone
 
     from backend.players.pipeline import run_position_traits
+    from backend.players.qbr import ingest_season_qbr
 
     for season in args.seasons:
+        # ESPN is unmetered; a failed read fails the traits step, not the Heisman publish.
+        passers = ingest_season_qbr(season)
+        log.info(f"ESPN QBR {season}: {len(passers)} passers")
         scored = run_position_traits(season, datetime.now(timezone.utc))
         log.info(f"position traits {season}: {len(scored)} rows written")
 
