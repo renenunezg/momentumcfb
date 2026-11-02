@@ -149,28 +149,25 @@ def add_market_informed_margins(
     return out
 
 
-def align_ratings_to_forecast(
+def blend_ratings_with_market_history(
     ratings: pd.DataFrame,
-    projections: pd.DataFrame,
     market_ratings: pd.DataFrame | None = None,
     history_weight: float = 0.0,
 ) -> pd.DataFrame:
-    """Shift team ratings so they reproduce the week's published lines.
+    """Move every team ``history_weight`` of the way to its market-history rating.
 
-    The fitted ratings carry no market information, quarterback report, or
-    pace term, so their difference plus home field can sit several points from
-    the published market-informed line. Two steps mirror how that line is
-    built. Every team first moves ``history_weight`` of the way to its
-    market-history rating, which is all the market says about a team with no
-    game this week. Each game's remaining gap is then split evenly between
-    its two teams (the minimum-norm solution, which also handles a team with
-    two games). Offense and defense each take half of a team's shift, so they
-    still sum to the power rating. ``forecast_alignment_points`` records the
-    shift, so the fitted rating stays recoverable.
+    The published rating is the fitted rating plus this pull and nothing tied
+    to the coming week's matchups. Splitting each game's remaining gap to its
+    published line between the two teams made a team's rating carry the
+    market's view of a game not yet played, then drop it the week after, so
+    week-over-week changes ran against the fitted rating in about one team-week
+    in six. A scheduled game's line lives on its projection row instead.
+    Offense and defense each take half of a team's shift, so they still sum to
+    the power rating. ``forecast_alignment_points`` records the shift, so the
+    fitted rating stays recoverable.
     """
     out = ratings.copy()
-    index = {int(team_id): row for row, team_id in enumerate(out["team_id"])}
-    if len(index) != len(out):
+    if out["team_id"].duplicated().any():
         raise ValueError("rating alignment requires unique team IDs")
     fitted = out["power_rating"].to_numpy(dtype=float)
     power = fitted.copy()
@@ -187,25 +184,10 @@ def align_ratings_to_forecast(
             raise ValueError("market ratings share no FBS team with the model")
         market = market + fitted[fbs].mean() - market[fbs].mean()
         power[known] += history_weight * (market[known] - fitted[known])
-    home = projections["home_team_id"].map(index)
-    away = projections["away_team_id"].map(index)
-    if home.isna().any() or away.isna().any():
-        raise ValueError("every projected team needs a rating to align")
-    home, away = home.to_numpy(dtype=int), away.to_numpy(dtype=int)
-    gap = (
-        projections["market_informed_home_margin"].to_numpy(dtype=float)
-        - power[home]
-        + power[away]
-        - projections["home_field_points"].to_numpy(dtype=float)
-    )
-    if not np.isfinite(gap).all():
-        raise ValueError("rating alignment requires finite margins and ratings")
-    games = np.zeros((len(projections), len(out)))
-    rows = np.arange(len(projections))
-    games[rows, home] = 1.0
-    games[rows, away] = -1.0
-    shift = power + np.linalg.lstsq(games, gap, rcond=None)[0] - fitted
-    out["power_rating"] = fitted + shift
+    if not np.isfinite(power).all():
+        raise ValueError("rating alignment requires finite ratings")
+    shift = power - fitted
+    out["power_rating"] = power
     out["offense_points"] = out["offense_points"] + shift / 2.0
     out["defense_points"] = out["defense_points"] + shift / 2.0
     out["forecast_alignment_points"] = shift

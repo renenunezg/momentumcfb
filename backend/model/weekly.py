@@ -17,7 +17,7 @@ from backend.model.forecast_calibration import apply_forecast_calibration
 from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.market_blend import (
     add_market_informed_margins,
-    align_ratings_to_forecast,
+    blend_ratings_with_market_history,
 )
 from backend.model.market_history import (
     MARKET_TOTAL_PRIOR_COLUMN,
@@ -527,10 +527,9 @@ def run_weekly_forecast(
         weather["weather_missing"] = True
         weather["weather_error"] = str(exc)
     # The fitted ratings above stay market-free for the audit and next
-    # season's priors; the published ones reproduce the published lines.
-    published_ratings = align_ratings_to_forecast(
+    # season's priors; the published ones add the market-history pull.
+    published_ratings = blend_ratings_with_market_history(
         ratings,
-        projections,
         market_fit.ratings() if market_fit is not None else None,
         history_weight(forecast_week),
     )
