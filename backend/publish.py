@@ -939,8 +939,47 @@ def _publish_position_traits(conn, traits: pd.DataFrame, season: int) -> bool:
     return True
 
 
+def _replace_season_stats(conn, lines: pd.DataFrame, season: int) -> bool:
+    """Replace the season's ``cfb.player_season_stats`` rows: one delete, one insert.
+
+    Each is a single statement, so the table's statement trigger revalidates
+    the site twice per publish. Skipped, with one log line, when the season has
+    no stat line artifact or the table has not been migrated.
+    """
+    if lines.empty:
+        log.info(f"season stat lines {season}: no artifact, skipping it")
+        return False
+    if not _table_exists(conn, "player_season_stats"):
+        log.info(
+            f"season stat lines {season}: {CFB_SCHEMA}.player_season_stats is absent, "
+            "skipping it"
+        )
+        return False
+    rows = lines.assign(
+        stats=[
+            [None if pd.isna(value) else int(value) for value in stats]
+            for stats in lines["stats"]
+        ]
+    )
+    conn.execute(
+        text(f"DELETE FROM {CFB_SCHEMA}.player_season_stats WHERE season = :s"),
+        {"s": season},
+    )
+    conn.execute(
+        text(
+            f"INSERT INTO {CFB_SCHEMA}.player_season_stats "
+            "(season, athlete_id, position_group, week, stats) "
+            "SELECT season, athlete_id, position_group, week, stats "
+            f"FROM jsonb_populate_recordset(NULL::{CFB_SCHEMA}.player_season_stats, "
+            "CAST(:rows AS jsonb))"
+        ),
+        {"rows": _jsonb_rows(rows)},
+    )
+    return True
+
+
 def publish_players(season: int) -> dict[str, int]:
-    """Publish player values, the Heisman board, its history, and model meta."""
+    """Publish player values, position traits and stat lines, the Heisman board, its history, and model meta."""
     from backend.db import engine
     from backend.players.pipeline import read_player_artifacts
 
@@ -994,6 +1033,9 @@ def publish_players(season: int) -> dict[str, int]:
                 index=False,
                 chunksize=2000,
             )
+        # Stat lines and traits come from one run, so they publish together.
+        if _replace_season_stats(conn, artifacts["player_season_stats"], season):
+            by_season = (*by_season, "player_season_stats")
     _reclaim_space(engine, by_season)
     with engine.connect() as conn:
         return {

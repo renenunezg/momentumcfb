@@ -27,7 +27,7 @@ from backend.features.possessions import classify_plays
 from backend.players import pipeline
 from backend.players.ingest import read_season_source, read_weekly
 from backend.players.traits import EPA_TRAIT, all_traits, grade, snapshots, war
-from backend.players.traits.context import load_season_context
+from backend.players.traits.context import SeasonContext, load_season_context
 from backend.players.traits.defense import defense_traits
 from backend.players.traits.expectations import (
     ExpectationTables,
@@ -225,7 +225,9 @@ def fit_tables_before(season: int) -> ExpectationTables:
 
 
 def build_season_traits(
-    season: int, tables: ExpectationTables | None = None
+    season: int,
+    tables: ExpectationTables | None = None,
+    ctx: SeasonContext | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Every trait frame, weekly snapshot and reliability table for ``season``.
 
@@ -235,7 +237,8 @@ def build_season_traits(
     does. The season decides its own target mode from its own coverage
     (``poor_target_coverage``), served or backtested. Writes the snapshots,
     reliability and target coverage, plus the raw frames and per-game credit the
-    backtest pools for reliability.
+    backtest pools for reliability. A caller that reads the season's inputs
+    for more than the traits passes them as ``ctx``.
     """
     started = time.perf_counter()
     if tables is None:
@@ -244,7 +247,8 @@ def build_season_traits(
         raise ValueError(
             f"expectation tables from {tables.source_seasons} cannot rate {season}"
         )
-    ctx = load_season_context(season)
+    if ctx is None:
+        ctx = load_season_context(season)
     recovered = recover_targets(
         ctx.plays, read_weekly(season, "play_stats"), ctx.roster
     )

@@ -578,7 +578,7 @@ def rb_traits(
     return pd.concat(frames, ignore_index=True)
 
 
-def _rec_target_share(
+def rec_target_share(
     rows: pd.DataFrame, targets: pd.DataFrame, receivers: set[str]
 ) -> pd.DataFrame:
     """The player's targets over the team's competitive targets in each game he appeared in.
@@ -685,7 +685,7 @@ def receiver_traits(
     targets = target_rows(rows, recovered_targets, poor_coverage)
     player_targets = targets[targets["athlete_id"].isin(receivers)]
     frames = [
-        _rec_target_share(rows, targets, receivers),
+        rec_target_share(rows, targets, receivers),
         _rec_value_per_target(player_targets),
         _rec_explosive(player_targets, ctx.games),
         _rec_late_down(player_targets, tables, ctx.games),

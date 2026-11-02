@@ -354,6 +354,7 @@ jobs:
           path: |
             backend/data/processed/players/player_values/${{ env.SEASON }}.parquet
             backend/data/processed/players/position_traits/${{ env.SEASON }}.parquet
+            backend/data/processed/players/season_stats/${{ env.SEASON }}.parquet
             backend/data/processed/players/player_model_meta.parquet
             backend/data/processed/runtime/data_revision_${{ env.SEASON }}.parquet
           if-no-files-found: error

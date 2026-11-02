@@ -11,10 +11,11 @@ import pandas as pd
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.etl import store
-from backend.players import artifacts, heisman, value
+from backend.players import artifacts, heisman, season_stats, value
 from backend.players.credit import DEFENSE_ROLES, OFFENSE_SHARES
-from backend.players.ingest import players_dir, read_season_source
+from backend.players.ingest import players_dir, read_season_source, read_weekly
 from backend.players.traits import MODEL_VERSION, backtest, expectations, grade, war
+from backend.players.traits.context import load_season_context
 from backend.players.traits.snapshots import TRAIT_SNAPSHOT_COLUMNS
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,10 @@ def player_values_artifact(season: int) -> tuple[str, ...]:
 
 def position_traits_artifact(season: int) -> tuple[str, ...]:
     return ("players", "position_traits", f"{season}.parquet")
+
+
+def season_stats_artifact(season: int) -> tuple[str, ...]:
+    return ("players", "season_stats", f"{season}.parquet")
 
 
 def heisman_board_artifact(season: int, week: int) -> tuple[str, ...]:
@@ -239,7 +244,8 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     tables = frozen_expectation_tables(model_path)
     teams = read_season_source(season, "teams")
     fbs_schools = set(teams.loc[teams["classification"].eq("fbs"), "school"])
-    built = backtest.build_season_traits(season, tables=tables)
+    ctx = load_season_context(season)
+    built = backtest.build_season_traits(season, tables=tables, ctx=ctx)
     coverage = built["target_coverage"]
     poor = backtest.poor_target_coverage(coverage)
     snapshot = built["snapshots"].astype({"athlete_id": str})
@@ -254,6 +260,18 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         fbs_schools,
     )
     store.write_processed(out, *position_traits_artifact(season))
+    published = published_trait_rows(out)
+    lines = season_stats.season_stat_lines(
+        ctx,
+        tables,
+        read_weekly(season, "play_stats"),
+        published[~published["kind"].isin(["graded", "measured"])],
+        poor,
+    )
+    store.write_processed(lines, *season_stats_artifact(season))
+    log.info(
+        f"season stat lines {season} week {published['week'].max()}: {len(lines)} athletes"
+    )
     graded = sorted(grade.graded_groups(model))
     latest = snapshot["week"].max()
     losses = grade.coverage_losses(
@@ -426,7 +444,20 @@ def read_player_artifacts(season: int) -> dict[str, pd.DataFrame]:
         "heisman_history": history,
         "player_model_meta": meta,
         "position_traits": _latest_trait_week(season),
+        "player_season_stats": _season_stat_lines(season),
     }
+
+
+def _season_stat_lines(season: int) -> pd.DataFrame:
+    if not PROCESSED_DIR.joinpath(*season_stats_artifact(season)).exists():
+        return pd.DataFrame(columns=season_stats.STAT_LINE_COLUMNS)
+    return store.read_processed(*season_stats_artifact(season))
+
+
+def published_trait_rows(traits: pd.DataFrame) -> pd.DataFrame:
+    """The newest weekly snapshot's FBS rows, the rows ``cfb.position_traits`` serves."""
+    latest = traits["week"].eq(traits["week"].max()) & traits["fbs"].eq(True)
+    return traits[latest].reset_index(drop=True)
 
 
 def _latest_trait_week(season: int) -> pd.DataFrame:
@@ -442,5 +473,4 @@ def _latest_trait_week(season: int) -> pd.DataFrame:
             f"position traits {season}: artifact has no fbs flag, not published"
         )
         return pd.DataFrame(columns=POSITION_TRAIT_COLUMNS)
-    latest = traits["week"].eq(traits["week"].max()) & traits["fbs"].eq(True)
-    return traits[latest].reset_index(drop=True)
+    return published_trait_rows(traits)
