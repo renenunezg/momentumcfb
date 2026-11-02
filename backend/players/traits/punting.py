@@ -138,13 +138,16 @@ def _resolve(
     return next(iter(hit)) if hit and len(hit) == 1 else None
 
 
-def punt_plays(ctx: SeasonContext) -> pd.DataFrame:
+def punt_plays(
+    ctx: SeasonContext, play_types: frozenset[str] = PUNT_TYPES
+) -> pd.DataFrame:
     """Unblocked punts with a parsed distance, attributed to a punter.
 
     Columns: the trait game keys, ``weight``, ``gross``, ``returned_yards``,
-    ``touchback``, ``fair_catch``, ``no_return``.
+    ``touchback``, ``fair_catch``, ``no_return``. The traits read ``PUNT_TYPES``,
+    which leaves out the punts CFBD types ``Punt Return``.
     """
-    plays = ctx.plays[ctx.plays["play_type"].isin(PUNT_TYPES)]
+    plays = ctx.plays[ctx.plays["play_type"].isin(play_types)]
     text = plays["play_text"]
     named = [punter_name(value) for value in text]
     gross = text.str.extract(_GROSS)[0].astype(float)
