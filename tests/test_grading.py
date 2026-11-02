@@ -14,7 +14,7 @@ from backend.model.spread_pricing import (
     SPREAD_MODEL_WEIGHT,
 )
 from backend.odds.markets import OFFER_COLUMNS, compare_priced_offers
-from backend.recommendations import PRICING_MARGIN_SD
+from backend.recommendations import PRICING_MARGIN_SD, TOTAL_MODEL_WEIGHT
 
 
 def _projection(game_id, as_of, margin=7.0):
@@ -300,8 +300,11 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         ref["price"] = np.where(favoured, -350, 280)
         references.append(ref)
     offers = pd.concat([offers, *references], ignore_index=True)
-    projections.loc[projections.game_id.eq(4), "model_total"] = 36.0
-    projections.loc[projections.game_id.eq(4), "market_informed_total"] = 39.5
+    # Totals take TOTAL_MODEL_WEIGHT of the model's lean, so a qualifying lean
+    # must be large: 17 points either side of the posted 43.
+    projections["model_total"] = 60.0
+    projections.loc[projections.game_id.eq(4), "model_total"] = 26.0
+    projections.loc[projections.game_id.eq(4), "market_informed_total"] = 34.5
     # Production includes the universal unavailable-injury flag on both teams.
     projections.loc[
         projections.game_id.eq(5),
@@ -503,11 +506,21 @@ def test_recommendation_flags_and_settlement_use_recorded_prices(monkeypatch):
         away = spread_win_loss(-7, 15.35, 500, -threshold)
         assert home == pytest.approx(away[::-1])
         assert 0 <= sum(home) <= 1 + 1e-12
-    # Totals price from the published total; the posted total is recorded.
+    # Totals move the posted median toward the model side; the published
+    # total is recorded beside it.
     totals = decisions[decisions.market.eq("totals")]
     assert totals.market_total.eq(43.0).all()
+    model = projections.set_index("game_id").model_total
+    assert np.allclose(
+        totals.model_total,
+        43.0 + TOTAL_MODEL_WEIGHT * (totals.game_id.map(model) - 43.0),
+    )
     published = projections.set_index("game_id").market_informed_total
-    assert totals.model_total.eq(totals.game_id.map(published)).all()
+    assert all(
+        row.pricing_context["published_total"] == published[row.game_id]
+        and row.pricing_context["model_weight"] == TOTAL_MODEL_WEIGHT
+        for row in totals.itertuples()
+    )
     home = decisions[(decisions.game_id.eq(1)) & decisions.market.eq("spreads")].iloc[0]
     assert home.side == "home" and home.point == -3 and home.price == -110
     assert home.push_probability > 0

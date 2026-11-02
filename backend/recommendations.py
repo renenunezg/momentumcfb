@@ -19,7 +19,7 @@ from backend.model.spread_pricing import (
 )
 from backend.odds.markets import american_profit, priced_candidates
 
-POLICY_VERSION = "cfb-picks-v12"
+POLICY_VERSION = "cfb-picks-v13"
 # Minimum points the priced line must sit beyond the offered price's
 # break-even line. Measured in margin or total points, the same yardstick for
 # favourites and underdogs, so a mispriced tail cannot clear the gate on one
@@ -36,6 +36,14 @@ PRICING_TOTAL_SD = 15.93
 # remains a research choice, not a claim of independently validated profit.
 H2H_MODEL_WEIGHT = 0.20
 MONEYLINE_METHOD = "paired_moneyline_margin_blend_v1"
+# Totals move the decision-time median total this share toward the published
+# total's model side. Fitted on 2020-2022 win/push/loss log loss at the posted
+# total around the median close; on 2023-2025 it beat the market alone by
+# 0.0024 (week-clustered CI 0.0010 to 0.0039). The published 0.5 blend priced
+# picks about 4 points of win probability above their realized rate, and a
+# cap on large disagreements fitted no better than this straight line.
+TOTAL_MODEL_WEIGHT = 0.209
+TOTAL_METHOD = "market_total_blend_v1"
 # Research target per decision batch, not a mandatory minimum. Shortlist the
 # highest-edge eligible spreads/totals first, then cap each market at half
 # the shortfall (rounded up). Never replace capped picks with other offers.
@@ -150,12 +158,31 @@ def _priced_mean_sd(projection, offer):
     return projection.market_informed_home_margin, projection.margin_sd
 
 
+def _total_model_side(projection):
+    """The published total's model side: the pure total and any history share."""
+    total = getattr(projection, "model_total", None)
+    if total is None or not np.isfinite(total):
+        return None
+    history = getattr(projection, "market_history_total", None)
+    if history is None or pd.isna(history):
+        return float(total)
+    weight = getattr(projection, "market_history_total_weight", None)
+    if (
+        weight is None
+        or not np.isfinite([history, weight]).all()
+        or not 0 <= weight < 1
+    ):
+        return None
+    return float((1 - weight) * total + weight * history)
+
+
 def _probabilities(projection, offer):
     """Round the frozen continuous marginal to integer scores, retaining pushes.
 
     Spreads use the fitted model/history pricing margin with frozen key weights;
-    totals retain the published total. Moneylines blend the model
-    margin with the paired market's equivalent margin and have no push mass.
+    totals the fitted model share of the decision-time median. Moneylines blend
+    the model margin with the paired market's equivalent margin and have no push
+    mass.
     """
     if offer["market"] == "h2h":
         home = projection.h2h_home_probability
@@ -302,8 +329,9 @@ def _moneyline_reference(candidates, latest, now, start):
 def build_recommendations(projections, offers, *, decision_at=None, games=None):
     """One best eligible side per game and market, or an explicit No Play.
 
-    Spreads use a separate fitted model/history pricing margin; totals retain the
-    published market-informed total. A late QB report creates a separately recorded
+    Spreads use a separate fitted model/history pricing margin; totals move the
+    median posted total TOTAL_MODEL_WEIGHT toward the published total's model
+    side. A late QB report creates a separately recorded
     decision forecast without rewriting the published original. Each
     pick records the median posted total at decision time.
     Moneylines move the paired market's equivalent margin H2H_MODEL_WEIGHT
@@ -410,9 +438,19 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
         published_total = getattr(projection, "market_informed_total", np.nan)
         if pd.notna(published_total) and np.isfinite(published_total):
             priced_projection = priced_projection._replace(model_total=published_total)
+        total_side = _total_model_side(projection)
+        pricing_total = None
+        if total_side is not None and np.isfinite(market_total):
+            pricing_total = market_total + TOTAL_MODEL_WEIGHT * (
+                total_side - market_total
+            )
         spread_inputs = spread_margin(projection)
         for market in MARKETS:
             market_projection = priced_projection
+            if market == "totals" and pricing_total is not None:
+                market_projection = priced_projection._replace(
+                    model_total=pricing_total
+                )
             if market == "spreads" and spread_inputs is not None:
                 market_projection = priced_projection._replace(
                     market_informed_home_margin=spread_inputs[0],
@@ -457,7 +495,7 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
                         if market == "h2h"
                         else SPREAD_METHOD
                         if market == "spreads"
-                        else "market_informed_forecast"
+                        else TOTAL_METHOD
                     ),
                     **(
                         dict(
@@ -487,6 +525,15 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
                 margin_sd=priced_projection.margin_sd,
                 total_sd=priced_projection.total_sd,
             )
+            if market == "totals" and pricing_total is not None:
+                row["model_total"] = pricing_total
+                row["pricing_context"].update(
+                    model_weight=TOTAL_MODEL_WEIGHT,
+                    model_side_total=total_side,
+                    market_total=market_total,
+                    pricing_total=pricing_total,
+                    published_total=priced_projection.model_total,
+                )
             if market == "spreads" and spread_inputs is not None:
                 row["model_home_margin"] = spread_inputs[0]
                 row["degrees_of_freedom"] = 500.0
@@ -505,6 +552,9 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
             if market == "spreads" and spread_inputs is None:
                 priced = []
                 empty_reason = reason or "missing_spread_reference"
+            if market == "totals" and pricing_total is None:
+                priced = []
+                empty_reason = reason or "missing_total_reference"
             if market == "h2h" and home_probability is None:
                 priced = []
                 empty_reason = reason or (

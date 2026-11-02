@@ -185,7 +185,7 @@ Older forecasts without `market_total_weight` cannot be safely reconstructed fro
 
 ## Research recommendation policy
 
-CFB picks v12 keeps recommendations enabled and grades each recorded pick at one flat research unit.
+CFB picks v13 keeps recommendations enabled and grades each recorded pick at one flat research unit.
 The moneyline market reference is the median of fresh same-book home/away implied probabilities after proportional vig removal.
 Each book contributes once, both sides must share the event, kickoff, capture, and update timestamp, and only the latest capture can supply the reference and selected price.
 Conflicting duplicates, missing pairs, and pairs with implied probability sums outside 1.00 to 1.20 are excluded.
@@ -202,7 +202,8 @@ Frozen symmetric integer-margin weights in `backend/model/spread_pricing.json`, 
 The win/loss split stays with the unkeyed distribution, so the market line remains the median: when the keys also split win and loss (v11), they priced 3.5 to 10.5 point underdogs to cover 0.52 to 0.54 at the median close against 0.45 to 0.50 realized.
 This improves historical probability scores but does not establish profitable executable edges.
 Spread pricing fixes dispersion at 15.35 and Student-t degrees of freedom at 500, matching the calibration contract.
-Totals retain the published 50/50 market blend and 15.93-point pricing dispersion.
+Totals price the decision-time median posted total moved 0.209 of the way toward the published total's model side (the pure total plus its market-history share), with 15.93-point dispersion.
+That weight minimizes win/push/loss log loss at the posted total around the median close on 2020-2022 and beat the market alone on 2023-2025; the published 50/50 blend priced totals picks about 4 points of win probability above their realized rate, and a cap on large disagreements fitted no better.
 The 15-pick research target remains enabled for positive-EV spreads and totals, with one unit per pick.
 The policy first shortlists up to the remaining target, then caps each market's exploratory additions at half that shortfall, rounded up.
 Capped picks are not replaced, so a batch can finish below 15 recommendations; qualified picks are never capped.
