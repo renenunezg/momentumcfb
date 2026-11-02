@@ -33,7 +33,7 @@ def parse_board(pages, seed, now):
     board["order_date"] = reviewed_date(soups["order"], "Updated", now)
     board["rank_date"] = reviewed_date(soups["rank"], "Board updated", now)
     board["ownership_date"] = reviewed_date(
-        soups["capital"], "Pick ownership reviewed", now
+        soups["capital"], "Draft picks last published", now
     )
     board["rank_source"] = "Scouting Grade"
     board["needs_date"] = reviewed_date(soups["needs"], "Needs reviewed", now)
