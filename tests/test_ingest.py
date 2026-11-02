@@ -283,6 +283,48 @@ def test_cfbd_request_without_a_response_does_not_trip_the_quota_header_gate(
     assert (client.calls_used, client.remaining) == (2, 5000)
 
 
+def test_cfbd_truncated_response_retries_with_budget_accounting(tmp_path, monkeypatch):
+    import requests
+
+    from backend.cfbd import client as cfbd
+
+    answers = iter(
+        [
+            requests.exceptions.ChunkedEncodingError("response ended prematurely"),
+            SimpleNamespace(
+                status_code=200,
+                headers={"X-CallLimit-Remaining": "98"},
+                json=lambda: [{"id": 1}],
+            ),
+        ]
+    )
+
+    def get(*args, **kwargs):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    usage = tmp_path / "usage.json"
+    client = cfbd.CFBDClient("test", max_calls=3, usage_file=usage)
+    monkeypatch.setattr(client.session, "get", get)
+    monkeypatch.setattr(cfbd.time, "sleep", lambda _: None)
+    assert client.get("/plays") == [{"id": 1}]
+    resumed = cfbd.CFBDClient("test", max_calls=3, usage_file=usage)
+    assert (resumed.calls_used, resumed.remaining) == (2, 98)
+
+    monkeypatch.setattr(
+        client.session,
+        "get",
+        lambda *a, **k: (_ for _ in ()).throw(
+            requests.exceptions.ChunkedEncodingError("truncated")
+        ),
+    )
+    with pytest.raises(requests.exceptions.ChunkedEncodingError):
+        client.get("/plays", retries=1)
+    assert cfbd.CFBDClient("test", max_calls=3, usage_file=usage).calls_used == 3
+
+
 def test_paid_weather_snapshots_preserve_pregame_cutoff_and_missingness(tmp_path):
     import json
 

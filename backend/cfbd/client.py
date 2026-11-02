@@ -152,7 +152,16 @@ class CFBDClient:
             if self.remaining is not None:
                 self.remaining -= 1
             self._persist_usage()
-            resp = self.session.get(url, params=params, timeout=timeout)
+            try:
+                resp = self.session.get(url, params=params, timeout=timeout)
+            except requests.exceptions.ChunkedEncodingError:
+                # Requests reads the body inside get(); a truncated response
+                # must be fetched again as a whole and still costs an attempt.
+                if attempt == retries - 1:
+                    raise
+                log.warning("GET %s response was truncated; retrying", path)
+                time.sleep(10 * (attempt + 1))
+                continue
             remaining = resp.headers.get("X-CallLimit-Remaining")
             # A gateway error page is answered in front of CFBD and carries no
             # quota header; it says nothing about the quota, so the count stands.
