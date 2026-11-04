@@ -2,7 +2,7 @@ name: Kickoff capture
 
 on:
   # Supabase pg_cron dispatches only the market-capture window.
-  # Pin the latest successful weekly artifact, or an explicit forecast run.
+  # Pin the newest weekly forecast artifact, or an explicit forecast run.
   # Frozen predictions are never rebuilt or republished here.
   repository_dispatch:
     types: [kickoff-capture]
@@ -13,7 +13,7 @@ on:
         required: false
         type: string
       forecast_run_id:
-        description: Successful forecast run (defaults to the latest successful weekly artifact)
+        description: Forecast run (defaults to the newest weekly forecast artifact)
         required: false
         type: string
       forecast_artifact:
@@ -94,14 +94,17 @@ jobs:
             let name = process.env.FORECAST_ARTIFACT;
             if (!runId && name) throw new Error('forecast_artifact requires forecast_run_id');
             if (!runId) {
-              // Successful no-op weekly runs have no artifact; keep the last
-              // published forecast instead of falling back to opening week.
+              // Only a run that built a forecast uploads weekly-cfb-*; a rerun
+              // that finds the week already published uploads nothing. The
+              // building run may fail after publishing (grading runs later),
+              // so take the newest artifact from any completed weekly run
+              // rather than falling back to an older week's forecast.
               for await (const page of github.paginate.iterator(github.rest.actions.listArtifactsForRepo, {owner, repo, per_page: 100})) {
                 for (const artifact of page.data) {
                   if (artifact.expired || !/^weekly-cfb-[0-9]+$/.test(artifact.name)) continue;
                   const id = artifact.workflow_run.id;
                   const {data: run} = await github.rest.actions.getWorkflowRun({owner, repo, run_id: id});
-                  if (run.conclusion === 'success' && run.head_branch === 'main' && run.path === '.github/workflows/weekly-update.yml') {
+                  if (run.status === 'completed' && run.head_branch === 'main' && run.path === '.github/workflows/weekly-update.yml') {
                     runId = String(id);
                     name = artifact.name;
                     break;
@@ -110,11 +113,12 @@ jobs:
                 if (runId) break;
               }
             }
-            if (!/^[0-9]+$/.test(runId || '')) throw new Error('No successful weekly forecast artifact is available');
+            if (!/^[0-9]+$/.test(runId || '')) throw new Error('No weekly forecast artifact is available');
             const {data: run} = await github.rest.actions.getWorkflowRun({owner, repo, run_id: Number(runId)});
-            if (run.conclusion !== 'success' || run.head_branch !== 'main') throw new Error('Forecast must be a successful main run');
+            if (run.head_branch !== 'main') throw new Error('Forecast must be a main run');
             const weekly = run.path === '.github/workflows/weekly-update.yml';
             if (!weekly && !['.github/workflows/opening-forecast.yml', '.github/workflows/kickoff-forecast.yml'].includes(run.path)) throw new Error('Run is not a forecast workflow');
+            if (weekly ? run.status !== 'completed' : run.conclusion !== 'success') throw new Error('Forecast run must be completed (weekly) or successful (opening)');
             name ||= weekly ? `weekly-cfb-${runId}` : `opening-forecast-${runId}`;
             if (weekly && name !== `weekly-cfb-${runId}`) throw new Error('Weekly capture requires the forecast audit artifact');
             if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error('Invalid forecast artifact name');
