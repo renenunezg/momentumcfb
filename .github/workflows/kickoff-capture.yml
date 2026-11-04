@@ -84,7 +84,7 @@ jobs:
           fi
           echo "SEASON=$season" >> "$GITHUB_ENV"
 
-      - name: Resolve a successful immutable forecast artifact
+      - name: Resolve an immutable forecast artifact
         id: forecast
         uses: actions/github-script@v8
         with:
@@ -128,7 +128,7 @@ jobs:
             core.exportVariable('FORECAST_ARTIFACT', name);
             core.setOutput('weekly', String(weekly));
             core.setOutput('path', weekly ? 'backend/data/processed/weekly/forecast_log' : 'backend/data');
-            core.info(`Pinned ${name} from successful run ${runId} (${run.head_sha})`);
+            core.info(`Pinned ${name} from ${run.conclusion} run ${runId} (${run.head_sha})`);
 
       - name: Restore the frozen pregame forecast
         uses: actions/download-artifact@v7
