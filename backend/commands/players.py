@@ -137,6 +137,30 @@ def handle_position_traits_fit(args: Namespace) -> None:
     log.info("position grade model written to %s", path)
 
 
+def handle_nil_fit(args: Namespace) -> None:
+    from backend.players.nil import fit_nil_model, write_nil_model
+
+    model = fit_nil_model(tuple(args.dev_targets), args.holdout)
+    path = write_nil_model(model)
+    log.info(
+        "nil model written to %s; priced %s, production-priced %s, QB worth %s",
+        path,
+        ", ".join(model.price_groups),
+        ", ".join(model.production_groups),
+        "passes" if model.worth_passes else "fails",
+    )
+
+
+def handle_nil_values(args: Namespace) -> None:
+    from datetime import datetime, timezone
+
+    from backend.players.pipeline import run_nil_values
+
+    for season in args.seasons:
+        rows = run_nil_values(season, datetime.now(timezone.utc))
+        log.info(f"nil values {season}: {len(rows)} rows written")
+
+
 def handle_position_traits(args: Namespace) -> None:
     from datetime import datetime, timezone
 

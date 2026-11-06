@@ -38,6 +38,8 @@ from backend.commands.players import (
     handle_heisman_train,
     handle_ingest_players,
     handle_ingest_portal,
+    handle_nil_fit,
+    handle_nil_values,
     handle_player_prior,
     handle_player_values,
     handle_position_grade_validation,
@@ -120,6 +122,8 @@ HANDLERS: dict[str, Handler] = {
     "publish-players": handle_publish_players,
     "position-traits": handle_position_traits,
     "position-traits-fit": handle_position_traits_fit,
+    "nil-fit": handle_nil_fit,
+    "nil-values": handle_nil_values,
     "position-grade-validation": handle_position_grade_validation,
     "publish-grade-validation": handle_publish_grade_validation,
 }

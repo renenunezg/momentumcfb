@@ -476,6 +476,19 @@ def _add_publish_commands(sub) -> None:
     )
     _seasons_argument(position_traits, SEASONS)
 
+    nil_fit = sub.add_parser(
+        "nil-fit",
+        help="fit and evaluate the NIL price and QB worth models offline",
+    )
+    nil_fit.add_argument("--dev-targets", type=int, nargs="+", required=True)
+    nil_fit.add_argument("--holdout", type=int, required=True)
+
+    nil_values = sub.add_parser(
+        "nil-values",
+        help="price players with the committed NIL model after position-traits",
+    )
+    _seasons_argument(nil_values, SEASONS)
+
     heisman = sub.add_parser(
         "heisman",
         help="build the Heisman board from a previously trained model artifact",

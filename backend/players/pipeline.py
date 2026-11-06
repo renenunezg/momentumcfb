@@ -11,7 +11,7 @@ import pandas as pd
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.etl import store
-from backend.players import artifacts, heisman, qbr, season_stats, value
+from backend.players import artifacts, heisman, nil, qbr, season_stats, value
 from backend.players.credit import DEFENSE_ROLES, OFFENSE_SHARES
 from backend.players.ingest import players_dir, read_season_source, read_weekly
 from backend.players.traits import MODEL_VERSION, backtest, expectations, grade, war
@@ -297,6 +297,28 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
     return out
 
 
+def run_nil_values(season: int, as_of: datetime) -> pd.DataFrame:
+    """Price the season's players with the committed NIL model, from the latest
+    player values and position grades; run after ``run_position_traits``."""
+    model = nil.load_nil_model()
+    traits = store.read_processed(*position_traits_artifact(season))
+    latest = traits[traits["week"].eq(traits["week"].max())]
+    grades = latest[latest["trait"].eq("grade")].rename(columns={"value": "grade"})
+    values = store.read_processed(*player_values_artifact(season))
+    rows = nil.score_nil(season, values, grades[["athlete_id", "grade"]], model)
+    store.write_processed(
+        rows.assign(as_of=as_of.isoformat()), *nil.nil_artifact(season)
+    )
+    for (group, kind), part in rows[rows["trait"].eq(nil.PRICE_ROW)].groupby(
+        ["position_group", "kind"]
+    ):
+        log.info(
+            f"nil {season} {group} {kind}: {len(part)} priced, top "
+            f"${part['value'].max():.2f}M, median ${part['value'].median():.3f}M"
+        )
+    return rows
+
+
 def _seed_seasons(seed: pd.DataFrame, before: int) -> list[int]:
     return sorted(
         int(season)
@@ -444,9 +466,21 @@ def read_player_artifacts(season: int) -> dict[str, pd.DataFrame]:
         "heisman_board": board,
         "heisman_history": history,
         "player_model_meta": meta,
-        "position_traits": _latest_trait_week(season),
+        "position_traits": _with_nil_rows(_latest_trait_week(season), season),
         "player_season_stats": _season_stat_lines(season),
     }
+
+
+def _with_nil_rows(published: pd.DataFrame, season: int) -> pd.DataFrame:
+    """The published trait rows plus the season's NIL rows, when both exist."""
+    path = PROCESSED_DIR.joinpath(*nil.nil_artifact(season))
+    if published.empty or not path.exists():
+        return published
+    priced = pd.read_parquet(path)
+    rows = nil.nil_trait_rows(
+        priced, published, datetime.fromisoformat(priced["as_of"].iloc[0])
+    )
+    return pd.concat([published, rows[POSITION_TRAIT_COLUMNS]], ignore_index=True)
 
 
 def _season_stat_lines(season: int) -> pd.DataFrame:
