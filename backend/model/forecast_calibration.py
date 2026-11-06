@@ -1,6 +1,7 @@
 """Frozen final-mean calibration shared by weekly forecasts and their replay.
 
 Apply after the joint/SRS score fit and before availability or market layers.
+joint_scoring_v15 adds the frozen visitor travel term (backend/model/travel.py).
 The total offset was fitted on 2020-2021 and selected on 2022.
 Process coefficients use only 2020-2022; both were checked on 2023-2025.
 Distribution scales and underlying team ratings are unchanged.
@@ -13,8 +14,9 @@ import pandas as pd
 
 from backend.model.joint_scoring import MODEL_VERSION as CORE_MODEL_VERSION
 from backend.model.process import process_margin_adjustments
+from backend.model.travel import travel_margin_adjustments
 
-MODEL_VERSION = "joint_scoring_v14"
+MODEL_VERSION = "joint_scoring_v15"
 MEDIAN_TOTAL_OFFSET = -0.8326407989096936
 
 
@@ -52,12 +54,14 @@ def apply_forecast_calibration(
     )
     if not np.isfinite(np.column_stack([margin, total, raw])).all():
         raise ValueError("forecast calibration requires finite means and corrections")
+    travel = travel_margin_adjustments(out, games).to_numpy(dtype=float)
     adjusted_total = np.maximum(np.abs(margin), total + MEDIAN_TOTAL_OFFSET)
-    adjusted_margin = np.clip(margin + raw, -adjusted_total, adjusted_total)
+    adjusted_margin = np.clip(margin + raw + travel, -adjusted_total, adjusted_total)
     out["core_model_version"] = out["model_version"]
     out["model_version"] = MODEL_VERSION
     out["process_margin_raw_adjustment"] = raw
-    out["process_margin_adjustment"] = adjusted_margin - margin
+    out["travel_margin_adjustment"] = travel
+    out["process_margin_adjustment"] = adjusted_margin - margin - travel
     out["median_total_adjustment"] = adjusted_total - total
     out["total_calibration_adjustment"] = (
         out["total_calibration_adjustment"] + out["median_total_adjustment"]

@@ -328,6 +328,7 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path, monkeypatch):
     replay_games = games.copy()
     replay_games["completed"] = True
     replay_games["season_type"] = "regular"
+    replay_games["venue_id"] = np.nan
     replay_games["start_date"] = pd.to_datetime(
         [f"2026-09-{week * 7:02d}T18:00:00Z" for week in games["week"]], utc=True
     )
@@ -417,10 +418,37 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError, match="process_prior is required"):
         load_process_prior(2026)
     process_prior = build_process_prior(2026)
+    with pytest.raises(FileNotFoundError, match="/teams snapshot"):
+        apply_forecast_calibration(
+            expected, replay_games, team_games, process_prior, 3, cutoff.to_pydatetime()
+        )
+    # A in Los Angeles, B in Columbus, C in Seattle, D in Miami.
+    stadiums = {
+        1: (34.01, -118.29),
+        2: (40.00, -83.02),
+        3: (47.65, -122.30),
+        4: (25.96, -80.24),
+    }
+    teams_snapshot = store.RAW_DIR / "players" / "2026" / "teams.parquet"
+    teams_snapshot.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {
+            "id": list(stadiums),
+            "location": [
+                {"id": None, "latitude": lat, "longitude": lon}
+                for lat, lon in stadiums.values()
+            ],
+        }
+    ).to_parquet(teams_snapshot, index=False)
     calibrated = apply_forecast_calibration(
         expected, replay_games, team_games, process_prior, 3, cutoff.to_pydatetime()
     )
-    assert calibrated["model_version"].eq("joint_scoring_v14").all()
+    assert calibrated["model_version"].eq("joint_scoring_v15").all()
+    # Seattle to Columbus at Columbus is about 1,980 extra visitor miles; the
+    # neutral site has no known venue and so no term.
+    travel = calibrated.set_index("home_team")["travel_margin_adjustment"]
+    assert travel["B"] == pytest.approx(1.770 * 1.98 - 0.9553, abs=0.05)
+    assert travel["D"] == 0.0
     covariance_columns = ["margin_sd", "total_sd", "margin_total_correlation"]
     assert_frame_equal(calibrated[covariance_columns], expected[covariance_columns])
     with pytest.raises(ValueError, match="unadjusted core projections"):

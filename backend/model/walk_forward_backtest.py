@@ -11,7 +11,8 @@ The rows are ``joint_scoring_v13``, the core fit the weekly forecast runs
 (``joint_scoring.MODEL_VERSION``). Live forecasts are stamped
 ``joint_scoring_v14`` after the frozen final-mean calibration in
 ``backend/model/forecast_calibration.py`` adds a process margin adjustment and
-a median total offset, which this walk-forward does not apply. The backtest
+a median total offset (``joint_scoring_v15`` also adds the visitor travel
+term), which this walk-forward does not apply. The backtest
 and the live record are two populations from two versions, not one series.
 The artifact must carry the current core version, so a stale walk-forward
 cannot be published under the current model's name.

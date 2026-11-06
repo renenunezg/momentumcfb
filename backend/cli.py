@@ -342,7 +342,7 @@ def _add_publish_commands(sub) -> None:
     sub.add_parser(
         "publish-backtest",
         help="replace cfb.backtest_predictions with the core joint scoring "
-        "walk-forward (joint_scoring_v13; live rows are v14)",
+        "walk-forward (joint_scoring_v13; live rows are v14 or v15)",
     )
 
     for name, description in (

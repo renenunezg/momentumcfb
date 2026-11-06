@@ -436,8 +436,9 @@ def _replace_backtest(conn, backtest: pd.DataFrame) -> None:
 def publish_backtest() -> int:
     """Replace cfb.backtest_predictions with the core model's walk-forward.
 
-    The rows are ``joint_scoring_v13``; live graded rows are ``joint_scoring_v14``,
-    the same core fit after the frozen final-mean calibration. See
+    The rows are ``joint_scoring_v13``; live graded rows are ``joint_scoring_v14``
+    or ``joint_scoring_v15``, the same core fit after the frozen final-mean
+    calibration (v15 adds the travel term). See
     ``backend.model.walk_forward_backtest``.
     """
     from backend.db import engine
