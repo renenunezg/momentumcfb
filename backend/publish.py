@@ -139,9 +139,10 @@ GAME_PROJECTIONS_OPTIONAL_COLUMNS = [
     "market_informed_away_points",
 ]
 
-# The newest migration that replaces the recommendations eligibility check.
+# The newest migration that replaces the eligibility check shared by the ledger
+# and the current decisions; both tables must carry it.
 RECOMMENDATION_ELIGIBILITY_CONSTRAINT = "recommendation_eligibility_v14"
-RECOMMENDATION_ELIGIBILITY_MIGRATION = "sql/20261106120000_rivalry_road_favorite.sql"
+RECOMMENDATION_ELIGIBILITY_MIGRATION = "sql/20261106140000_decision_eligibility_v14.sql"
 
 MARKET_COMPARISONS_COLUMNS = [
     "game_id",
@@ -1390,9 +1391,10 @@ def ensure_recommendation_schema():
                 )
         if not conn.execute(
             text(
-                "SELECT EXISTS (SELECT 1 FROM pg_constraint "
-                "WHERE conrelid = 'cfb.recommendations'::regclass "
-                "AND conname = :constraint)"
+                "SELECT count(*) = 2 FROM pg_constraint "
+                "WHERE conrelid IN ('cfb.recommendations'::regclass, "
+                "'cfb.recommendation_decisions'::regclass) "
+                "AND conname = :constraint"
             ),
             {"constraint": RECOMMENDATION_ELIGIBILITY_CONSTRAINT},
         ).scalar_one():
