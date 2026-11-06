@@ -18,8 +18,9 @@ from backend.model.spread_pricing import (
     spread_win_loss,
 )
 from backend.odds.markets import american_profit, priced_candidates
+from backend.rivalries import is_rivalry
 
-POLICY_VERSION = "cfb-picks-v13"
+POLICY_VERSION = "cfb-picks-v14"
 # Minimum points the priced line must sit beyond the offered price's
 # break-even line. Measured in margin or total points, the same yardstick for
 # favourites and underdogs, so a mispriced tail cannot clear the gate on one
@@ -49,6 +50,18 @@ TOTAL_METHOD = "market_total_blend_v1"
 # the shortfall (rounded up). Never replace capped picks with other offers.
 VOLUME_FLOOR = 15
 FLOOR_REASON = "volume_floor"
+# In a listed rivalry (backend/rivalries.py) where the home team is the
+# underdog on its own field, the home underdog finished 3.0 points short of the
+# CFBD median close on 2019-2022 (112 games, se 1.6) and 3.6 short on 2023-2025
+# (92 games, se 1.6), against about zero for other home underdogs. The
+# 2019-2022 estimate shrunk toward zero with a 1.5-point prior SD gives this
+# shift. Backing the road favourite at the 2019-2022 close went 57-53, so the
+# sizing seasons show no betting edge; 2023-2025 went 54-35. The home/road
+# split was chosen after seeing both periods, so 2023-2025 is not an untouched
+# test. Regular-season FBS versus FBS true home games only. A road favourite
+# qualifies at any positive edge; the other side keeps the standard gate.
+RIVALRY_SHIFT_POINTS = 1.37
+RIVALRY_REASON = "rivalry_road_favorite"
 EDGE_SEARCH_POINTS = 200.0
 MAX_OFFER_AGE = pd.Timedelta(hours=1)
 MAX_FORECAST_AGE = pd.Timedelta(days=7)
@@ -445,6 +458,11 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
                 total_side - market_total
             )
         spread_inputs = spread_margin(projection)
+        rivalry_shift = (
+            RIVALRY_SHIFT_POINTS
+            if _rivalry_road_favorite(projection, season_type, spread_inputs)
+            else 0.0
+        )
         for market in MARKETS:
             market_projection = priced_projection
             if market == "totals" and pricing_total is not None:
@@ -453,7 +471,7 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
                 )
             if market == "spreads" and spread_inputs is not None:
                 market_projection = priced_projection._replace(
-                    market_informed_home_margin=spread_inputs[0],
+                    market_informed_home_margin=spread_inputs[0] - rivalry_shift,
                     degrees_of_freedom=500.0,
                 )
             row = {
@@ -535,13 +553,14 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
                     published_total=priced_projection.model_total,
                 )
             if market == "spreads" and spread_inputs is not None:
-                row["model_home_margin"] = spread_inputs[0]
+                row["model_home_margin"] = spread_inputs[0] - rivalry_shift
                 row["degrees_of_freedom"] = 500.0
                 row["pricing_context"].update(
                     model_weight=SPREAD_MODEL_WEIGHT,
                     model_side_home_margin=spread_inputs[1],
                     market_home_margin=spread_inputs[2],
-                    pricing_home_margin=spread_inputs[0],
+                    rivalry_shift_points=rivalry_shift,
+                    pricing_home_margin=spread_inputs[0] - rivalry_shift,
                     published_home_margin=projection.market_informed_home_margin,
                     reference_as_of=forecast.isoformat(),
                     calibration_version=SPREAD_CALIBRATION_VERSION,
@@ -585,7 +604,15 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
                     or loss <= 0
                 ):
                     block = "invalid_probability"
-                if block is None and (points < MIN_EDGE_POINTS or ev <= 0):
+                rivalry_pick = (
+                    market == "spreads"
+                    and rivalry_shift
+                    and candidate["side"] == "away"
+                )
+                gate = 0.0 if rivalry_pick else MIN_EDGE_POINTS
+                if block is None and (
+                    points < gate or (rivalry_pick and points <= 0) or ev <= 0
+                ):
                     block = "below_edge_threshold"
                 evaluated.append((block, points, candidate, win, push, edge, ev))
             # A blocked offer must never hide a qualifying offer with less edge.
@@ -619,7 +646,14 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
                     edge_points=points,
                     expected_value_per_unit=ev,
                     status="recommended" if block is None else "no_play",
-                    reason=block or "qualifying_edge",
+                    reason=block
+                    or (
+                        RIVALRY_REASON
+                        if market == "spreads"
+                        and rivalry_shift
+                        and best["side"] == "away"
+                        else "qualifying_edge"
+                    ),
                     stake_units=1.0 if block is None else 0.0,
                     **_decision_market(
                         market,
@@ -632,13 +666,17 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
                 if market == "spreads" and spread_inputs is not None:
                     direction = 1.0 if best["side"] == "home" else -1.0
                     model_shift = direction * (spread_inputs[0] - spread_inputs[2])
+                    rivalry_points = (
+                        -direction * rivalry_shift if rivalry_shift else 0.0
+                    )
                     quote_gap = direction * spread_inputs[2] + best["point"]
-                    raw_edge = model_shift + quote_gap
+                    raw_edge = model_shift + rivalry_points + quote_gap
                     row["pricing_context"]["spread_edge_breakdown"] = dict(
                         perspective="selected_side",
                         model_disagreement_points=direction
                         * (spread_inputs[1] - spread_inputs[2]),
                         model_contribution_points=model_shift,
+                        rivalry_adjustment_points=rivalry_points,
                         quote_difference_points=quote_gap,
                         raw_line_edge_points=raw_edge,
                         price_distribution_adjustment_points=points - raw_edge,
@@ -686,6 +724,8 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
             recommendation_tier=(
                 "exploratory"
                 if row.reason == FLOOR_REASON
+                else "rivalry_rule"
+                if row.reason == RIVALRY_REASON
                 else "edge_qualified"
                 if row.status == "recommended"
                 else "no_play"
@@ -695,6 +735,20 @@ def build_recommendations(projections, offers, *, decision_at=None, games=None):
             stake_method="flat_one_unit_per_pick",
         )
     return decisions
+
+
+def _rivalry_road_favorite(projection, season_type, spread_inputs) -> bool:
+    """A listed regular-season FBS rivalry on the home team's field, with the
+    home team the underdog at the spread reference."""
+    return (
+        spread_inputs is not None
+        and spread_inputs[2] < 0
+        and season_type == "regular"
+        and not bool(projection.neutral_site)
+        and projection.home_classification == "fbs"
+        and projection.away_classification == "fbs"
+        and is_rivalry(projection.home_team, projection.away_team)
+    )
 
 
 def _decision_market(market, side, home_spread, total, home_probability):

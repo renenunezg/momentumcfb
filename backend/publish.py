@@ -140,8 +140,8 @@ GAME_PROJECTIONS_OPTIONAL_COLUMNS = [
 ]
 
 # The newest migration that replaces the recommendations eligibility check.
-RECOMMENDATION_ELIGIBILITY_CONSTRAINT = "recommendation_eligibility_v13"
-RECOMMENDATION_ELIGIBILITY_MIGRATION = "sql/20261102130000_total_model_weight.sql"
+RECOMMENDATION_ELIGIBILITY_CONSTRAINT = "recommendation_eligibility_v14"
+RECOMMENDATION_ELIGIBILITY_MIGRATION = "sql/20261106120000_rivalry_road_favorite.sql"
 
 MARKET_COMPARISONS_COLUMNS = [
     "game_id",

@@ -189,8 +189,12 @@ def _segments(picks: pd.DataFrame) -> pd.DataFrame:
     """One row per pick and segment, as ``cfb.recommendation_performance`` builds them."""
     recommended = picks["status"].eq("recommended")
     qualification = np.select(
-        [picks["reason"].eq("volume_floor"), picks["reason"].eq("qualifying_edge")],
-        ["exploratory", "edge_qualified"],
+        [
+            picks["reason"].eq("volume_floor"),
+            picks["reason"].eq("qualifying_edge"),
+            picks["reason"].eq("rivalry_road_favorite"),
+        ],
+        ["exploratory", "edge_qualified", "rivalry_rule"],
         "legacy",
     )
     every = pd.Series(True, index=picks.index)
