@@ -166,6 +166,14 @@ def handle_weekly_update(args: Namespace) -> None:
 
         dispatch_at = schedule_weekly_kickoff(result.projections, args.season)
         log.info(f"kickoff capture rearmed for {dispatch_at}")
+        from backend.odds.line_timing import record_decision_lines
+
+        # Research data only: an ESPN outage must not fail a published week.
+        try:
+            stored = record_decision_lines(args.season, result.projections)
+            log.info(f"line timing: opening and decision lines for {stored} games")
+        except OddsAPIError as exc:
+            log.warning(f"line timing not recorded this week: {exc}")
 
 
 def handle_calibrate(args: Namespace) -> None:

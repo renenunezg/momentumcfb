@@ -53,6 +53,7 @@ from backend.commands.publishing import (
     handle_publish_anchors,
     handle_publish_backtest,
     handle_publish_closing_lines,
+    handle_rearm_kickoff,
     handle_refresh_picks,
 )
 from backend.commands.serving import (
@@ -103,6 +104,7 @@ HANDLERS: dict[str, Handler] = {
     "publish": handle_publish,
     "publish-anchors": handle_publish_anchors,
     "publish-closing-lines": handle_publish_closing_lines,
+    "rearm-kickoff": handle_rearm_kickoff,
     "refresh-picks": handle_refresh_picks,
     "fetch-anchors": handle_fetch_anchors,
     "grade": handle_grade,

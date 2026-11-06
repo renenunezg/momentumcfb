@@ -372,6 +372,13 @@ def _add_publish_commands(sub) -> None:
         "stored Division I schedule otherwise",
     )
 
+    rearm = sub.add_parser(
+        "rearm-kickoff",
+        help="arm the kickoff capture for the next priced kickoff window of the "
+        "published week",
+    )
+    rearm.add_argument("--season", type=int, required=True)
+
     grade = sub.add_parser(
         "grade",
         help="grade completed games against the frozen published projection "

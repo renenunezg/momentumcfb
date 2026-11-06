@@ -116,6 +116,11 @@ def test_weekly_update_publishes_pure_model_when_odds_quota_is_exhausted(
         "schedule_weekly_kickoff",
         lambda projections, season: scheduled.append(season),
     )
+    from backend.odds import line_timing
+
+    monkeypatch.setattr(
+        line_timing, "record_decision_lines", lambda season, projections: 0
+    )
     result = SimpleNamespace(
         week=1,
         ratings=[object()],

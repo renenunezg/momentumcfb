@@ -49,7 +49,9 @@ jobs:
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       ODDS_API_BOOKMAKERS: ${{ secrets.ODDS_API_BOOKMAKERS }}
       ODDS_API_REGIONS: ${{ secrets.ODDS_API_REGIONS }}
-      ODDS_SOURCE: ${{ vars.ODDS_SOURCE || 'odds_api' }}
+      # Every kickoff window is captured from ESPN's unmetered DraftKings line,
+      # so the shared Odds API quota is never spent here.
+      ODDS_SOURCE: espn
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
     steps:
@@ -215,7 +217,9 @@ jobs:
       - name: Capture the kickoff window
         if: env.VALIDATE_ONLY != 'true'
         run: |
-          arguments=(--season "$SEASON" --max-wait-hours 3 --min-quota 20 --max-forecast-age-hours 240 --max-source-age-hours 240)
+          # Unmetered polling lets one run cover 150 minutes of kickoffs; chained
+          # runs at that width missed no kickoff time in weeks 5-10 of 2026.
+          arguments=(--season "$SEASON" --max-wait-hours 3 --min-quota 20 --max-forecast-age-hours 240 --max-source-age-hours 240 --cluster-minutes 150)
           if [[ -n "${FORECAST_DIRECTORY:-}" ]]; then
             arguments+=(--forecast-directory "$FORECAST_DIRECTORY")
           fi
@@ -250,6 +254,13 @@ jobs:
             arguments+=(--forecast-directory "$FORECAST_DIRECTORY")
           fi
           poetry run python -m backend publish-closing-lines "${arguments[@]}"
+
+      # One run captures one window; arm the next so the whole week is covered.
+      - name: Arm the next kickoff window
+        if: always() && env.VALIDATE_ONLY != 'true'
+        env:
+          MOMENTUMCFB_DB_WRITES: "1"
+        run: poetry run python -m backend rearm-kickoff --season "$SEASON"
 
       - name: Preserve capture audit artifacts
         if: always()

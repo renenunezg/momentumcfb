@@ -514,6 +514,7 @@ def publish_closing_lines(
     """
     from backend.db import engine
     from backend.odds.kickoff import capture_closing_lines
+    from backend.odds.line_timing import record_closed_lines
     from backend.serving.closing_lines import CLOSING_LINES_COLUMNS
 
     built = capture_closing_lines(season, forecast_directory=forecast_directory)
@@ -536,6 +537,8 @@ def publish_closing_lines(
                 {"s": season},
             ).scalars()
         )
+        # The same capture is each game's closed checkpoint for timing tests.
+        record_closed_lines(conn, rows)
         rows = rows[~rows["game_id"].astype(int).isin(stored)]
         if rows.empty:
             return len(built), 0

@@ -173,6 +173,20 @@ def handle_publish_closing_lines(args: Namespace) -> None:
     )
 
 
+def handle_rearm_kickoff(args: Namespace) -> None:
+    from backend.odds.scheduling import schedule_next_kickoff
+    from backend.publish import fetch_published_projections
+
+    dispatch_at = schedule_next_kickoff(
+        fetch_published_projections(args.season), args.season
+    )
+    log.info(
+        f"next kickoff capture armed for {dispatch_at}"
+        if dispatch_at
+        else "no priced kickoff left this week; the weekly update arms the next"
+    )
+
+
 def handle_fetch_anchors(args: Namespace) -> None:
     from backend.publish import fetch_serving_anchors
 

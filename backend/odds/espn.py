@@ -189,6 +189,12 @@ class EspnOddsClient:
             day += timedelta(days=1)
         return fetched_at, list(events.values())
 
+    def scoreboard_events(
+        self, first: datetime, last: datetime
+    ) -> tuple[datetime, list[dict]]:
+        """Raw scoreboard events for the days spanning a window, and the read time."""
+        return self._scoreboard(first, last)
+
     def get_ncaaf_events(
         self, commence_from: datetime, commence_to: datetime
     ) -> EventsSnapshot:
