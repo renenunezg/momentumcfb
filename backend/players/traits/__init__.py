@@ -13,7 +13,9 @@ from dataclasses import dataclass
 # weights were fit on credit before untagged interceptions were charged to the
 # passer (2026-10-28); the ``epa.credit`` trait is z-scored within each week's
 # pool, so the level shift cancels and only the rank moves reach the grade.
-MODEL_VERSION = "cfb_position_traits_v1.1"
+# v2 (2026-11-07) is the same recipe refit on player value v6 credit with the
+# receiver room trait (``rec.room``) available to WR and TE.
+MODEL_VERSION = "cfb_position_traits_v2"
 AGGREGATES = frozenset({"rate", "quantile20", "share_of_games", "latest"})
 
 

@@ -349,7 +349,9 @@ def test_opponent_effect_is_the_ridge_fit_around_the_regressed_prior():
     # v3 blended the ridge fit a second time toward last season by games
     # played; v4 lets the ridge alone weigh the season's evidence. The effect
     # for a week must therefore equal the per-play ridge rating fitted on
-    # earlier games around the regressed previous-season anchor.
+    # earlier games around the regressed previous-season anchor. Since v6 the
+    # anchor keeps each conference's mean, only the team's deviation from it is
+    # regressed, and the units share a conference level.
     games = pd.concat(
         [
             _games({1, 2, 3, 4}),
@@ -361,6 +363,18 @@ def test_opponent_effect_is_the_ridge_fit_around_the_regressed_prior():
             ),
         ],
         ignore_index=True,
+    )
+    conference = {
+        "A": "East",
+        "C": "East",
+        "D": "East",
+        "B": "West",
+        "E": "West",
+        "F": "West",
+    }
+    games = games.assign(
+        home_conference=games["home_team"].map(conference),
+        away_conference=games["away_team"].map(conference),
     )
     units = _unit_games(games)
     prior = pd.DataFrame(
@@ -382,7 +396,12 @@ def test_opponent_effect_is_the_ridge_fit_around_the_regressed_prior():
     effects = value.season_unit_effects(games, units, prior)
     week = 8
     anchor = prior[["team", *columns]].copy()
-    anchor[columns] = anchor[columns] * value.OPPONENT_PRIOR_REGRESSION
+    conference_mean = anchor.groupby(anchor["team"].map(conference))[columns].transform(
+        "mean"
+    )
+    anchor[columns] = conference_mean + value.OPPONENT_PRIOR_REGRESSION * (
+        anchor[columns] - conference_mean
+    )
     earlier = games[games["model_week"].lt(week)]
     as_of = (
         pd.to_datetime(earlier["start_date"], utc=True).max() + pd.Timedelta(days=1)
@@ -395,6 +414,7 @@ def test_opponent_effect_is_the_ridge_fit_around_the_regressed_prior():
         channel_priors=anchor,
         per_play=True,
         prior_share=value.OPPONENT_PRIOR_SHARE,
+        conference_share=value.OPPONENT_CONFERENCE_SHARE,
     ).frame.set_index("team")
     window = units[units["game_id"].isin(earlier["game_id"])]
     late = effects[effects["model_week"].eq(week)].set_index("team")

@@ -40,14 +40,44 @@ def _centered_units(
     return unit - unit[center_mask].mean(), counter - counter[center_mask].mean()
 
 
+def conference_groups(teams: pd.Series, conferences: pd.Series) -> np.ndarray:
+    """Each team's conference, or its own name when it has none or is independent,
+    so an independent shares a conference level with nobody."""
+    conference = conferences.astype("string")
+    alone = conference.isna() | conference.str.contains("Independent", case=False)
+    return np.where(alone.fillna(True), "_" + teams.astype(str), conference.fillna(""))
+
+
+def _conference_precision(
+    groups: np.ndarray, unit_sd: float, conference_sd: float
+) -> np.ndarray:
+    """Prior precision of both sides' units when each unit is its conference's
+    shared level (sd ``conference_sd``) plus its own deviation (sd ``unit_sd``)."""
+    same = (groups[:, None] == groups[None, :]).astype(float)
+    block = np.linalg.inv(unit_sd**2 * np.eye(len(groups)) + conference_sd**2 * same)
+    n_teams = len(groups)
+    precision = np.zeros((2 * n_teams, 2 * n_teams))
+    precision[:n_teams, :n_teams] = block
+    precision[n_teams:, n_teams:] = block
+    return precision
+
+
 def _two_sided_ridge(
     observations: pd.DataFrame,
     teams: list[str],
     classifications: np.ndarray,
     prior_units: np.ndarray | None = None,
     prior_share: float = CHANNEL_PRIOR_SHARE,
+    groups: np.ndarray | None = None,
+    conference_share: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Fit value = unit(team) - counter(opponent) with class-aware priors."""
+    """Fit value = unit(team) - counter(opponent) with class-aware priors.
+
+    With ``conference_share`` above zero, units in one of ``groups`` share a
+    conference level with prior sd ``conference_share`` times the channel's game
+    sd, so the level is learnt from every cross-conference game instead of being
+    shrunk team by team toward the anchor.
+    """
     if observations.empty:
         raise ValueError("unit channel has no eligible observations")
 
@@ -77,6 +107,13 @@ def _two_sided_ridge(
         # Every observation already equals its prior expectation.
         return _centered_units(prior_mean, n_teams, classifications == "fbs")
     prior_sd = np.full(2 * n_teams, prior_share * np.sqrt(variance))
+    precision = None
+    if conference_share > 0:
+        if groups is None or len(groups) != n_teams:
+            raise ValueError("a conference prior needs one group per team")
+        precision = _conference_precision(
+            groups, float(prior_sd[0]), conference_share * np.sqrt(variance)
+        )
 
     def solve(noise: float) -> np.ndarray:
         parameters, _ = _solve_ridge(
@@ -85,6 +122,7 @@ def _two_sided_ridge(
             weights / noise,
             prior_mean,
             prior_sd,
+            precision,
         )
         return parameters
 
@@ -237,10 +275,12 @@ def fit_unit_ratings(
     channel_priors: pd.DataFrame | None = None,
     per_play: bool = False,
     prior_share: float = CHANNEL_PRIOR_SHARE,
+    conference_share: float = 0.0,
 ) -> UnitRatings:
     """Fit pregame units; per-play mode returns only rush/pass player channels.
 
-    ``prior_share`` is each unit's prior sd as a share of the channel's game sd.
+    ``prior_share`` is each unit's prior sd as a share of the channel's game sd;
+    ``conference_share`` the same for a shared conference level (0 = none).
     """
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
@@ -262,6 +302,7 @@ def fit_unit_ratings(
     teams = catalog["team"].astype(str).tolist()
     team_set = set(teams)
     classifications = catalog["classification"].to_numpy(str)
+    groups = conference_groups(catalog["team"], catalog["conference"])
 
     game_ids = set(training["game_id"])
     window = unit_games[unit_games["game_id"].isin(game_ids)].copy()
@@ -317,6 +358,8 @@ def fit_unit_ratings(
             classifications,
             prior_units,
             prior_share,
+            groups,
+            conference_share,
         )
         if name == "rush":
             ratings["rush_offense"] = unit

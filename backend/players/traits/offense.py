@@ -102,6 +102,7 @@ REC_TRAITS = {
         TraitSpec("rec.explosive", RECEIVER_GROUPS, "counted"),
         TraitSpec("rec.late_down", RECEIVER_GROUPS, "counted"),
         TraitSpec("rec.qb_independence", RECEIVER_GROUPS, "inferred"),
+        TraitSpec("rec.room", RECEIVER_GROUPS, "inferred"),
     )
 }
 
@@ -665,6 +666,39 @@ def _rec_qb_independence(targets: pd.DataFrame, receivers: set[str]) -> pd.DataF
     return trait_rows(games, REC_TRAITS["rec.qb_independence"])
 
 
+def rec_room(
+    rows: pd.DataFrame, targets: pd.DataFrame, receivers: set[str]
+) -> pd.DataFrame:
+    """The other wide receivers' and tight ends' adjusted receiving EPA in each game
+    he appeared in: the strength of the room he earns his targets against.
+
+    Appearance is as in ``rec_target_share``. Target share falls as the room gets
+    stronger, so a share earned beside good receivers says more than the same
+    share in a thin room; on 2020-2024 the room predicted next-season credit and
+    the draft beyond the v1.1 grade. Per game it is the room's EPA, so a ``rate``
+    over games with denominator 1 is its per-game mean.
+    """
+    appeared = pd.concat(
+        [rows[GAME_KEYS], targets[GAME_KEYS]], ignore_index=True
+    ).drop_duplicates()
+    appeared = appeared[appeared["athlete_id"].isin(receivers)]
+    room_targets = targets[targets["athlete_id"].isin(receivers)]
+    own = room_targets.groupby(GAME_KEYS, as_index=False)["adjusted_epa"].sum()
+    team = room_targets.groupby(["game_id", "team"], as_index=False)[
+        "adjusted_epa"
+    ].sum()
+    events = appeared.merge(
+        own.rename(columns={"adjusted_epa": "own"}), on=GAME_KEYS, how="left"
+    ).merge(
+        team.rename(columns={"adjusted_epa": "room"}),
+        on=["game_id", "team"],
+        how="inner",
+    )
+    events["numerator"] = events["room"] - events["own"].fillna(0.0)
+    events["denominator"] = 1.0
+    return trait_rows(events, REC_TRAITS["rec.room"])
+
+
 def receiver_traits(
     ctx: SeasonContext,
     tables: ExpectationTables,
@@ -672,7 +706,7 @@ def receiver_traits(
     *,
     poor_coverage: bool = False,
 ) -> pd.DataFrame:
-    """The five wide receiver and tight end traits per player and game.
+    """The six wide receiver and tight end traits per player and game.
 
     ``poor_coverage`` (decided per season by the caller from ``target_coverage``
     against ``POOR_TARGET_COVERAGE``) makes every target-denominated trait
@@ -690,5 +724,6 @@ def receiver_traits(
         _rec_explosive(player_targets, ctx.games),
         _rec_late_down(player_targets, tables, ctx.games),
         _rec_qb_independence(targets, receivers),
+        rec_room(rows, targets, receivers),
     ]
     return pd.concat(frames, ignore_index=True)

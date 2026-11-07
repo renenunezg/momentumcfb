@@ -24,23 +24,27 @@ from backend.model.ingame import (
     win_probability,
 )
 from backend.model.joint_scoring import _team_catalog
-from backend.model.unit_ratings import fit_unit_ratings
+from backend.model.unit_ratings import conference_groups, fit_unit_ratings
 from backend.model.weekly import load_weekly_games
 from backend.players.credit import assign_play_credit
 from backend.players.ingest import read_season_source, read_weekly
 
 log = logging.getLogger(__name__)
 
-MODEL_VERSION = "cfb_player_value_v5"
+MODEL_VERSION = "cfb_player_value_v6"
+# v6 (2026-11-07) gives the opponent units a shared conference level
+# (OPPONENT_CONFERENCE_SHARE) and keeps each conference's previous-season mean
+# when the anchor regresses; v5's adjustment removed only about a quarter of the
+# Power 4 versus Group of 5 gap in per-play EPA that the same offense shows.
 # Since 2026-10-28 v5 credit also charges the passer for the play-by-play
 # interceptions the play-stats feed left untagged (credit.untagged_interceptions).
 # That widens the coverage of an existing share; the shares, the shrinkage prior
 # and the replacement baseline are unchanged, so the version string is too.
-# The opponent prior is built the same way under v3, v4 and v5, so a frozen
-# artifact stays valid; v4 changed the in-season use of it and v5 the credit
-# shares and the shrinkage prior, neither of which enters the prior.
+# The opponent prior is built the same way under v3 to v6, so a frozen
+# artifact stays valid; v4 and v6 changed the in-season use of it and v5 the
+# credit shares and the shrinkage prior, none of which enters the prior.
 PRIOR_COMPATIBLE_VERSIONS = frozenset(
-    {"cfb_player_value_v3", "cfb_player_value_v4", MODEL_VERSION}
+    {"cfb_player_value_v3", "cfb_player_value_v4", "cfb_player_value_v5", MODEL_VERSION}
 )
 # Games are the opportunity unit for replacement and shrinkage: a defender's
 # credited plays are disruption events, not snaps, so plays cannot be the
@@ -75,6 +79,12 @@ FCS_OPPONENT_WEIGHT = 0.5
 # of each, so neither carries more precision than the first decimal implies.
 OPPONENT_PRIOR_REGRESSION = 0.7
 OPPONENT_PRIOR_SHARE = 0.3
+# Prior sd of a conference's shared unit level as a share of the channel's game
+# sd. The regression above then applies to each team's deviation from its
+# conference's anchor mean, not to the conference level. Chosen by the same
+# walk-forward next-game per-play error on 2020 through 2024 (flat between 0.15
+# and 0.20) and checked once on 2025.
+OPPONENT_CONFERENCE_SHARE = 0.17
 
 POSITION_GROUPS = {
     "QB": "QB",
@@ -248,10 +258,12 @@ def season_unit_effects(
 ) -> pd.DataFrame:
     """Per-play unit effects for each week from games played before it.
 
-    The previous season's rating, regressed toward its subdivision mean, is
-    the ridge anchor; every completed earlier game is evidence against it,
-    and the ridge's own noise estimate sets how far that evidence moves each
-    unit. No play from the week being adjusted enters its fit.
+    The previous season's rating is the ridge anchor after its deviation from
+    the team's current conference mean is regressed (an independent regresses
+    toward zero); every completed earlier game is evidence against it, units
+    share a conference level, and the ridge's own noise estimate sets how far
+    that evidence moves each unit. No play from the week being adjusted enters
+    its fit.
     """
     seasons = games["season"].unique()
     if len(seasons) != 1:
@@ -259,11 +271,23 @@ def season_unit_effects(
     validate_opponent_prior(prior, int(seasons[0]))
     columns = [c for units in CHANNEL_UNITS.values() for c in units[:2]]
     catalog = _team_catalog(games)
+    groups = pd.Series(
+        conference_groups(catalog["team"], catalog["conference"]),
+        index=catalog["team_id"].to_numpy(),
+    )
+    anchor = prior[["team_id", "classification", *columns]].copy()
+    group = anchor["team_id"].map(groups)
+    alone = group.isna() | group.str.startswith("_")
+    conference_mean = anchor.groupby(group)[columns].transform("mean")
+    conference_mean[alone.to_numpy()] = 0.0
+    anchor[columns] = conference_mean + OPPONENT_PRIOR_REGRESSION * (
+        anchor[columns] - conference_mean
+    )
     baseline = catalog[["team_id", "team", "classification"]].merge(
-        prior[["team_id", *columns]], on="team_id", how="left", validate="one_to_one"
+        anchor[["team_id", *columns]], on="team_id", how="left", validate="one_to_one"
     )
     # New teams inherit their subdivision's historical expectation, not FBS zero.
-    class_means = prior.groupby("classification")[columns].mean()
+    class_means = anchor.groupby("classification")[columns].mean()
     for column in columns:
         baseline[column] = baseline[column].fillna(
             baseline["classification"].map(class_means[column])
@@ -273,7 +297,6 @@ def season_unit_effects(
             "player opponent prior cannot cover the schedule classifications"
         )
     baseline = baseline[["team", *columns]].set_index("team")
-    baseline[columns] = baseline[columns] * OPPONENT_PRIOR_REGRESSION
     frames = []
     for week in sorted(int(w) for w in games["model_week"].dropna().unique()):
         window = games[games["model_week"].lt(week)]
@@ -292,6 +315,7 @@ def season_unit_effects(
                 channel_priors=baseline.reset_index(),
                 per_play=True,
                 prior_share=OPPONENT_PRIOR_SHARE,
+                conference_share=OPPONENT_CONFERENCE_SHARE,
             ).frame.set_index("team")
             for offense, defense, plays_column in CHANNEL_UNITS.values():
                 per_game = float(window_units[plays_column].mean())
