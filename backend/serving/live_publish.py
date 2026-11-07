@@ -20,11 +20,11 @@ import pandas as pd
 
 from backend.cfbd.client import CFBDError, CFBDUnavailable
 from backend.model.ingame import (
-    MODEL_VERSION,
+    LIVE_MODEL_VERSION,
     REGULATION_SECONDS,
     IngameBaselineParams,
     build_serving_inputs,
-    win_probability,
+    live_win_probability,
 )
 from backend.serving.cfbd_live import ACTIVE, FINAL
 
@@ -124,7 +124,7 @@ def _probability(
             }
         ]
     )
-    return float(win_probability(build_serving_inputs(state, anchor), params)[0])
+    return float(live_win_probability(build_serving_inputs(state, anchor), params)[0])
 
 
 def _point(elapsed: int, home: int, away: int, probability: float) -> dict:
@@ -162,7 +162,7 @@ def score_game(
         "away_team": game.away_team,
         "fetched_at": now.isoformat(),
         "probability_source": PROBABILITY_SOURCE,
-        "model_version": MODEL_VERSION,
+        "model_version": LIVE_MODEL_VERSION,
         "anchor": game.anchor(),
         "home_win_probability": pregame,
         "away_win_probability": 1 - pregame,

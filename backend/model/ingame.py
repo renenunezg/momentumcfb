@@ -18,6 +18,13 @@ from scipy.stats import norm
 from backend.model.calibration import DEVELOPMENT_SEASONS, HOLDOUT_SEASONS
 
 MODEL_VERSION = "ingame_baseline_v1"
+# The live publisher serves the baseline plus lead reversion under its own
+# label. The coefficient was fitted by play-level log loss on the
+# market-anchored regulation states of 2021-2025 (closing-line anchors); every
+# leave-one-season-out fit lands between -0.076 and -0.103 and improves four of
+# the five held-out seasons, and 2026 weeks 1-2 agree in sign.
+LIVE_MODEL_VERSION = "ingame_baseline_v2"
+LIVE_SURPRISE_REVERSION = -0.090
 REGULATION_SECONDS = 3600.0
 POSSESSION_REFERENCE_YARDS_TO_GOAL = 75.0
 MARGIN_BUCKET_EDGES = (-np.inf, -16.5, -8.5, -3.5, 3.5, 8.5, 16.5, np.inf)
@@ -154,6 +161,27 @@ def margin_distribution(
 def win_probability(inputs: pd.DataFrame, params: IngameBaselineParams) -> np.ndarray:
     mean, sd = margin_distribution(inputs, params)
     return norm.cdf(mean / sd)
+
+
+def live_win_probability(
+    inputs: pd.DataFrame, params: IngameBaselineParams
+) -> np.ndarray:
+    """The served live model: the frozen baseline plus partial lead reversion.
+
+    A team running ahead of its pregame expectation gives part of that surplus
+    back over the rest of regulation, so the mean final margin moves toward
+    the anchor by ``LIVE_SURPRISE_REVERSION`` times the surplus. Overtime keeps
+    the baseline. The baseline parameters and every research consumer of
+    ``win_probability`` are unchanged.
+    """
+    mean, sd = margin_distribution(inputs, params)
+    fraction = inputs["fraction_remaining"].to_numpy(float)
+    surprise = inputs["home_margin"].to_numpy(float) - (1.0 - fraction) * inputs[
+        "pregame_margin"
+    ].to_numpy(float)
+    regulation = ~inputs["is_overtime"].to_numpy(bool)
+    shift = np.where(regulation, LIVE_SURPRISE_REVERSION * surprise, 0.0)
+    return norm.cdf((mean + shift) / sd)
 
 
 def _mean_log_loss(outcome: np.ndarray, probability: np.ndarray) -> float:
