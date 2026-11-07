@@ -1282,6 +1282,16 @@ def run_kickoff_window(
         progress=progress,
         now=now,
     )
+    # Discovery must keep the first kickoff in its window until the last poll,
+    # or a started game drops out and every later poll is skipped while the
+    # window's later games are still pregame.
+    last_poll_at = _utc(now()) + pd.Timedelta(
+        seconds=(planner.max_polls + 1) * interval_seconds
+    )
+    lookback_hours = max(
+        lookback_hours,
+        (last_poll_at - target.first_kickoff).total_seconds() / 3600,
+    )
     completed = run_live_polling(
         season,
         schedule,
