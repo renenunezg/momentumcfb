@@ -17,8 +17,8 @@
     "ingame/baseline_summary.parquet": "d2fcd82446d24793e91d192cbdfe192ea7250a075d344f7c13cfd5eb7af97d49",
     "players/models/heisman_2026.json": "e9a722d7d704d5c3caf96dec45b93edbc36db8af9a25b475f6ce8938f1fb2d83",
     "players/models/position_grade_expectations_2024.parquet": "857787cfdcaeed02f1ed4557ea6cbbba2171dd5406a99532ba20700f19653c60",
-    "players/models/position_grade_2024.json": "3d85cb825df4d23113b51ef05470bf285ac7ea47e13f34d7d160a6591b01d6cd",
-    "players/opponent_priors/2026.parquet": "014a5ea5f4393046ce2eb052f1bec548c945e61dcb39eaf08598c81f6fa53f96",
+    "players/models/position_grade_2024.json": "db693f755940ea69798bfa1b527583f8fc16d4be6872f746ac0618322ae9aa55",
+    "players/opponent_priors/2026.parquet": "2378bd817c0b7474721d5a87bdb9c6be601a29029e376e3735929b26af3feae3",
     "preseason/market_prior/2026_01.parquet": "cb9a7c2a4154db9ca6b569bbd5291dd83d0cad8ab344f244746cb811646db9d5",
     "preseason/ratings/2026_01.parquet": "64bc21d21d0d5616144feed8ce1fcd5afdc3f30af44f96f26251750ffb9d7640",
     "preseason/score_noise_prior/2026_01.parquet": "0a58658c5f3bd6878dd8c40eb363c7a67a77a376c775541ef04a51a35fcf9132",
@@ -27,7 +27,7 @@
   },
   "release_bundles": {
     "historical-epa-2019-2025-20261017.zip": "0f5d9a50e6e2f1dc0b3f58ac78294d45486f1bad8674fb696bfdc15520807997",
-    "player-runtime-2026-epa-20261017-v1.1.zip": "01355d1129c015005febe283e92e73d9ae0f367d283201800289b93f6abd1f9a",
-    "preseason-runtime-2026-market-total-20261027.zip": "e0a099e10764be756de0a60bb98e86174ca488de38f892309bff4a9f4db517e5"
+    "preseason-runtime-2026-market-total-20261027.zip": "e0a099e10764be756de0a60bb98e86174ca488de38f892309bff4a9f4db517e5",
+    "player-runtime-2026-v6-20261107.zip": "2cff5274d13253c73b1a4eff55b313a1e4c554dc30bfc59e9a74a623b60a611c"
   }
 }
