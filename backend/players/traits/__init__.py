@@ -15,7 +15,10 @@ from dataclasses import dataclass
 # pool, so the level shift cancels and only the rank moves reach the grade.
 # v2 (2026-11-07) is the same recipe refit on player value v6 credit with the
 # receiver room trait (``rec.room``) available to WR and TE.
-MODEL_VERSION = "cfb_position_traits_v2"
+# v3 (2026-11-09) adds the program talent trait (``team.talent``) at QB, RB and DB,
+# leaves DL trait z-scores uncapped, and pulls the early-season composite toward
+# last season's final grade at the groups the model carries prior terms for.
+MODEL_VERSION = "cfb_position_traits_v3"
 AGGREGATES = frozenset({"rate", "quantile20", "share_of_games", "latest"})
 
 
@@ -40,6 +43,7 @@ TRAITS: dict[str, TraitSpec] = {}
 # ``TRAITS`` so the builders' registry stays exactly what they produce.
 DERIVED_TRAITS: dict[str, TraitSpec] = {}
 EPA_TRAIT = "epa.credit"
+TALENT_TRAIT = "team.talent"
 
 
 def register(spec: TraitSpec) -> TraitSpec:
@@ -59,6 +63,15 @@ def all_traits() -> dict[str, TraitSpec]:
 # denominator 1 is its per-game mean for split-half reliability.
 DERIVED_TRAITS[EPA_TRAIT] = TraitSpec(
     EPA_TRAIT, ("QB", "RB", "WR", "TE", "DL", "LB", "DB"), "counted"
+)
+
+# The talent composite of the player's program that season, a level prior: at equal
+# production a player on a more talented roster did better the next season at these
+# groups on the 2020-2024 development pairs (QB, RB, DB), and no better elsewhere.
+# It is known before the season, has no per-game value and so no reliability; the
+# grade weights it only through the fitted step.
+DERIVED_TRAITS[TALENT_TRAIT] = TraitSpec(
+    TALENT_TRAIT, ("QB", "RB", "DB"), "inferred", aggregate="latest"
 )
 
 

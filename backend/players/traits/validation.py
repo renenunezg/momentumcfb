@@ -195,14 +195,20 @@ def rescored_grades(
     model: grade.GradeModel,
     weeks: list[int],
 ) -> pd.DataFrame:
-    """``week, athlete_id, position_group, grade`` from the frozen model at ``weeks``."""
-    scored = grade.with_epa_credit(snapshot, values)
+    """``week, athlete_id, position_group, grade`` from the frozen model at ``weeks``.
+
+    ``snapshot`` and ``values`` are one season's; the season's team talent and last
+    season's final grades are read the way the weekly runner reads them.
+    """
+    season = int(snapshot["season"].iloc[0])
+    scored = grade.with_derived_traits(snapshot, values, backtest.team_talent(season))
+    prior = backtest.prior_season_grades(season, model)
     parts = []
     for week in weeks:
         week_rows = scored[scored["week"].eq(week)]
         if week_rows.empty:
             continue
-        graded = grade.score_grades(week_rows, model)
+        graded = grade.score_grades(week_rows, model, prior)
         parts.append(graded.assign(week=week))
     columns = ["week", "athlete_id", "position_group", "grade"]
     if not parts:

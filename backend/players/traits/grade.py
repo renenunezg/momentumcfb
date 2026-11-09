@@ -9,17 +9,18 @@ measured, and traits that do not travel (portability at or below zero) get no
 weight and stay on the card as descriptive. A trait whose portability cannot be
 measured keeps its reliability weight. Weights sum to 1 within each position.
 
-A player's ``composite`` is the weighted mean of his oriented, capped trait
-z-scores among qualified FBS players at the group that week, over the traits
-available at the group that week, with an available trait he has no value for
-counted at the position average (z = 0). He is graded only when he
+A player's ``composite`` is the weighted mean of his oriented trait z-scores
+(capped at ``Z_CAP`` outside ``UNCAPPED_GROUPS``) among qualified FBS players at
+the group that week, over the traits available at the group that week, with an
+available trait he has no value for counted at the position average (z = 0).
+Before ``PRIOR_END_WEEK`` the composite is pulled toward his final grade of the
+season before at the groups the model has prior terms for. He is graded only when he
 has his position's primary exposure trait and his traits cover at least
 ``MIN_WEIGHT_COVERAGE`` of the position's weight. The ``grade`` puts the
 composite's rank among graded players at the position on the 20 to 80 scale
 (normal scores, mean 50, sd 10), so only the top of a large group reaches the cap
 instead of the several players a raw standard score of the skewed composite put
-there. Nothing
-is fitted to team margins or to any outcome.
+there. Nothing is fitted to team margins.
 """
 
 import json
@@ -33,7 +34,7 @@ from scipy.optimize import lsq_linear
 from scipy.stats import norm
 
 from backend.config import PROCESSED_DIR
-from backend.players.traits import EPA_TRAIT, MODEL_VERSION, all_traits
+from backend.players.traits import EPA_TRAIT, MODEL_VERSION, TALENT_TRAIT, all_traits
 
 NOISE_RELIABILITY = 0.10
 # The fewest players a pooled split-half reliability may rest on before it counts.
@@ -68,6 +69,10 @@ MIN_TRAIT_AVAILABILITY = 0.5
 # single-game extremes and thin pools, not a tuned value. Snapshot values and
 # percentiles stay uncapped.
 Z_CAP = 3.0
+# Groups whose trait z-scores are left uncapped. DL havoc and pass rush are heavily
+# right-skewed (skew 1.0 to 10.7 at the final week of 2020-2024), so 3 to 21 linemen
+# a season sat at the cap on each and the best of them tied at the top of the board.
+UNCAPPED_GROUPS = frozenset({"DL"})
 # The composite is shrunk toward the position average by games / (games + k_g),
 # with k_g the games at which the composite's split-half reliability reaches this
 # value (r = n / (n + k) gives r = 0.5 at n = k), capped at SHRINK_CAP_GAMES when
@@ -78,6 +83,20 @@ SHRINK_CAP_GAMES = 12.0
 # fine and log-spaced so the choice is not a coarse round number.
 PENALTIES = np.logspace(-2, 4, 61)
 ZERO_COEFFICIENT = 1e-9
+# Early in a season the composite is pulled toward the player's final grade of the
+# season before, with a weight that falls linearly from week 0 to nothing at
+# PRIOR_END_WEEK. The terms are fitted on weeks PRIOR_FIT_WEEKS, the weeks with a
+# rest of the season left to predict; the ramp ends on the first week after them, so
+# a late-season or final grade reads the current season alone. Freely fitted end
+# weeks (13 to 23 by group) ranked the rest of the 2021-2024 seasons no better.
+PRIOR_FIT_WEEKS = tuple(range(1, 13))
+PRIOR_END_WEEK = 13
+# The groups that take the prior: with terms fitted on the other seasons it ranked
+# the rest of each 2021-2024 season better in all four, by 0.012 (LB) to 0.043 (TE)
+# Spearman over weeks 1 to 12, most of it before week 6. DB gained 0.009 with an
+# interval that reaches zero and is left out.
+PRIOR_GROUPS = ("QB", "RB", "WR", "TE", "DL", "LB")
+PRIOR_COLUMNS = ["athlete_id", "position_group", "grade"]
 GRADE_MEAN, GRADE_SD, GRADE_MIN, GRADE_MAX = 50.0, 10.0, 20.0, 80.0
 WEIGHT_COLUMNS = [
     "position_group",
@@ -361,6 +380,17 @@ class GradeModel:
     # Per group, the k in games / (games + k) the composite is shrunk by; absent or 0
     # means no shrinkage at that group.
     shrink_games: dict[str, float] = field(default_factory=dict)
+    # Per group, the early-season prior's terms (see ``with_prior_grade``): ``grade``
+    # weighs last season's final grade and ``flag`` having one, both in sd of the
+    # week's composite; a group without terms has no prior.
+    prior: dict[str, dict[str, float]] = field(default_factory=dict)
+    # The final-week grades (``PRIOR_COLUMNS``) of ``prior_season`` under this model,
+    # carried in the artifact so the season after it can be served without that
+    # season's trait history on disk.
+    prior_season: int | None = None
+    prior_grades: pd.DataFrame = field(
+        default_factory=lambda: pd.DataFrame(columns=PRIOR_COLUMNS)
+    )
 
 
 def grade_model_path(cutoff_season: int) -> Path:
@@ -402,6 +432,9 @@ def save_grade_model(model: GradeModel, path: Path) -> Path:
         "weights": _records(model.weights[WEIGHT_COLUMNS]),
         "reliability": _records(model.reliability[RELIABILITY_COLUMNS]),
         "shrink_games": {group: float(k) for group, k in model.shrink_games.items()},
+        "prior": model.prior,
+        "prior_season": model.prior_season,
+        "prior_grades": _records(model.prior_grades[PRIOR_COLUMNS]),
     }
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -425,6 +458,11 @@ def grade_model_from_payload(payload: dict) -> GradeModel:
         shrink_games={
             group: float(k) for group, k in payload.get("shrink_games", {}).items()
         },
+        prior=payload.get("prior", {}),
+        prior_season=payload.get("prior_season"),
+        prior_grades=pd.DataFrame(
+            payload.get("prior_grades", []), columns=PRIOR_COLUMNS
+        ).astype({"athlete_id": str, "grade": float}),
     )
 
 
@@ -523,6 +561,12 @@ def with_epa_credit(snapshot: pd.DataFrame, values: pd.DataFrame) -> pd.DataFram
         .drop(columns="value_week")
     )
     rows = rows.assign(trait=EPA_TRAIT, kind=spec.kind)
+    return pd.concat([snapshot, _ranked(rows)[snapshot.columns]], ignore_index=True)
+
+
+def _ranked(rows: pd.DataFrame) -> pd.DataFrame:
+    """``rows`` of one derived trait with ``percentile`` among the qualified FBS
+    rows of each week and group."""
     ranked = (
         rows["qualified"].eq(True) & rows["fbs"].eq(True)
         if "fbs" in rows
@@ -531,10 +575,39 @@ def with_epa_credit(snapshot: pd.DataFrame, values: pd.DataFrame) -> pd.DataFram
     groups = [rows.loc[ranked, "week"], rows.loc[ranked, "position_group"]]
     rank = rows.loc[ranked, "value"].groupby(groups).rank(method="average")
     n = rows.loc[ranked, "value"].groupby(groups).transform("size")
-    rows["percentile"] = ((100 * (rank - 1) / (n - 1)).where(n.gt(1), 100.0)).reindex(
-        rows.index
+    return rows.assign(
+        percentile=((100 * (rank - 1) / (n - 1)).where(n.gt(1), 100.0)).reindex(
+            rows.index
+        )
     )
-    return pd.concat([snapshot, rows[snapshot.columns]], ignore_index=True)
+
+
+def with_team_talent(snapshot: pd.DataFrame, talent: pd.Series) -> pd.DataFrame:
+    """``snapshot`` plus one ``team.talent`` row per player, week and group that the
+    trait covers: the season's talent composite of the team on his row (``talent``
+    maps team to it). A player whose team has none gets no row, so the grade counts
+    him at the position average on it; the trait describes his program, not him, so
+    it stays out of the coverage a grade requires (``grade_eligibility``)."""
+    spec = all_traits()[TALENT_TRAIT]
+    snapshot = snapshot[snapshot["trait"].ne(TALENT_TRAIT)]
+    base = snapshot[snapshot["position_group"].isin(spec.position_groups)]
+    people = base.drop_duplicates(["week", "athlete_id", "position_group"])
+    rows = people.assign(
+        trait=TALENT_TRAIT,
+        kind=spec.kind,
+        value=people["team"].map(talent).astype(float),
+    ).dropna(subset=["value"])
+    if rows.empty:
+        return snapshot
+    return pd.concat([snapshot, _ranked(rows)[snapshot.columns]], ignore_index=True)
+
+
+def with_derived_traits(
+    snapshot: pd.DataFrame, values: pd.DataFrame, talent: pd.Series
+) -> pd.DataFrame:
+    """``snapshot`` with every trait the grade reads that no builder emits: each
+    scoring path adds them here, so a grade is always scored on the same traits."""
+    return with_team_talent(with_epa_credit(snapshot, values), talent)
 
 
 def _week_pool(
@@ -560,7 +633,10 @@ def _week_pool(
     )
     value = pool["value"].astype(float)
     z = _scaled(value, value, [pool["position_group"], pool["trait"]]) * pool["sign"]
-    pool = pool.assign(z=z.clip(-Z_CAP, Z_CAP))[z.notna()]
+    capped = z.clip(-Z_CAP, Z_CAP)
+    pool = pool.assign(z=z.where(pool["position_group"].isin(UNCAPPED_GROUPS), capped))[
+        z.notna()
+    ]
     pool_size = players.groupby("position_group").size()
     share = (
         pool.groupby(["position_group", "trait"])["athlete_id"]
@@ -590,7 +666,61 @@ def trait_z_frame(
     )
 
 
-def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame:
+def prior_decay(week: int) -> float:
+    """The share of the early-season prior left at ``week``: 1 at week 0, falling
+    linearly to 0 at ``PRIOR_END_WEEK`` and after."""
+    return max(0.0, 1.0 - week / PRIOR_END_WEEK)
+
+
+def prior_terms(players: pd.DataFrame, prior: pd.DataFrame) -> pd.DataFrame:
+    """Per row of ``players`` (``athlete_id, position_group``): ``prior_z``, last
+    season's final grade at the same group as a normal score (0 without one), and
+    ``has_prior``. ``prior`` is ``PRIOR_COLUMNS``."""
+    keys = ["athlete_id", "position_group"]
+    last = prior.astype({"athlete_id": str}).drop_duplicates(keys).set_index(keys)
+    grades = last["grade"].reindex(pd.MultiIndex.from_frame(players[keys]))
+    z = ((grades - GRADE_MEAN) / GRADE_SD).to_numpy(float)
+    return pd.DataFrame(
+        {"prior_z": np.nan_to_num(z), "has_prior": ~np.isnan(z)}, index=players.index
+    )
+
+
+def with_prior_grade(
+    players: pd.DataFrame, week: int, model: GradeModel, prior: pd.DataFrame
+) -> pd.Series:
+    """The graded players' composite pulled toward last season's final grade.
+
+    At a group with prior terms, ``composite + sd × decay × (grade × prior_z +
+    flag × has_prior)`` with ``sd`` the composite's sd among the week's graded
+    players at the group and ``decay = prior_decay(week)``. A player graded at the
+    same group at the end of last season carries that grade forward; one who was
+    not (a freshman, a new starter, a position change) keeps his composite and so
+    falls behind the returning players by ``flag``.
+    """
+    composite = players["composite"].copy()
+    decay = prior_decay(week)
+    if decay <= 0:
+        return composite
+    terms = prior_terms(players, prior)
+    for group, weights in model.prior.items():
+        rows = players["position_group"].eq(group) & players["graded"]
+        sd = composite[rows].std()
+        if not sd > 0:
+            continue
+        composite[rows] += (
+            sd
+            * decay
+            * (
+                weights["grade"] * terms.loc[rows, "prior_z"]
+                + weights["flag"] * terms.loc[rows, "has_prior"]
+            )
+        )
+    return composite
+
+
+def grade_eligibility(
+    snapshot_week: pd.DataFrame, model: GradeModel, prior: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Every qualified FBS player at a graded group in one snapshot week, graded or not.
 
     ``snapshot_week`` holds trait snapshot rows of one week with ``team`` and an
@@ -604,10 +734,14 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     renormalized for the week), with ``z = 0`` for an available trait the player has
     no value for, then multiplied by ``games / (games + k_g)`` where the model has a
     shrinkage ``k_g`` for the group. ``coverage`` is the absolute weight of the
-    available traits he has a value for over that of every available trait;
+    available traits he has a value for over that of every available trait, the
+    team talent trait left out of both since it is not his own measurement;
     ``graded`` needs ``has_primary`` (a value for ``PRIMARY_TRAITS[group]``) and
     ``coverage`` of at least ``MIN_WEIGHT_COVERAGE``. ``composite`` is NaN where he
-    is not graded.
+    is not graded. With ``prior`` (last season's final grades, ``PRIOR_COLUMNS``)
+    the composite also takes the model's early-season prior (``with_prior_grade``);
+    every in-season scoring path passes it, and only the split halves the
+    composite's reliability is measured on go without.
     """
     keys = ["athlete_id", "position_group"]
     weights = model.weights[model.weights["weight"].ne(0)].assign(
@@ -627,10 +761,11 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     in_available = pd.MultiIndex.from_frame(pool[["position_group", "trait"]]).isin(
         available
     )
+    own = in_available & pool["trait"].ne(TALENT_TRAIT).to_numpy()
     sums = (
         pool.assign(
             weighted=(pool["weight"] * pool["z"]).where(in_available, 0.0),
-            covered=pool["magnitude"].where(in_available, 0.0),
+            covered=pool["magnitude"].where(own, 0.0),
         )
         .groupby(keys)[["weighted", "covered"]]
         .sum()
@@ -650,7 +785,17 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     ]
     denominator = players["position_group"].map(available_weight)
     denominator = denominator.where(denominator.gt(0))
-    players["coverage"] = sums["covered"].to_numpy() / denominator
+    own_weight = (
+        weights[weights["trait"].ne(TALENT_TRAIT)]
+        .set_index(["position_group", "trait"])["magnitude"]
+        .reindex(available)
+        .groupby(level="position_group")
+        .sum()
+    )
+    coverage_weight = players["position_group"].map(own_weight)
+    players["coverage"] = sums["covered"].to_numpy() / coverage_weight.where(
+        coverage_weight.gt(0)
+    )
     players["graded"] = players["has_primary"] & players["coverage"].ge(
         MIN_WEIGHT_COVERAGE
     )
@@ -659,6 +804,11 @@ def grade_eligibility(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.Data
     shrink = (games / (games + k)).where(k.gt(0), 1.0).to_numpy()
     composite = sums["weighted"].to_numpy() / denominator.to_numpy() * shrink
     players["composite"] = np.where(players["graded"], composite, np.nan)
+    if prior is not None and model.prior and len(players):
+        weeks = snapshot_week["week"].unique()
+        if len(weeks) != 1:
+            raise ValueError(f"the prior needs one snapshot week, got {sorted(weeks)}")
+        players["composite"] = with_prior_grade(players, int(weeks[0]), model, prior)
     return players[ELIGIBILITY_COLUMNS]
 
 
@@ -690,7 +840,9 @@ def coverage_losses(eligibility: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def score_grades(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame:
+def score_grades(
+    snapshot_week: pd.DataFrame, model: GradeModel, prior: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Each graded player's grade from one snapshot week (see ``grade_eligibility``).
 
     ``grade = 50 + 10 × z`` with ``z`` the normal score of the composite's rank among
@@ -702,7 +854,7 @@ def score_grades(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame
     ``uncertainty = 10 × sqrt(1 − r)`` with ``r`` the model's composite reliability at
     the player's games.
     """
-    out = grade_eligibility(snapshot_week, model)
+    out = grade_eligibility(snapshot_week, model, prior)
     out = out[out["graded"]].reset_index(drop=True)
     if out.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)

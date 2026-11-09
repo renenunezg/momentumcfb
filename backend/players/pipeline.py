@@ -106,14 +106,17 @@ def latest_grade_model_path(season: int) -> Path:
     )
 
 
-def grade_rows(snapshot: pd.DataFrame, model: grade.GradeModel) -> pd.DataFrame:
-    """One ``trait = "grade"`` snapshot-shaped row per qualified FBS player-week."""
+def grade_rows(
+    snapshot: pd.DataFrame, model: grade.GradeModel, prior: pd.DataFrame | None
+) -> pd.DataFrame:
+    """One ``trait = "grade"`` snapshot-shaped row per qualified FBS player-week.
+    ``prior`` is last season's final grades for the model's early-season prior."""
     weeks = sorted(snapshot["week"].unique())
     scored = pd.concat(
         [
-            grade.score_grades(snapshot[snapshot["week"].eq(week)], model).assign(
-                week=week
-            )
+            grade.score_grades(
+                snapshot[snapshot["week"].eq(week)], model, prior
+            ).assign(week=week)
             for week in weeks
         ],
         ignore_index=True,
@@ -188,14 +191,17 @@ def score_snapshot(
     as_of: datetime,
     poor: bool,
     fbs_schools: set[str],
+    talent: pd.Series,
+    prior: pd.DataFrame | None,
 ) -> pd.DataFrame:
     """The scored artifact for one season's weekly trait snapshots (``POSITION_TRAIT_COLUMNS``).
 
     ``snapshot`` carries ``fbs`` (from ``fbs_schools``); ``values`` are the season's v4
-    values, which also give WAR.
+    values, which also give WAR; ``talent`` is the season's team talent and ``prior``
+    last season's final grades (``backtest.prior_season_grades``).
     """
-    snapshot = grade.with_epa_credit(snapshot, values)
-    scored = grade_rows(snapshot, model)
+    snapshot = grade.with_derived_traits(snapshot, values, talent)
+    scored = grade_rows(snapshot, model, prior)
     measured = war_rows(snapshot, values, war.wins_above_replacement(values))
     weighted = model.weights[model.weights["weight"].ne(0)]
     weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
@@ -258,6 +264,8 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         as_of,
         poor,
         fbs_schools,
+        backtest.team_talent(season),
+        backtest.prior_season_grades(season, model),
     )
     store.write_processed(out, *position_traits_artifact(season))
     published = published_trait_rows(out)

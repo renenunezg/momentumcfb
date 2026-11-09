@@ -36,7 +36,12 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm, spearmanr
 
-from backend.config import PROCESSED_DIR, RAW_DIR
+from backend.config import (
+    PAC_12_POWER_THROUGH,
+    POWER_CONFERENCES,
+    PROCESSED_DIR,
+    RAW_DIR,
+)
 from backend.players.ingest import players_dir
 from backend.players.traits.targets import athlete_ids, normalize_name
 from backend.players.traits.transfers import match_transfers
@@ -45,7 +50,9 @@ from backend.players.value import POSITION_GROUPS
 
 log = logging.getLogger(__name__)
 
-MODEL_VERSION = "cfb_nil_value_v1"
+# v2 (2026-11-09) dates the roster class to the season it describes and grades
+# training seasons on the traits the weekly runner scores; v1 did neither.
+MODEL_VERSION = "cfb_nil_value_v2"
 DATA_DIR = Path(__file__).parent / "data"
 PAY_PATH = DATA_DIR / "csc_football_pay_2026.csv"
 MODEL_PATH = DATA_DIR / "nil_model.json"
@@ -64,7 +71,6 @@ PORTAL_GROUPS = {
     "PRO": "QB",
     "APB": "RB",
 }
-P4_CONFERENCES = {"SEC", "Big Ten", "Big 12", "ACC", "Pac-12"}
 RIDGE = 1.0
 WORTH_RIDGE = 3.0
 STARTER_GAMES = 8
@@ -99,8 +105,13 @@ class NilModel:
 
 def _tiers(season: int) -> pd.Series:
     teams = pd.read_parquet(players_dir(season) / "teams.parquet")
+    power = teams["conference"].isin(POWER_CONFERENCES) | teams["school"].eq(
+        "Notre Dame"
+    )
+    if season <= PAC_12_POWER_THROUGH:
+        power |= teams["conference"].eq("Pac-12")
     tier = np.where(
-        teams["conference"].isin(P4_CONFERENCES) | teams["school"].eq("Notre Dame"),
+        power,
         "P4",
         np.where(teams["classification"].eq("fbs"), "G5", teams["classification"]),
     )
@@ -120,8 +131,59 @@ def _roster(season: int) -> pd.DataFrame:
         .astype(str)
         .map(normalize_name),
     )
-    roster["year"] = roster["year"].where(roster["year"].between(1, 6))
     return roster.dropna(subset=["athlete_id"])
+
+
+def class_years(season: int) -> pd.Series:
+    """Each athlete's class in ``season`` (1 a freshman to 4 a senior), by athlete
+    id, for the athletes on the season's roster.
+
+    CFBD's roster ``year`` is not the class in the season asked for: every season's
+    file repeats the class the athlete had in his last season on a roster. So the
+    class is dated to the latest roster on disk he appears on and, for an earlier
+    season, counted back one class a season. Counting back alone runs low, because
+    a class can repeat (a redshirt, a fifth year listed as a senior again), so the
+    result is floored at one class under his seasons on a roster so far, capped at
+    senior, and at 1: on the one roster whose classes are dated (2026) at most
+    about 1 in 25 players sit below that floor at any tenure. In the latest season on
+    disk the class is the roster's own value untouched, so a fitted season and the
+    served one share one definition. A ``year`` outside 1 to 6 (CFBD writes the
+    season itself when it has no class) is unknown and the class stays missing.
+    """
+    root = players_dir(season).parent
+    seasons = sorted(
+        int(path.name)
+        for path in root.iterdir()
+        if path.name.isdigit() and (path / "roster.parquet").exists()
+    )
+    if season not in seasons:
+        raise FileNotFoundError(f"no roster for {season}; run ingest-players")
+    parts = []
+    for on_disk in seasons:
+        roster = pd.read_parquet(
+            players_dir(on_disk) / "roster.parquet", columns=["id", "year"]
+        )
+        parts.append(
+            pd.DataFrame(
+                {
+                    "athlete_id": athlete_ids(roster["id"]),
+                    "year": roster["year"].where(roster["year"].between(1, 6)),
+                    "season": on_disk,
+                }
+            ).dropna(subset=["athlete_id"])
+        )
+    rows = pd.concat(parts, ignore_index=True)
+    first_season = rows.groupby("athlete_id")["season"].min()
+    last_season = rows.groupby("athlete_id")["season"].max()
+    # Valid values agree across an athlete's files, so the latest one is his
+    # last-season class even when the last file itself has none.
+    last_class = rows.dropna(subset=["year"]).groupby("athlete_id")["year"].last()
+    current = rows.loc[rows["season"].eq(season), "athlete_id"].unique()
+    back = (last_season - season).reindex(current)
+    dated = last_class.reindex(current)
+    tenure = season - first_season.reindex(current) + 1
+    counted_back = np.maximum(dated - back, (tenure - 1).clip(lower=1, upper=4))
+    return dated.where(back.eq(0), counted_back).rename("class_year")
 
 
 def _portal(season: int) -> pd.DataFrame | None:
@@ -171,14 +233,19 @@ def production_frame(
     out = _end_of_season(values)
     grade = grades.astype({"athlete_id": str}).drop_duplicates("athlete_id")
     out["grade"] = out["athlete_id"].map(grade.set_index("athlete_id")["grade"])
-    roster = _roster(season).drop_duplicates("athlete_id").set_index("athlete_id")
-    out["class_year"] = out["athlete_id"].map(roster["year"])
+    out["class_year"] = out["athlete_id"].map(class_years(season))
+    log.info(
+        f"nil {season}: class unknown for {int(out['class_year'].isna().sum())} "
+        f"of {len(out)} players with production"
+    )
     out["tier_0"] = out["team"].map(_tiers(season))
     out["talent_0"] = out["team"].map(_talent(season))
     return out
 
 
 def production_features(frame: pd.DataFrame) -> np.ndarray:
+    """Demand features from production. A player whose class is unknown takes no
+    class term, like a senior."""
     grade = frame["grade"].astype(float)
     p4 = frame["tier_0"].eq("P4").astype(float)
     centered = grade.fillna(40.0) - 50.0
@@ -239,16 +306,25 @@ def _season_values(season: int) -> pd.DataFrame:
 
 
 def _season_grades(season: int) -> pd.DataFrame:
-    from backend.players.traits.backtest import final_week_grades, with_fbs
-    from backend.players.traits.grade import latest_grade_model_path, load_grade_model
+    """The season's final-week grades under the latest grade model, scored on the
+    traits the weekly runner scores (EPA credit and team talent included), so the
+    grade a model is fitted on is the grade it is served."""
+    from backend.players.traits import backtest
+    from backend.players.traits.grade import (
+        latest_grade_model_path,
+        load_grade_model,
+        with_derived_traits,
+    )
 
     model = load_grade_model(
         latest_grade_model_path(PROCESSED_DIR / "players" / "models", 9999)
     )
-    snapshot = pd.read_parquet(
-        PROCESSED_DIR / "players" / "position_traits" / f"{season}.parquet"
+    snapshot = with_derived_traits(
+        backtest.with_fbs(backtest.cached_traits(season), season),
+        backtest.player_values(season),
+        backtest.team_talent(season),
     )
-    return final_week_grades(with_fbs(snapshot, season), model)
+    return backtest.final_week_grades(snapshot, model)
 
 
 def _transfers(target: int, features: pd.DataFrame) -> pd.DataFrame:

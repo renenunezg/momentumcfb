@@ -4,7 +4,8 @@
 weekly snapshots, their split-half reliability and the target coverage.
 ``run_backtest`` sets the grade's trait weights from player-level evidence on
 chronological development seasons (pooled split-half reliability times transfer
-portability), measures the composite's own reliability, and checks the grade on
+portability), measures the composite's own reliability, fits the early-season
+prior on the development seasons' rest-of-season credit, and checks the grade on
 a later validation season it never saw: does a player's grade predict his next
 season's grade and production better than his EPA credit does, and how does it
 rank against the draft. ``write_backtest`` saves the grade model, the frozen
@@ -14,19 +15,27 @@ and prints every table as Markdown.
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
-from backend.config import PROCESSED_DIR, RAW_DIR
+from backend.config import PROCESSED_DIR, RAW_DIR, UNRATED_TALENT_TEAMS
 from backend.etl import store
 from backend.features.possessions import classify_plays
 from backend.players import pipeline
 from backend.players.ingest import read_season_source, read_weekly
-from backend.players.traits import EPA_TRAIT, all_traits, grade, snapshots, war
+from backend.players.traits import (
+    EPA_TRAIT,
+    TALENT_TRAIT,
+    all_traits,
+    grade,
+    snapshots,
+    war,
+)
 from backend.players.traits.context import SeasonContext, load_season_context
 from backend.players.traits.defense import defense_traits
 from backend.players.traits.expectations import (
@@ -102,6 +111,7 @@ TABLES = (
     "weights",
     "selection",
     "dev_pairs",
+    "prior",
     "grade_coverage",
     "reliability",
     "portability",
@@ -189,6 +199,18 @@ def with_fbs(snapshot: pd.DataFrame, season: int) -> pd.DataFrame:
     teams = read_season_source(season, "teams")
     schools = set(teams.loc[teams["classification"].eq("fbs"), "school"])
     return snapshot.assign(fbs=snapshot["team"].isin(schools))
+
+
+def team_talent(season: int) -> pd.Series:
+    """The season's talent composite by team, the ``team.talent`` trait's source.
+
+    The service academies are left out: the composite scores them near zero for
+    want of rated recruiting classes, which says nothing about their players, so
+    their players carry no talent value.
+    """
+    talent = pd.read_parquet(RAW_DIR / "talent" / f"{season}.parquet")
+    talent = talent[~talent["team"].isin(UNRATED_TALENT_TEAMS)]
+    return talent.groupby("team")["talent"].max()
 
 
 def credited_games(credited: pd.DataFrame) -> pd.DataFrame:
@@ -316,6 +338,22 @@ def load_season(season: int, rebuild: bool = False) -> dict[str, pd.DataFrame]:
     return {
         output: store.read_processed(*season_artifact(output, season))
         for output in names
+    }
+
+
+def season_inputs(
+    season: int, data: dict[str, pd.DataFrame], values: pd.DataFrame
+) -> dict[str, pd.DataFrame | pd.Series]:
+    """A season's artifacts as the grade fit reads them: the snapshots with the FBS
+    flag and the derived traits, the player values and the team talent."""
+    talent = team_talent(season)
+    return {
+        **data,
+        "snapshots": grade.with_derived_traits(
+            with_fbs(data["snapshots"], season), values, talent
+        ),
+        "values": values,
+        "talent": talent,
     }
 
 
@@ -453,13 +491,14 @@ def half_composites(
     chosen: pd.DataFrame,
     n: int,
     model: grade.GradeModel,
+    talent: pd.Series,
 ) -> pd.DataFrame:
     """Each chosen athlete's composite in half 0 and half 1, indexed by athlete.
 
     Each half is scored as its own snapshot week: trait values by the registered
     aggregate over the half's games, every athlete qualified, and the grade's own
     pool (FBS athletes at the group, from ``people``). ``latest`` traits have no
-    games and drop out.
+    games and drop out; the team's talent (``talent``) is the same in both halves.
     """
     rows = frames.merge(chosen, on=["athlete_id", "game_id"])
     rows = rows.assign(
@@ -469,12 +508,14 @@ def half_composites(
     )
     values = snapshots.aggregate(rows, ["athlete_id", "trait", "half"]).reset_index()
     half_snapshot = values.assign(
+        week=values["half"],
         position_group=values["athlete_id"].map(people["position_group"]),
         team=values["athlete_id"].map(people["team"]),
         fbs=values["athlete_id"].map(people["fbs"]).eq(True),
         games=n // 2,
         qualified=True,
     ).dropna(subset=["position_group"])
+    half_snapshot = grade.with_team_talent(half_snapshot, talent)
     columns = {}
     for half in (0, 1):
         scored = grade.score_grades(
@@ -506,7 +547,7 @@ def composite_split_half(
             chosen = _half_games(alternated, n)
             if n < 2 or chosen.empty:
                 continue
-            halves = half_composites(frames, people, chosen, n, model)
+            halves = half_composites(frames, people, chosen, n, model, data["talent"])
             halves["position_group"] = halves.index.map(people["position_group"])
             by_games[n].append(
                 halves.set_axis(_season_keys(halves.index.to_series(), season))
@@ -821,11 +862,7 @@ def score_cached_season(season: int) -> pd.DataFrame:
     models = store.PROCESSED_DIR / "players" / "models"
     model = grade.load_grade_model(grade.latest_grade_model_path(models, season))
     grade.validate_grade_model(model, season)
-    snapshot = store.read_processed(*season_artifact("snapshots", season))
-    snapshot = snapshot[~snapshot["trait"].isin(["grade", "war"])]
-    snapshot = with_fbs(
-        snapshot[snapshots.TRAIT_SNAPSHOT_COLUMNS].astype({"athlete_id": str}), season
-    )
+    snapshot = with_fbs(cached_traits(season), season)
     teams = read_season_source(season, "teams")
     out = pipeline.score_snapshot(
         snapshot,
@@ -836,6 +873,8 @@ def score_cached_season(season: int) -> pd.DataFrame:
             store.read_processed(*season_artifact("target_coverage", season))
         ),
         set(teams.loc[teams["classification"].eq("fbs"), "school"]),
+        team_talent(season),
+        prior_season_grades(season, model),
     )
     store.write_processed(out, *traits_artifact(f"scored_{season}"))
     log.info(
@@ -950,9 +989,12 @@ def regression_pairs(
 
 def _candidates(weights: pd.DataFrame, group: str, epa_kept: bool) -> pd.DataFrame:
     """The traits that may enter the fit at ``group``: a reliability on at least the
-    player floor (``latest`` traits have none) and, for ``epa.credit``, the EPA trait
-    kept there."""
-    rows = weights[weights["position_group"].eq(group) & weights["reliability"].notna()]
+    player floor (``latest`` traits have none), the team talent prior, and, for
+    ``epa.credit``, the EPA trait kept there."""
+    rows = weights[
+        weights["position_group"].eq(group)
+        & (weights["reliability"].notna() | weights["trait"].eq(TALENT_TRAIT))
+    ]
     if not epa_kept:
         rows = rows[rows["trait"].ne(EPA_TRAIT)]
     return rows[["position_group", "trait", "sign"]]
@@ -1145,6 +1187,211 @@ def select_grade_model(
     return model, composite, dev_pairs, selection
 
 
+# The early-season prior
+
+
+PRIOR_ROW_COLUMNS = [
+    "season",
+    "week",
+    "athlete_id",
+    "position_group",
+    "composite_z",
+    "prior_z",
+    "has_prior",
+    "target",
+    "target_score",
+]
+PRIOR_TABLE_COLUMNS = [
+    "position_group",
+    "grade_weight",
+    "flag_weight",
+    "player_seasons",
+    "share_with_prior",
+    "spearman_grade",
+    "spearman_with_prior",
+    "seasons_improved",
+]
+# Later credited games a rest-of-season target needs, as in the grade validation.
+MIN_LATER_GAMES = 2
+
+
+def _normal_scores(values: pd.Series, keys: list[pd.Series]) -> pd.Series:
+    """Blom normal scores of ``values`` within ``keys``; NaN stays NaN."""
+    rank = values.groupby(keys).rank(method="average")
+    n = values.groupby(keys).transform("count")
+    return pd.Series(norm.ppf((rank - 0.375) / (n + 0.25)), index=values.index)
+
+
+def rest_of_season_rows(
+    dev: dict[int, dict[str, pd.DataFrame]], model: grade.GradeModel
+) -> pd.DataFrame:
+    """What the early-season prior is fitted and judged on (``PRIOR_ROW_COLUMNS``).
+
+    One row per player graded at a week of ``grade.PRIOR_FIT_WEEKS`` in a
+    development season whose previous season is also one: his composite without a
+    prior, standardized among the week's graded players at the group; his final
+    grade of the season before under ``model`` as ``grade.prior_terms`` reads it;
+    and ``target``, his adjusted EPA credit per game over his later credited games
+    of the season where he has at least ``MIN_LATER_GAMES``, with ``target_score``
+    its normal score within the group, season and week.
+    """
+    parts = []
+    for season in sorted(dev):
+        if season - 1 not in dev:
+            continue
+        prior = final_week_grades(dev[season - 1]["snapshots"], model)
+        snapshot = dev[season]["snapshots"]
+        credited = dev[season]["credited"].astype({"athlete_id": str})
+        for week in grade.PRIOR_FIT_WEEKS:
+            players = grade.grade_eligibility(
+                snapshot[snapshot["week"].eq(week)], model
+            )
+            players = players[players["graded"]].reset_index(drop=True)
+            if players.empty:
+                continue
+            later = (
+                credited[credited["model_week"].gt(week)]
+                .groupby("athlete_id")["adjusted_epa"]
+                .agg(["mean", "size"])
+            )
+            target = (
+                players["athlete_id"]
+                .map(later["mean"])
+                .where(players["athlete_id"].map(later["size"]).ge(MIN_LATER_GAMES))
+            )
+            by_group = players.groupby("position_group")["composite"]
+            parts.append(
+                players[["athlete_id", "position_group"]]
+                .join(grade.prior_terms(players, prior))
+                .assign(
+                    season=season,
+                    week=week,
+                    composite_z=(players["composite"] - by_group.transform("mean"))
+                    / by_group.transform("std"),
+                    target=target,
+                )
+            )
+    if not parts:
+        return pd.DataFrame(columns=PRIOR_ROW_COLUMNS)
+    rows = pd.concat(parts, ignore_index=True)
+    rows["target_score"] = _normal_scores(
+        rows["target"], [rows["position_group"], rows["season"], rows["week"]]
+    )
+    return rows[PRIOR_ROW_COLUMNS]
+
+
+def _prior_decay(rows: pd.DataFrame) -> np.ndarray:
+    return np.array([grade.prior_decay(int(week)) for week in rows["week"]])
+
+
+def fit_prior_terms(rows: pd.DataFrame) -> dict[str, float]:
+    """One group's prior terms from its ``rest_of_season_rows`` with a target.
+
+    Least squares of the target's normal score on the standardized composite and
+    on the decayed prior grade and has-prior flag; ``grade`` and ``flag`` are the
+    last two coefficients over the composite's, so they are in sd of the composite.
+    """
+    rows = rows.dropna(subset=["target_score", "composite_z"])
+    decay = _prior_decay(rows)
+    design = np.column_stack(
+        [
+            np.ones(len(rows)),
+            rows["composite_z"],
+            decay * rows["prior_z"],
+            decay * rows["has_prior"],
+        ]
+    ).astype(float)
+    beta = np.linalg.lstsq(design, rows["target_score"].to_numpy(float), rcond=None)[0]
+    if not beta[1] > 0:
+        raise ValueError(
+            "the composite does not predict the rest of the season; no prior fitted"
+        )
+    return {"grade": float(beta[2] / beta[1]), "flag": float(beta[3] / beta[1])}
+
+
+def _with_prior(rows: pd.DataFrame, terms: dict[str, float]) -> pd.Series:
+    """The standardized composite with the prior, as ``grade.with_prior_grade`` adds it."""
+    return rows["composite_z"] + _prior_decay(rows) * (
+        terms["grade"] * rows["prior_z"] + terms["flag"] * rows["has_prior"]
+    )
+
+
+def _cell_spearman(rows: pd.DataFrame, column: str) -> pd.Series:
+    """The Spearman of ``column`` with the target per season and week."""
+    return pd.Series(
+        {
+            cell: _spearman(frame[column], frame["target"])
+            for cell, frame in rows.groupby(["season", "week"])
+        }
+    ).dropna()
+
+
+def cross_fitted_prior(rows: pd.DataFrame) -> pd.Series:
+    """One group's rows scored with prior terms fitted on the other seasons."""
+    scored = pd.Series(np.nan, index=rows.index)
+    for season in sorted(rows["season"].unique()):
+        held = rows["season"].eq(season)
+        if held.all():
+            continue
+        scored[held] = _with_prior(rows[held], fit_prior_terms(rows[~held]))
+    return scored
+
+
+def prior_table(rows: pd.DataFrame, terms: dict[str, dict[str, float]]) -> pd.DataFrame:
+    """Per group with prior terms: the terms, and the mean over development seasons
+    and weeks of the Spearman with the rest-of-season target of the composite alone
+    and of the composite with the prior, the prior's terms fitted on the other
+    seasons each time (``PRIOR_TABLE_COLUMNS``)."""
+    out = []
+    for group, weights in terms.items():
+        part = rows[rows["position_group"].eq(group)].dropna(subset=["target"])
+        part = part.assign(with_prior=cross_fitted_prior(part))
+        base = _cell_spearman(part, "composite_z")
+        prior = _cell_spearman(part, "with_prior").reindex(base.index)
+        gain = (prior - base).groupby(level=0).mean()
+        out.append(
+            {
+                "position_group": group,
+                "grade_weight": weights["grade"],
+                "flag_weight": weights["flag"],
+                "player_seasons": len(part.drop_duplicates(["season", "athlete_id"])),
+                "share_with_prior": float(part["has_prior"].mean()),
+                "spearman_grade": float(base.mean()),
+                "spearman_with_prior": float(prior.mean()),
+                "seasons_improved": int(gain.gt(0).sum()),
+            }
+        )
+    return pd.DataFrame(out, columns=PRIOR_TABLE_COLUMNS)
+
+
+def cached_traits(season: int) -> pd.DataFrame:
+    """A cached season's trait rows; a scored artifact keeps only its trait rows."""
+    snapshot = store.read_processed(*season_artifact("snapshots", season))
+    snapshot = snapshot[~snapshot["trait"].isin(["grade", "war"])]
+    return snapshot[snapshots.TRAIT_SNAPSHOT_COLUMNS].astype({"athlete_id": str})
+
+
+def prior_season_grades(season: int, model: grade.GradeModel) -> pd.DataFrame | None:
+    """The final grades of ``season`` − 1 that ``model``'s early-season prior reads in
+    ``season``, or None when the model has no prior terms.
+
+    They come from the model artifact when it carries that season, else from the
+    earlier season's cached traits and player values, scored with ``model``; with
+    neither the read fails.
+    """
+    if not model.prior:
+        return None
+    previous = season - 1
+    if model.prior_season == previous:
+        return model.prior_grades
+    scored = grade.with_derived_traits(
+        with_fbs(cached_traits(previous), previous),
+        player_values(previous),
+        team_talent(previous),
+    )
+    return final_week_grades(scored, model)[grade.PRIOR_COLUMNS]
+
+
 # The backtest
 
 
@@ -1153,6 +1400,7 @@ class BacktestResult:
     weights: pd.DataFrame
     selection: pd.DataFrame
     dev_pairs: pd.DataFrame
+    prior: pd.DataFrame
     grade_coverage: pd.DataFrame
     reliability: pd.DataFrame
     portability: pd.DataFrame
@@ -1189,13 +1437,7 @@ def run_backtest(
     for season in [*dev_seasons, validation_season]:
         data = load_season(season, rebuild)
         values = player_values(season)
-        seasons[season] = {
-            **data,
-            "snapshots": grade.with_epa_credit(
-                with_fbs(data["snapshots"], season), values
-            ),
-            "values": values,
-        }
+        seasons[season] = season_inputs(season, data, values)
     dev = {season: seasons[season] for season in dev_seasons}
     snapshots_by_season = {
         season: data["snapshots"] for season, data in seasons.items()
@@ -1220,11 +1462,30 @@ def run_backtest(
     model, composite, dev_pairs, selection = select_grade_model(
         dev, pooled, dev_portability, orientation
     )
+    prior_rows = rest_of_season_rows(dev, model)
+    prior_groups = [
+        group for group in grade.PRIOR_GROUPS if group in grade.graded_groups(model)
+    ]
+    terms = {
+        group: fit_prior_terms(prior_rows[prior_rows["position_group"].eq(group)])
+        for group in prior_groups
+    }
+    # The validation season's final grades are the prior of the season after it.
+    carried = final_week_grades(seasons[validation_season]["snapshots"], model)
+    model = replace(
+        model,
+        prior=terms,
+        prior_season=validation_season,
+        prior_grades=carried[carried["position_group"].isin(prior_groups)][
+            grade.PRIOR_COLUMNS
+        ].reset_index(drop=True),
+    )
     log_war_leaders(seasons[validation_season], validation_season)
     return BacktestResult(
         weights=model.weights,
         selection=selection,
         dev_pairs=dev_pairs,
+        prior=prior_table(prior_rows, terms),
         grade_coverage=grade_coverage_table(seasons, model),
         reliability=reliability_table(dev, pooled, composite),
         portability=dev_portability,
