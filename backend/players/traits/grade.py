@@ -15,7 +15,10 @@ available at the group that week, with an available trait he has no value for
 counted at the position average (z = 0). He is graded only when he
 has his position's primary exposure trait and his traits cover at least
 ``MIN_WEIGHT_COVERAGE`` of the position's weight. The ``grade`` puts the
-composite on the 20 to 80 scale (mean 50, sd 10 among graded players). Nothing
+composite's rank among graded players at the position on the 20 to 80 scale
+(normal scores, mean 50, sd 10), so only the top of a large group reaches the cap
+instead of the several players a raw standard score of the skewed composite put
+there. Nothing
 is fitted to team margins or to any outcome.
 """
 
@@ -27,6 +30,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.optimize import lsq_linear
+from scipy.stats import norm
 
 from backend.config import PROCESSED_DIR
 from backend.players.traits import EPA_TRAIT, MODEL_VERSION, all_traits
@@ -689,10 +693,14 @@ def coverage_losses(eligibility: pd.DataFrame) -> pd.DataFrame:
 def score_grades(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame:
     """Each graded player's grade from one snapshot week (see ``grade_eligibility``).
 
-    ``grade = 50 + 10 × (composite − mean) / sd`` over the graded players at the
-    group, clipped to [20, 80]; ``grade_percentile`` ranks the composite (0 to 100,
-    100 for a lone player); ``uncertainty = 10 × sqrt(1 − r)`` with ``r`` the model's
-    composite reliability at the player's games.
+    ``grade = 50 + 10 × z`` with ``z`` the normal score of the composite's rank among
+    the graded players at the group (Blom: ``Φ⁻¹((rank − 3/8) / (n + 1/4))``, tied
+    composites sharing their average rank), clipped to [20, 80]. The composite is
+    right-skewed, so its raw standard score put several players per group at the
+    80 cap; rank normal scores keep the order and give the scale its intended shape.
+    ``grade_percentile`` ranks the composite (0 to 100, 100 for a lone player);
+    ``uncertainty = 10 × sqrt(1 − r)`` with ``r`` the model's composite reliability at
+    the player's games.
     """
     out = grade_eligibility(snapshot_week, model)
     out = out[out["graded"]].reset_index(drop=True)
@@ -700,11 +708,10 @@ def score_grades(snapshot_week: pd.DataFrame, model: GradeModel) -> pd.DataFrame
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
     by_group = out.groupby("position_group")["composite"]
-    mean, sd = by_group.transform("mean"), by_group.transform("std")
-    standard = ((out["composite"] - mean) / sd.where(sd.gt(0))).fillna(0.0)
-    out["grade"] = (GRADE_MEAN + GRADE_SD * standard).clip(GRADE_MIN, GRADE_MAX)
     rank = by_group.rank(method="average")
     n = by_group.transform("size")
+    standard = norm.ppf((rank - 0.375) / (n + 0.25))
+    out["grade"] = (GRADE_MEAN + GRADE_SD * standard).clip(GRADE_MIN, GRADE_MAX)
     out["grade_percentile"] = (100 * (rank - 1) / (n - 1)).where(n.gt(1), 100.0)
     reliability = np.zeros(len(out))
     for group, index in out.groupby("position_group").groups.items():
