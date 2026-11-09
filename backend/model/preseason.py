@@ -7,6 +7,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import numpy as np
 import pandas as pd
 
+from backend.config import (
+    PAC_12_POWER_THROUGH,
+    POWER_CONFERENCES,
+    UNRATED_TALENT_TEAMS,
+)
 from backend.etl import store
 from backend.features.scoring import (
     build_scoring_games,
@@ -37,7 +42,7 @@ from backend.odds.markets import (
     flatten_odds_api_offers,
 )
 
-MODEL_VERSION = "preseason_v6"
+MODEL_VERSION = "preseason_v7"
 # Power weights were fitted by least squares on 364 FBS games from the 2022
 # through 2025 Week 1 and Week 2 slates: the closing margin regressed on the
 # home-minus-away difference of each feature. Leave-one-season-out over 2023
@@ -55,12 +60,37 @@ RETURNING_POINTS = 1.70
 TRANSFER_QUALITY_POINTS = 1.00
 TRANSFER_COUNT_POINTS = 0.35
 QB_CONTINUITY_POINTS = 0.00
-# Service academies do not sign rated recruiting classes, so the talent
-# composite scores them near zero (Army 23.66 against a median near 650 in
-# 2025). Their talent is treated as missing: on the 22 academy games of the
-# 2022 through 2025 Week 1 and 2 slates that cut the prior's distance to the
-# closing margin from 14.7 to 6.3 points and its margin MAE from 16.4 to 14.2.
-UNRATED_TALENT_TEAMS = frozenset({"Air Force", "Army", "Navy"})
+# Roster continuity is the player model's read of the offseason: the previous
+# season's value above replacement, in points per team game, of the running
+# backs, receivers, tight ends and defenders who arrive, less that of those
+# who leave. Quarterbacks are left out. The weight is the least-squares slope
+# of the closing margin, net of the prior built from the weights above, on
+# the home-minus-away difference over 480 FBS games of the 2021 through 2025
+# Week 1 and 2 slates (clustered standard error 0.26; a joint refit of every
+# weight gives 0.57). Priors rebuilt for those seasons with this code, the
+# weight fitted leaving each season out, then the weekly engine replayed:
+# Weeks 1 to 4 margin MAE fell 0.048 (clustered standard error 0.024, 1,018
+# FBS games, lower in all five seasons), later weeks 0.016 (0.007), and the
+# distance to the closing margin 0.064 in Weeks 1 to 4. Rosters were
+# end-of-season snapshots in that test, not preseason ones. Refitting every
+# weight together, each season left out, did not beat the weights above with
+# this one added (Weeks 1 to 4 margin MAE 0.018 higher, clustered standard
+# error 0.048, higher in four of five seasons), so they stay as fitted.
+ROSTER_CONTINUITY_POINTS = 0.58
+ROSTER_CONTINUITY_POSITION_GROUPS = frozenset({"RB", "WR", "TE", "DL", "LB", "DB"})
+# An August roster can be incomplete or still list last season's players, and
+# either reads as a wave of departures or as none. Across the 2021 through
+# 2026 CFBD rosters every FBS team listed 90 to 197 players, 45 to 77 percent
+# of the previous season's valued FBS players were still listed by their team
+# (above 99 percent when the previous roster is served again), and no team
+# kept more than 97 percent. A team outside the team limits is not rated; a
+# roster outside the FBS-wide range stops the forecast.
+ROSTER_MINIMUM_PLAYERS = 85
+ROSTER_STALE_TEAM_SHARE = 0.98
+ROSTER_RETAINED_SHARE_RANGE = (0.30, 0.80)
+# A transfer who steps up a level carries only part of his value with him.
+# These shares were declared before the evaluation and are not fitted.
+TRANSFER_STEP_UP_SHARE = {("G5", "P4"): 0.6, ("fcs", "P4"): 0.4, ("fcs", "G5"): 0.6}
 # Calibration walk-forwards carry only the previous fit, without talent or
 # returning production, and that regime evaluated best at full weight.
 HISTORICAL_CARRYOVER_WEIGHT = 1.00
@@ -941,6 +971,132 @@ def _merge_coaches(
     return ratings
 
 
+def _transfer_tiers(
+    teams: pd.Series,
+    conferences: pd.Series,
+    classifications: pd.Series,
+    season: int,
+) -> pd.Series:
+    frame = pd.DataFrame(
+        {
+            "team": teams.to_numpy(),
+            "conference": conferences.to_numpy(),
+            "classification": classifications.str.lower().to_numpy(),
+        }
+    )
+    frame = frame.dropna(subset=["team"]).drop_duplicates("team")
+    power = frame["conference"].isin(POWER_CONFERENCES) | frame["team"].eq("Notre Dame")
+    if season <= PAC_12_POWER_THROUGH:
+        power |= frame["conference"].eq("Pac-12")
+    tier = frame["classification"].replace("fbs", "G5").mask(power, "P4")
+    return pd.Series(tier.to_numpy(), index=frame["team"].to_numpy())
+
+
+def _usable_roster_teams(final: pd.DataFrame, members: pd.DataFrame) -> pd.Series:
+    """Last season's FBS teams whose new roster is complete and not stale."""
+    valued = final[final["classification"].eq("fbs")]
+    listed = set(zip(members["athlete_id"], members["team"]))
+    kept = pd.Series(
+        [pair in listed for pair in zip(valued["athlete_id"], valued["team"])],
+        index=valued["team"].to_numpy(),
+        dtype=bool,
+    )
+    retained = float(kept.mean())
+    low, high = ROSTER_RETAINED_SHARE_RANGE
+    if not low <= retained <= high:
+        raise ValueError(
+            f"the roster lists {retained:.0%} of last season's valued FBS players "
+            f"with their team, outside {low:.0%} to {high:.0%}: it is incomplete, "
+            "keyed by other athlete IDs, or still last season's roster"
+        )
+    by_team = kept.groupby(level=0).mean()
+    players = members.groupby("team").size().reindex(by_team.index, fill_value=0)
+    return players.ge(ROSTER_MINIMUM_PLAYERS) & by_team.le(ROSTER_STALE_TEAM_SHARE)
+
+
+def _roster_net_value(
+    prior_values: pd.DataFrame,
+    roster: pd.DataFrame,
+    prior_tiers: pd.Series,
+    current_tiers: pd.Series,
+) -> pd.Series:
+    """Arriving minus departing non-quarterback value for last season's FBS teams.
+
+    Players are matched to the new season's rosters on athlete ID. Only the
+    previous season's final player values and the new roster are read, so
+    nothing from the season being forecast enters. Teams whose roster is
+    incomplete or stale are left out.
+    """
+    final = prior_values[prior_values["week"].eq(prior_values["week"].max())].copy()
+    final["athlete_id"] = final["athlete_id"].astype(str)
+    final = final.sort_values("games", ascending=False).drop_duplicates("athlete_id")
+    members = pd.DataFrame(
+        {"athlete_id": roster["id"].astype(str), "team": roster["team"]}
+    ).drop_duplicates()
+    usable = _usable_roster_teams(final, members)
+    team_games = final.groupby("team")["games"].transform("max").clip(lower=1)
+    final["value_per_game"] = final["value_above_replacement"] / team_games
+    final = final[final["position_group"].isin(ROSTER_CONTINUITY_POSITION_GROUPS)]
+    carried = members.merge(
+        final[["athlete_id", "team", "value_per_game"]].rename(
+            columns={"team": "previous_team"}
+        ),
+        on="athlete_id",
+    )
+    carried["stayed"] = carried["team"].eq(carried["previous_team"])
+    # A player listed by both his old and his new team has not moved.
+    carried = carried[
+        carried["stayed"] | ~carried.groupby("athlete_id")["stayed"].transform("any")
+    ]
+    stayed = set(carried.loc[carried["stayed"], "athlete_id"])
+    departed = (
+        final[~final["athlete_id"].isin(stayed)].groupby("team")["value_per_game"].sum()
+    )
+    arrivals = carried[~carried["stayed"]]
+    share = [
+        TRANSFER_STEP_UP_SHARE.get(
+            (prior_tiers.get(origin), current_tiers.get(destination)), 1.0
+        )
+        for origin, destination in zip(arrivals["previous_team"], arrivals["team"])
+    ]
+    arrived = (arrivals["value_per_game"] * share).groupby(arrivals["team"]).sum()
+    rated = final.loc[final["classification"].eq("fbs"), "team"].unique()
+    net = arrived.reindex(rated, fill_value=0.0) - departed.reindex(
+        rated, fill_value=0.0
+    )
+    return net[usable.reindex(net.index, fill_value=False).to_numpy()]
+
+
+def _merge_roster_continuity(
+    ratings: pd.DataFrame,
+    prior_values: pd.DataFrame,
+    roster: pd.DataFrame,
+    prior_games: pd.DataFrame,
+    season: int,
+) -> pd.DataFrame:
+    prior_tiers = _transfer_tiers(
+        pd.concat([prior_games["home_team"], prior_games["away_team"]]),
+        pd.concat([prior_games["home_conference"], prior_games["away_conference"]]),
+        pd.concat(
+            [prior_games["home_classification"], prior_games["away_classification"]]
+        ),
+        season - 1,
+    )
+    current_tiers = _transfer_tiers(
+        ratings["team"], ratings["conference"], ratings["classification"], season
+    )
+    net = _roster_net_value(prior_values, roster, prior_tiers, current_tiers)
+    fbs = ratings["classification"].eq("fbs")
+    ratings["roster_net_value"] = ratings["team"].map(net).where(fbs)
+    # Teams that were not FBS last season, or whose roster is incomplete or
+    # stale, are not rated on continuity and take the FBS average.
+    ratings["roster_continuity_missing"] = ratings["roster_net_value"].isna()
+    ratings["roster_continuity"] = (
+        ratings["roster_net_value"] - ratings["roster_net_value"].mean()
+    ).fillna(0.0)
+    return ratings
+
+
 def _combine_ratings(ratings: pd.DataFrame, previous_fit) -> pd.DataFrame:
     contributions = {
         "previous_power_contribution": (
@@ -957,6 +1113,9 @@ def _combine_ratings(ratings: pd.DataFrame, previous_fit) -> pd.DataFrame:
             + TRANSFER_COUNT_POINTS * ratings["transfer_count_balance_z"]
         ),
         "qb_continuity_contribution": QB_CONTINUITY_POINTS * ratings["qb_continuity_z"],
+        "roster_continuity_contribution": (
+            ROSTER_CONTINUITY_POINTS * ratings["roster_continuity"]
+        ),
     }
     for column, values in contributions.items():
         ratings[column] = values
@@ -1020,6 +1179,13 @@ def _build_ratings(
     ratings = _merge_portal(ratings, sources["portal"], manifest)
     ratings = _merge_coaches(
         ratings, sources["coaches"], sources["prior_coaches"], season
+    )
+    ratings = _merge_roster_continuity(
+        ratings,
+        sources["prior_player_values"],
+        sources["roster"],
+        sources["prior_games"],
+        season,
     )
     ratings = _combine_ratings(ratings, previous_fit)
     ratings = _add_uncertainty(ratings)
@@ -1201,6 +1367,31 @@ def _flatten_cfbd_offers(lines: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=OFFER_COLUMNS)
 
 
+def _roster_continuity_sources(season: int) -> dict[str, pd.DataFrame]:
+    """Cached inputs of the roster continuity term; nothing is fetched here."""
+    roster_path = store.RAW_DIR / "players" / str(season) / "roster.parquet"
+    values_parts = ("players", "player_values", f"{season - 1}.parquet")
+    try:
+        roster = pd.read_parquet(roster_path, columns=["id", "team"])
+        prior_values = store.read_processed(*values_parts)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"{season}: roster continuity needs the {season} CFBD roster at "
+            f"{roster_path} and the final {season - 1} player values at "
+            f"{store.PROCESSED_DIR.joinpath(*values_parts)}; the player "
+            "ingest and `python -m backend player-values` write them"
+        ) from exc
+    if roster.empty or prior_values.empty:
+        raise ValueError(f"{season}: roster continuity inputs must not be empty")
+    if not prior_values["season"].eq(season - 1).all():
+        raise ValueError("player values must describe the previous season")
+    return {
+        "roster": roster,
+        "prior_player_values": prior_values,
+        "prior_games": store.read_games(season - 1),
+    }
+
+
 def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResult:
     from backend.model.process import build_process_prior
 
@@ -1220,6 +1411,7 @@ def run_preseason_forecast(season: int, week: int = 1) -> PreseasonForecastResul
         "manifest",
     ]
     sources = {name: store.read_preseason_source(season, name) for name in source_names}
+    sources.update(_roster_continuity_sources(season))
     manifest = sources["manifest"]
     has_odds_api = manifest["source"].eq("odds_api").any()
     if has_odds_api:
