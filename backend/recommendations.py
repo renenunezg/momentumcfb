@@ -18,6 +18,13 @@ from backend.model.spread_pricing import (
     spread_win_loss,
 )
 from backend.odds.markets import american_profit, priced_candidates
+from backend.pick_lifecycle import (
+    SETTLED_OUTCOMES,
+    SETTLEMENTS,
+    PickEvent,
+    PickState,
+    pick_state,
+)
 from backend.rivalries import is_rivalry
 
 POLICY_VERSION = "cfb-picks-v14"
@@ -920,7 +927,7 @@ def closing_line_backfill(recommendations, closing, captured=None):
     )
     settled = recommendations[
         recommendations["status"].eq("recommended")
-        & recommendations["outcome"].isin(["win", "loss", "push"])
+        & recommendations["outcome"].isin(SETTLED_OUTCOMES)
         & (recommendations["closing_source"].isna() | missing_market)
     ]
     rows = [
@@ -980,24 +987,22 @@ def grade_recommendations(
         current_start = _timestamp(game["start_date"])
         if pd.isna(current_start):
             continue
-        result = None
         # A changed kickoff voids the original price contract. Do not reuse a
         # recommendation on a postponed or rescheduled fixture.
         if current_start != _timestamp(pick.start_date):
-            result = "void"
+            event = PickEvent.KICKOFF_MOVED
         elif (
-            now < _timestamp(pick.start_date)
-            or pd.isna(game["completed"])
+            pd.isna(game["completed"])
             or not bool(game["completed"])
             or pd.isna(game["home_points"])
             or pd.isna(game["away_points"])
         ):
             continue
-        if pick.status != "recommended":
-            if now < _timestamp(pick.start_date):
-                continue
-            result = "no_play"
-        if result is None:
+        else:
+            event = PickEvent.FINAL_SCORE
+        state = pick_state(pick.status, pick.outcome, pick.start_date, now)
+        result = None
+        if (state, event) == (PickState.LOCKED_PICK, PickEvent.FINAL_SCORE):
             scores = [game["home_points"], game["away_points"]]
             if any(not np.isfinite(s) or s < 0 or s != int(s) for s in scores):
                 raise ValueError(f"game {pick.game_id}: invalid final score")
@@ -1012,7 +1017,12 @@ def grade_recommendations(
             )
             result = "win" if balance > 0 else "loss" if balance < 0 else "push"
             if pick.market == "h2h" and balance == 0:
-                result = "void"
+                event = PickEvent.MONEYLINE_TIE
+        settled = SETTLEMENTS.get((state, event))
+        if settled is None:
+            continue
+        if settled is not PickState.SETTLED:
+            result = "no_play" if settled is PickState.PASSED else "void"
         profit = (
             pick.stake_units * american_profit(pick.price)
             if result == "win"
@@ -1032,7 +1042,7 @@ def grade_recommendations(
                 graded_at=now,
                 **(
                     closing_line_value(pick, closing, captured)
-                    if result in ("win", "loss", "push")
+                    if settled is PickState.SETTLED
                     else dict.fromkeys(CLOSING_LINE_COLUMNS)
                 ),
             )

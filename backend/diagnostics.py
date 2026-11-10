@@ -15,6 +15,7 @@ import pandas as pd
 from backend.grading import THIN_SAMPLE_GAMES, opponent_classification
 from backend.model.distributions import marginal_interval_half_width
 from backend.model.scoring_calibration import bounded_model_total
+from backend.pick_lifecycle import SETTLED_OUTCOMES
 
 
 def scoring_diagnostics(
@@ -90,7 +91,7 @@ def recommendation_calibration(recommendations: pd.DataFrame) -> pd.DataFrame:
     selected = recommendations[recommendations.status.eq("recommended")].copy()
     if selected.duplicated(["season", "game_id", "market"]).any():
         raise ValueError("duplicate executable recommendations")
-    settled = selected[selected.outcome.isin(["win", "loss", "push"])].copy()
+    settled = selected[selected.outcome.isin(SETTLED_OUTCOMES)].copy()
     if settled.empty:
         return pd.DataFrame()
     if (

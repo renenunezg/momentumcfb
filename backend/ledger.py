@@ -20,6 +20,7 @@ from backend.grading import (
     THIN_SAMPLE_GAMES,
     compute_performance_metrics,
 )
+from backend.pick_lifecycle import SETTLED_OUTCOMES
 from backend.recommendations import CLOSING_LINE_COLUMNS, RECOMMENDATION_COLUMNS
 
 FORECAST_RULE = (
@@ -36,7 +37,6 @@ PICK_RULE = (
 GRADED = "graded"
 SUPERSEDED = "superseded_before_kickoff"
 LATER_DECISION = "later_pregame_decision"
-SETTLED = ("win", "loss", "push")
 TIMESTAMP_COLUMNS = ("start_date", "decision_at", "graded_at", "published_at")
 
 
@@ -233,7 +233,7 @@ def pick_summary(picks: pd.DataFrame) -> pd.DataFrame:
         ["season", "segment_kind", "segment"], sort=True
     ):
         recommended = group["status"].eq("recommended")
-        settled = group["outcome"].isin(SETTLED)
+        settled = group["outcome"].isin(SETTLED_OUTCOMES)
         wins = int(group["outcome"].eq("win").sum())
         losses = int(group["outcome"].eq("loss").sum())
         pushes = int(group["outcome"].eq("push").sum())

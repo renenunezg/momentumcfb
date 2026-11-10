@@ -1140,6 +1140,7 @@ def _jsonb_rows(rows: pd.DataFrame) -> str:
 
 
 def _publish_recommendations(conn, decisions):
+    from backend.pick_lifecycle import PENDING_PICK, PickState, where_state
     from backend.recommendations import RECOMMENDATION_COLUMNS
 
     if decisions.empty:
@@ -1184,7 +1185,7 @@ def _publish_recommendations(conn, decisions):
             "AND original.start_date <> fresh.start_date "
             "AND original.home_team = fresh.home_team AND original.away_team = fresh.away_team "
             "AND original.decision_at < fresh.decision_at "
-            "AND original.status = 'recommended' AND original.outcome = 'pending'"
+            f"AND {where_state('original', *PENDING_PICK)}"
         ),
         {"decisions": payload},
     )
@@ -1193,9 +1194,7 @@ def _publish_recommendations(conn, decisions):
             f"INSERT INTO {CFB_SCHEMA}.recommendations ({columns}) "
             f"SELECT {values} FROM {records} WHERE fresh.start_date > clock_timestamp() "
             f"ON CONFLICT (game_id, market) DO UPDATE SET {updates}, published_at = clock_timestamp() "
-            f"WHERE {CFB_SCHEMA}.recommendations.status = 'no_play' "
-            f"AND {CFB_SCHEMA}.recommendations.outcome = 'pending' "
-            f"AND {CFB_SCHEMA}.recommendations.start_date > clock_timestamp() "
+            f"WHERE {where_state(f'{CFB_SCHEMA}.recommendations', PickState.OPEN_NO_PLAY)} "
             f"AND excluded.start_date > clock_timestamp() "
             f"AND excluded.decision_at > {CFB_SCHEMA}.recommendations.decision_at"
         ),
@@ -1238,6 +1237,7 @@ def publish_recommendation_grades(season):
     the site's statement-level revalidation fires once per step, not per pick."""
     from backend.db import engine
     from backend.etl import store
+    from backend.pick_lifecycle import PickState, where_state
     from backend.recommendations import (
         CLOSING_LINE_COLUMNS,
         MARKET_CLV_COLUMNS,
@@ -1306,7 +1306,7 @@ def publish_recommendation_grades(season):
                         f"{c} = coalesce(r.{c}, f.{c})" for c in CLOSING_LINE_COLUMNS
                     )
                     + f" FROM {rows} WHERE {key} "
-                    "AND r.outcome IN ('win', 'loss', 'push') "
+                    f"AND {where_state('r', PickState.SETTLED)} "
                     "AND (r.closing_source IS NULL OR ("
                     + " AND ".join(f"r.{c} IS NULL" for c in MARKET_CLV_COLUMNS)
                     + "))"
