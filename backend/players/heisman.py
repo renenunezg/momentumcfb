@@ -21,10 +21,14 @@ from backend.features.scoring import _division_one_schedule, _split_week_zero
 from backend.players.heisman_seed import SEED_PATH
 from backend.players.ingest import read_season_source, read_weekly
 
-MODEL_VERSION = "cfb_heisman_share_v2"
+MODEL_VERSION = "cfb_heisman_share_v3"
 EVALUATION_KIND = "expanding_window_model_weekly"
-CANDIDATE_POOL = 300
-RIDGE_PENALTY = 0.5
+# 300 left the eventual winner off 8% of weekly boards from 2012 to 2025
+# (low-volume quarterbacks early, receivers all year); 600 leaves him off 1%.
+CANDIDATE_POOL = 600
+# Minimises held-out ballot cross-entropy over the 2011-2021 expanding-window
+# seasons (flat from about 0.21 to 0.26) and beat the earlier 0.5 on 2022-2025.
+RIDGE_PENALTY = 0.23
 RATE_PRIOR_GAMES = 4.0
 POWER_CONFERENCES = {"SEC", "Big Ten", "Big 12", "ACC", "Pac-12", "Pac-10", "Big East"}
 POWER_INDEPENDENTS = {"Notre Dame"}

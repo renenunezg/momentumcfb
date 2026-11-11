@@ -15,7 +15,7 @@
   "policy": "Apply to future inference; retain all published forecast logs and records. Game coefficients and ingame_baseline_v1 parameters are unchanged.",
   "artifacts": {
     "ingame/baseline_summary.parquet": "d2fcd82446d24793e91d192cbdfe192ea7250a075d344f7c13cfd5eb7af97d49",
-    "players/models/heisman_2026.json": "e9a722d7d704d5c3caf96dec45b93edbc36db8af9a25b475f6ce8938f1fb2d83",
+    "players/models/heisman_2026.json": "46caa0a5239e9f59654198c3098d7e1ad26a67a64a5abc881fca1701d296372b",
     "players/models/position_grade_expectations_2024.parquet": "857787cfdcaeed02f1ed4557ea6cbbba2171dd5406a99532ba20700f19653c60",
     "players/models/position_grade_2024.json": "d69ec0d55fa6ea0c5af499f721a3f9d55ab581d75e5e29ab604de86f36cb06af",
     "players/opponent_priors/2026.parquet": "2378bd817c0b7474721d5a87bdb9c6be601a29029e376e3735929b26af3feae3",
@@ -28,6 +28,6 @@
   "release_bundles": {
     "historical-epa-2019-2025-20261017.zip": "0f5d9a50e6e2f1dc0b3f58ac78294d45486f1bad8674fb696bfdc15520807997",
     "preseason-runtime-2026-market-total-20261027.zip": "e0a099e10764be756de0a60bb98e86174ca488de38f892309bff4a9f4db517e5",
-    "player-runtime-2026-v3-20261109.zip": "06470a64a20c83900f5f889cc30e685a7cc638c57ef4e8e2004ab6474bc9d353"
+    "player-runtime-2026-heisman-v3-20261111.zip": "ac4be49f94e0b6a4c8dd2fac9d2755d7d70ce529711a00fe4f759e14b06863c1"
   }
 }
