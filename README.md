@@ -1,107 +1,72 @@
 # Momentum CFB
 
-Momentum CFB is a college football rating, projection, and model-evaluation pipeline.
-It builds preseason and in-season team ratings, prices game margins and totals, captures sportsbook closing lines, and publishes reviewed outputs to the shared Momentum website.
+Momentum CFB is the college football rating, projection, and evaluation pipeline behind [renenunez.dev/cfb](https://renenunez.dev/cfb/ratings).
+It builds preseason and in-season team ratings, prices game margins and totals, records research picks against sportsbook prices, grades them, and publishes everything to the `cfb` schema of the shared Momentum Supabase project.
+The site lives in the separate `momentumweb` repository and reads only that schema.
+The two repositories share no code.
+Live performance and methodology are on the site, not in this file.
 
-The public interface is maintained in the separate `momentumweb` repository.
-Current ratings, methodology, and performance are available at [renenunez.dev/cfb](https://renenunez.dev/cfb/ratings).
+## Model approach
 
-## Current status
+The in-season model estimates each team's offense, defense, and pace from chronological points-per-possession and EPA-per-possession data, plus a fitted home-field effect, and produces a joint home and away score distribution.
+Ratings are fitted to a blend of points and competitive-possession EPA, which discounts garbage time.
+Conference pools carry their own level, identified by crossover games, so a whole conference can move instead of every team being shrunk toward a stale level.
+The published margin averages that joint fit with a points-only rating that uses every completed game, including FCS games without play-by-play.
+A frozen calibration layer then applies corrections fitted on earlier seasons, such as process-stat evidence from earlier games and visitor travel distance.
 
-The 2026 season is live.
-The pre-kickoff refresh produced 266 Division I team ratings, 172 week-one game projections, unit ratings, market comparisons, and outcome-free serving anchors.
-Completed games are graded against the projection that was published before kickoff and the CFBD closing line, and the graded record is published to the site.
-Every settled pick also records the CFBD median closing line for its side and its closing line value, the points by which the pick beat the close.
+The preseason prior starts from last season's power, scoring environment, and pace, and adds talent, returning production, transfers, quarterback and roster continuity, recruiting, and coaching continuity.
+Missing inputs receive neutral contributions and wider uncertainty instead of guesses.
+A reported starting-quarterback absence (`cfb.qb_availability`) adjusts expected points only when the report precedes the forecast or decision cutoff.
 
-| Live 2026 measure (as of Sep 1) | Value |
-|---|---:|
-| Graded games | 53 |
-| Graded games with a closing spread | 53 |
-| Pure model margin MAE | 12.86 points |
-| Closing line margin MAE | 11.80 points |
-| 80 percent interval coverage | 0.85 |
+A separate market-informed margin mixes the model with a rating fitted to earlier closing spreads and the game's consensus line.
+It never feeds the pure model margin.
+The live win-probability model combines the score, clock, and possession with the frozen pregame forecast.
 
-Only 8 of those games are FBS versus FBS, so the live sample is too small to draw conclusions from.
-Historical walk-forward results below are kept separate from the live record.
+Every weight is chosen on chronological development seasons and checked on later seasons.
+Live-season outcomes are never used for tuning.
 
-## Model design
+## Picks
 
-The in-season model estimates offense, defense, pace, and home-field effect from chronological points-per-possession and EPA-per-possession data.
-It produces a joint home and away score distribution with calibrated margin and total uncertainty.
-Each team's offense and defense priors are correlated at 0.5, so the scoring-environment direction is shrunk harder than net strength, and the pace prior is one possession; on the 2020 through 2025 walk-forward this keeps projected totals calibrated (actual on projected total slope 0.88 against 0.61 with independent priors) with margins unchanged.
+Picks are a research ledger, not betting advice.
+Each market (moneyline, spread, total) is priced from the decision-time market reference moved toward the model by a fitted share, which for spreads is close to zero.
+A pick needs positive estimated EV and a minimum edge (a few fixed rules, such as the rivalry road-favorite rule in `backend/rivalries.py`, relax the edge gate), stakes one flat unit, and records its full pricing context, including whether it qualified on edge or was added to reach the weekly research target.
+The current policy version and its constants live in `backend/recommendations.py` and `backend/model/spread_pricing.py`.
+Published picks, forecasts, and settlements stay frozen under the policy they were recorded with, and a new policy never rewrites them.
 
-The preseason model starts from prior-season power, scoring environment, and pace.
-It then incorporates current CFBD talent, returning production, transfers, quarterback continuity, recruiting, and coaching continuity.
-The prior-season, talent, and returning-production weights are fitted to 2022 through 2025 opening-week closing margins and validated leave-one-season-out.
-Service academies do not sign rated recruiting classes, so their talent composite is treated as missing instead of as a near-zero roster.
-Missing inputs receive neutral contributions and increase uncertainty instead of being guessed.
-Each conference pool (FCS as one pool) carries a shift parameter identified by crossover games, so a whole conference can move from the level its teams' priors imply instead of every team being shrunk toward a stale level, and FCS teams without priors are anchored to the fitted FCS level.
-Ratings are fitted to a blend of points and competitive-possession EPA, which discounts garbage-time scoring; games between distant pools carry far more of it, so a crossover gain estimated from points residuals adds a share of the pool-level gap to the stronger side (FBS over FCS bias +6.1 to +1.3 and Power Five over Group of Five +3.1 to +0.2 on the 2020 through 2025 walk-forward).
-Team strength scales with the game's expected possessions, so a slow or fast matchup changes the projected margin and total the way it changes the scoring.
-The published margin is half the joint fit's margin and half a points-only ridge rating fitted on the same games with a nine-point prior around the previous season's final points-only rating (joint_scoring_v12); the total is untouched.
-The points-only rating keeps information the blended fit shrinks away, mainly the crossover gain that restarts each season and the FCS pool, and on the 2020 through 2025 walk-forward the blend cut margin MAE by 0.19 points on Division I games with a closing line and 0.07 on FBS versus FBS, negative in every season.
-The points-only rating and its carried chain use every completed game with a final score, including the FCS games whose play-by-play features are missing (joint_scoring_v13), which cut 2023 through 2025 margin MAE by a further 0.06 on Division I games and 0.12 on FCS versus FCS.
-The market-informed margin is a separate output that never feeds the pure margin: its model side mixes the pure margin with a rating fitted to the closing spreads of games that kicked off before the forecast week (weight 0.55 through week 3, 0.35 after; prior carried from the previous season's closing lines), and that side is then averaged with the game's own consensus line.
-Selected on 2020 through 2022 and scored once on 2023 through 2025, the market-history rating cut the market-informed margin MAE from 12.07 to 12.00 (t -4.3), negative in every season.
-The projected margin standard deviation is scaled by 0.915, which returns 80 percent interval coverage from 0.85 to 0.81.
+## Data
 
-The in-game baseline combines the current score and possession state with a frozen pregame anchor.
-Serving code reads only outcome-free anchors and play state.
-Final scores are available only to evaluation code.
+- [CollegeFootballData](https://collegefootballdata.com/): schedules, play-by-play, teams, talent, returning production, recruiting, transfers, coaches, rosters, player stats, and historical lines.
+- Sportsbook prices: The Odds API or ESPN's DraftKings line, selected by `ODDS_SOURCE`.
+  Every captured close is labeled with its source.
+- The kickoff capture writes one frozen pregame line per game to `cfb.closing_lines`.
+  Where no capture exists, grading falls back to the CFBD median closing line and records which it used.
 
-## Validation
-
-Model selection uses 2019 through 2022 for development and reserves 2023 through 2025 as an untouched holdout.
-The holdout contains 2,258 games.
-
-| Measure | Holdout result |
-|---|---:|
-| Pregame margin MAE | 13.284 points |
-| Pregame total MAE | 13.081 points |
-| In-game baseline log loss | 0.40730 |
-| Closing-market anchored log loss | 0.38954 |
-| In-game baseline Brier score | 0.13280 |
-| Closing-market anchored Brier score | 0.12576 |
-
-The in-game comparison uses 400,878 identical play states across the holdout.
-The closing-market result shows that the pregame anchor is the main constraint on in-game accuracy.
-It is not evidence that an independent model beats the market.
-
-Two momentum variants improved development results but worsened holdout log loss.
-Both were rejected, and the baseline was retained.
-
-## Data and system boundaries
-
-College football schedules, play-by-play, teams, talent, returning production, recruiting, transfers, coaches, and historical lines come from [CollegeFootballData](https://collegefootballdata.com/).
-The Odds API is used for timestamped sportsbook snapshots near kickoff.
-Snapshots query ten named books (the free `us` books plus Pinnacle) at the quota cost of one region; every snapshot, including the kickoff capture, keeps each book's quote, so picks can be compared with Pinnacle's close.
-CFBD lines remain an audit source when timestamped market data is unavailable.
-
-Raw and processed Parquet artifacts are stored under `backend/data/` and are not committed.
-This keeps provider data, generated predictions, and model artifacts out of Git while leaving the pipeline and fixture-based tests reproducible.
-A compact aggregate evaluation export and a synthetic serving fixture are available under [`examples/`](examples/).
+Raw and processed Parquet lives under `backend/data/` and is not committed.
 
 ```text
-CFBD data -> raw Parquet -> possession and scoring features -> model artifacts
-The Odds API -> append-only snapshots -> verified pregame closing anchors
-model artifacts -> reviewed publish step -> Supabase cfb schema -> momentumweb
+CFBD -> raw Parquet -> features -> model artifacts -> reviewed publish -> Supabase cfb schema -> momentumweb
+sportsbook snapshots -> frozen pregame closing lines -> grading and closing-line value
 ```
 
 ## Repository layout
 
 ```text
-backend/cli.py      Argument parsing, grouped by pipeline, research, serving, market, publish
-backend/commands/   One handler module per command group
-backend/cfbd/       CFBD API client
-backend/etl/        Source ingestion and local Parquet storage
-backend/features/   Possession, scoring, in-game, and unit features
-backend/model/      Pregame, in-game, calibration, and evaluation models
-backend/odds/       Market capture, freshness, quota, and kickoff validation
-backend/serving/    Outcome-free anchors, replay, serving, and verification
-backend/grading.py  Frozen live-season grading record and metrics
-backend/publish.py  Supabase publication boundary
-tests/              Production-critical regression and acceptance tests
-sql/                Reproducible CFB database schema
+backend/cli.py          Command-line entry point (python -m backend)
+backend/commands/       One handler module per command group
+backend/cfbd/           CFBD API client
+backend/etl/            Ingestion and local Parquet storage
+backend/features/       Possession, scoring, in-game, and unit features
+backend/model/          Preseason, in-season, calibration, in-game, and evaluation models
+backend/odds/           Market capture, freshness, quota, and kickoff validation
+backend/serving/        Outcome-free anchors, live scoring, and verification
+backend/players/        Player value, position grades, NIL values, and the Heisman board
+backend/playoffs/       College Football Playoff forecast
+backend/draft/          NFL draft board publication (see its README)
+backend/recommendations.py, backend/grading.py, backend/publish.py
+                        Pick policy, grading, and the Supabase publication boundary
+sql/                    Ordered cfb schema migrations and the recovery baseline
+tests/                  Production-critical regression and acceptance tests
+examples/, research/    Reproducible audits and research notes
 ```
 
 ## Local setup
@@ -110,118 +75,54 @@ Python 3.11 or 3.12 and Poetry are required.
 
 ```bash
 poetry install --no-root
-```
-
-Copy the environment template, then fill only the services used by the command you plan to run.
-
-```bash
 cp .env.example .env
 ```
 
-`DATABASE_URL` points at the production Supabase project.
-Database mutations are denied unless the process explicitly sets `MOMENTUMCFB_DB_WRITES=1`.
+| Variable | Needed for |
+|---|---|
+| `CFBD_API_KEY` | Any command that calls CFBD |
+| `ODDS_API_KEY`, `ODDS_API_BOOKMAKERS`, `ODDS_API_REGIONS` | Sportsbook snapshots from The Odds API |
+| `DATABASE_URL` | Reading or publishing serving data (this is production) |
+| `MOMENTUMCFB_DB_WRITES` | Set to `1` only to mutate production on purpose |
 
-Common commands:
+Core commands:
 
 ```bash
 poetry run python -m backend ingest --seasons 2025
 poetry run python -m backend features --seasons 2025
-poetry run python -m backend calibrate
-poetry run python -m backend preseason --season 2026 --week 1 --refresh
+poetry run python -m backend fit --season 2026
+poetry run python -m backend --help
 poetry run ruff format --check .
 poetry run ruff check .
 poetry run mypy
 poetry run pytest -q
 ```
 
-Run `poetry run python -m backend --help` for the complete command list.
-The commands fall into six groups.
+`fit` is a local dry run of the weekly update that publishes nothing.
+`--help` lists the rest, including the research, serving, market, and player commands.
 
-| Group | Commands | Used by |
-|---|---|---|
-| Pipeline | `ingest`, `features`, `fit`, `weekly-update`, `calibrate`, `preseason` | Weekly and opening workflows; `fit` is a local dry run of `weekly-update` without publishing |
-| Research | `ingame-baseline`, `ingame-momentum`, `ingame-momentum-recency`, `ingame-market-anchor` | Reproduce the frozen in-game evaluations reported under Validation; not part of any workflow |
-| Serving | `ingame-stream`, `serving-anchors`, `serve-game`, `serve-verify` | Anchor builds run in workflows; the others are operator checks that prove streamed output equals batch output |
-| Market | `live-odds`, `kickoff-check`, `kickoff-run`, `live-replay` | Kickoff capture workflow; `kickoff-check` and `live-replay` are read-only diagnostics |
-| Publish | `publish`, `publish-anchors`, `fetch-anchors`, `grade`, `publish-grading` | Workflows; every database write requires `MOMENTUMCFB_DB_WRITES=1` |
-| Players | `player-prior`, `ingest-players`, `player-values`, `heisman`, `publish-players` | Weekly workflow; opponent-adjusted player value above replacement and the Heisman ballot forecast behind `/cfb/heisman` |
+## Production
 
-## Production workflows
+- `weekly-update.yml`: dispatched by Supabase pg_cron Monday morning Pacific.
+  It ingests the week, fits and publishes the next forecast and picks, grades completed games, updates players and the Heisman board, and refreshes the playoff forecast.
+- `kickoff-capture.yml`: dispatched by pg_cron for each kickoff window.
+  It captures the final pregame line from the existing forecast artifact, publishes closing lines, and re-arms itself for the next window without rebuilding the model.
+- `live-win-probability.yml`: dispatched by pg_cron while games are in progress.
+  It polls the CFBD scoreboard and publishes live win probability.
+- `draft-refresh.yml`: runs after a successful weekly update and republishes the draft board.
+- `opening-forecast.yml` and `cfbd-live-pilot.yml`: manual dispatch only.
+- `ci.yml`: lint, format, type checks, and tests on every pull request and push to `main`.
 
-`.github/workflows/weekly-update.yml` refreshes completed-season data, rebuilds features, fits the next unstarted model week, and publishes only after readiness checks pass.
-`.github/workflows/opening-forecast.yml` intentionally builds and publishes the opening forecast early, then preserves its frozen capture inputs.
-`.github/workflows/kickoff-capture.yml` restores that exact forecast artifact and captures the final verified pregame market snapshot without rebuilding or republishing the model.
-`.github/workflows/ci.yml` installs the locked environment, validates metadata, checks formatting and linting, type-checks production boundaries, compiles the source, and runs the test suite for every pull request and push to `main`.
+Rules that must hold:
 
-Publishing is a separate, explicit boundary.
-Local model and evaluation commands do not require database write access.
+- `DATABASE_URL` is the live database, and `backend/db.py` refuses every write unless `MOMENTUMCFB_DB_WRITES=1`, including on GitHub Actions.
+- Publication reads only a completed, hash-verified forecast run, and readiness checks must pass before anything is written.
+- Serving code reads only outcome-free anchors and play state; final scores are available only to evaluation code.
+- Production schema changes require separate approval.
 
-Player-value v4 uses exposure-weighted rush/pass efficiency and a frozen previous-season opponent prior instead of resetting opening opponents to average; the prior is regressed 0.7 of the way from zero toward last season's rating and the ridge alone, with noise estimated from each channel, decides how far observed games move each unit.
-v3 blended the ridge fit a second time toward last season by games played, which left midseason opponent effects about 90 percent previous-season rating; the v4 settings were chosen on 2020 through 2024 walk-forward next-game error and checked on 2025.
-Before activating a new player-value version, run `python -m backend player-prior --season 2026 --runtime-bundle /path/to/player-runtime-2026.zip` where the previous season's raw plays and existing Heisman runtime artifacts are cached.
-The weekly runner requires that reviewed bundle, validates the prior before paid ingestion, and never downloads historical inputs or silently substitutes zero opponent effects.
+## Database ownership and recovery
 
-## Known limits
-
-- The free historical CFBD feed is not the low-latency source required for live in-game production.
-- Injuries and player availability are never inferred from play-by-play or market movement. A starting quarterback reported out or doubtful in `cfb.qb_availability` (a hand-entered row with its source and report time) lowers that team's expected points by a fixed documented amount when the report precedes the forecast or decision cutoff; `qb-starters` lists teams whose last box-score starter changed so reports can be checked.
-- FCS teams have less complete preseason data and carry wider uncertainty.
-- The 2026 live performance sample is small early in the season and is reported with its game count rather than as a conclusion.
-- The project does not automate wagers, size positions, or claim profitability.
-
-
-## Database recovery and release contract
-
-The secret-free schema snapshot in `sql/baseline/2026_10_05.sql` restores the deployed schema as inspected on October 5, 2026, without production rows.
-On an empty Supabase project, install `momentumweb/sql/001_site_revalidate.sql` first, restore this baseline with `psql -X -v ON_ERROR_STOP=1`, then apply `020_decision_forecast.sql`, `021_site_revalidate.sql`, `20261012190441_moneyline_pricing_context.sql`, and `20261012224346_player_opponent_prior_meta.sql` from `sql`.
-The baseline includes the earlier migrations; do not replay those on top of it.
-The shared function requires pg_net and Vault, with `site_revalidate_secret` provisioned separately and matched to the site's `REVALIDATE_SECRET`.
-A plain PostgreSQL test database needs the `anon`, `authenticated`, and `service_role` roles and a local callback substitute.
-Production schema changes require separate approval.
-
-New forecast publication reads only a completed, hash-verified run directory.
-Late quarterback reports produce a separately recorded `decision_forecast` containing published inputs, adjusted inputs, and the reports available at decision time.
-Existing recommended picks remain frozen.
-Older forecasts without `market_total_weight` cannot be safely reconstructed from totals alone and must be republished from source artifacts before adjusting late totals.
-
-## Research recommendation policy
-
-CFB picks v13 keeps recommendations enabled and grades each recorded pick at one flat research unit.
-The moneyline market reference is the median of fresh same-book home/away implied probabilities after proportional vig removal.
-Each book contributes once, both sides must share the event, kickoff, capture, and update timestamp, and only the latest capture can supply the reference and selected price.
-Conflicting duplicates, missing pairs, and pairs with implied probability sums outside 1.00 to 1.20 are excluded.
-The moneyline pricing margin is 20 percent pure model and 80 percent market-equivalent margin, preserving the previous policy's model weight and margin-space blend.
-The market-equivalent margin is the inverse CDF of the paired market probability under the existing pricing dispersion and degrees of freedom; the blended margin is then converted back to win probability.
-The 20 percent weight is an explicit research policy, not a claim that historical results validated it.
-A moneyline needs positive estimated EV and at least two probability-equivalent points of edge, using the existing margin dispersion and distribution to convert probability gaps into the previous policy's point scale.
-These points are a selection yardstick, not a forecast margin.
-Moneylines cannot be promoted to meet the volume floor.
-Spreads price a separate margin with 0.75 percent model/history and 99.25 percent frozen market reference; the published point forecast is unchanged.
-That weight minimizes win/push/loss log loss at the posted line on 2020-2022 (`examples/fit_spread_cover_weight.py`, week-clustered standard error about 0.1): the model side carries no measurable cover information beyond the median market, so a spread pick needs an offered line away from that reference.
-Policy v11 priced spreads at 20 percent, which was worse than the market alone on both 2020-2022 and 2023-2025.
-Frozen symmetric integer-margin weights in `backend/model/spread_pricing.json`, fitted on 2020-2022 development data and checked on 2023-2025 historical proxy data, size the push at integer lines.
-The win/loss split stays with the unkeyed distribution, so the market line remains the median: when the keys also split win and loss (v11), they priced 3.5 to 10.5 point underdogs to cover 0.52 to 0.54 at the median close against 0.45 to 0.50 realized.
-This improves historical probability scores but does not establish profitable executable edges.
-Spread pricing fixes dispersion at 15.35 and Student-t degrees of freedom at 500, matching the calibration contract.
-Totals price the decision-time median posted total moved 0.209 of the way toward the published total's model side (the pure total plus its market-history share), with 15.93-point dispersion.
-That weight minimizes win/push/loss log loss at the posted total around the median close on 2020-2022 and beat the market alone on 2023-2025; the published 50/50 blend priced totals picks about 4 points of win probability above their realized rate, and a cap on large disagreements fitted no better.
-The 15-pick research target remains enabled for positive-EV spreads and totals, with one unit per pick.
-The policy first shortlists up to the remaining target, then caps each market's exploratory additions at half that shortfall, rounded up.
-Capped picks are not replaced, so a batch can finish below 15 recommendations; qualified picks are never capped.
-Every recommendation records `edge_qualified` or `exploratory` in its pricing context; performance summaries separate these groups using the frozen reason, with unknown older reasons labeled `legacy`.
-Spreads additionally record the pricing margin, model/history component, frozen market margin and timestamp, published margin, and calibration version.
-The selected-side spread edge breaks into the model contribution, the offered-line difference from the frozen market reference, and the price/distribution adjustment; these sum to the recorded edge.
-Quote differences do not prove line movement because the reference and offer can come from different books or times.
-Decision context records regular season, postseason, or unknown, along with postseason and differing-spread-quote research flags.
-These flags describe the forecast context and do not disable recommendations or imply known player absences.
-
-Every new decision stores its probability source, research status, and shared-game exposure in `pricing_context`.
-Moneylines additionally store the exact reference pairs, timestamps, normalized probabilities, component margins, blend space, and model weight, separately from the selected execution price and any quarterback adjustment in `decision_forecast`.
-Several picks on one game remain several one-unit picks, with correlated outcomes; `decision_batch_game_stake_units` records that batch's exposure, not the eventual full ledger exposure.
-Recommendations and estimated edges are research hypotheses, not evidence of profitability.
-Existing published picks and settlements remain frozen under their recorded policy.
-
-Run `poetry run python -m examples.audit_moneyline_probabilities` to reproduce the frozen v8 historical audit from local CFBD caches.
-The `current_020` scenario name in that audit means the policy at the October 12 audit cutoff, not the latest recommendation policy.
-Historical closing quotes lack executable decision timestamps, and the later seasons have been inspected in earlier research, so this replay is a proxy evaluation rather than a pristine validation sample.
-No 2026 outcomes are used to fit the replacement moneyline policy.
+This repository owns the `cfb` schema, and `momentumweb` owns the shared cache callback `public.site_revalidate()`.
+To rebuild on an empty Supabase project, install `momentumweb/sql/001_site_revalidate.sql` (pg_net and Vault required, with `site_revalidate_secret` provisioned separately), restore `sql/baseline/2026_10_05.sql` with `psql -X -v ON_ERROR_STOP=1`, then apply every migration in `sql/` from `020` onward in filename order.
+The baseline already contains migrations `001` through `019`; do not replay them.
+A plain PostgreSQL test database needs the `anon`, `authenticated`, and `service_role` roles and a local substitute for the callback.
