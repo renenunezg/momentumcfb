@@ -4,22 +4,22 @@ Momentum CFB is the college football rating, projection, and evaluation pipeline
 It builds preseason and in-season team ratings, prices game margins and totals, records research picks against sportsbook prices, grades them, and publishes everything to the `cfb` schema of the shared Momentum Supabase project.
 The site lives in the separate `momentumweb` repository and reads only that schema.
 The two repositories share no code.
-Live performance and methodology are on the site, not in this file.
+Live performance and methodology are on the site.
 
 ## Model approach
 
 The in-season model estimates each team's offense, defense, and pace from chronological points-per-possession and EPA-per-possession data, plus a fitted home-field effect, and produces a joint home and away score distribution.
 Ratings are fitted to a blend of points and competitive-possession EPA, which discounts garbage time.
-Conference pools carry their own level, identified by crossover games, so a whole conference can move instead of every team being shrunk toward a stale level.
+Conference pools carry their own level, identified by crossover games, so a whole conference can move up or down together.
 The published margin averages that joint fit with a points-only rating that uses every completed game, including FCS games without play-by-play.
 A frozen calibration layer then applies corrections fitted on earlier seasons, such as process-stat evidence from earlier games and visitor travel distance.
 
 The preseason prior starts from last season's power, scoring environment, and pace, and adds talent, returning production, transfers, quarterback and roster continuity, recruiting, and coaching continuity.
-Missing inputs receive neutral contributions and wider uncertainty instead of guesses.
+A missing input gets a neutral contribution and widens the uncertainty.
 A reported starting-quarterback absence (`cfb.qb_availability`) adjusts expected points only when the report precedes the forecast or decision cutoff.
 
 A separate market-informed margin mixes the model with a rating fitted to earlier closing spreads and the game's consensus line.
-It never feeds the pure model margin.
+The pure model margin does not use it.
 The live win-probability model combines the score, clock, and possession with the frozen pregame forecast.
 
 Every weight is chosen on chronological development seasons and checked on later seasons.
@@ -27,11 +27,11 @@ Live-season outcomes are never used for tuning.
 
 ## Picks
 
-Picks are a research ledger, not betting advice.
+Picks are a research ledger.
 Each market (moneyline, spread, total) is priced from the decision-time market reference moved toward the model by a fitted share, which for spreads is close to zero.
 A pick needs positive estimated EV and a minimum edge (a few fixed rules, such as the rivalry road-favorite rule in `backend/rivalries.py`, relax the edge gate), stakes one flat unit, and records its full pricing context, including whether it qualified on edge or was added to reach the weekly research target.
 The current policy version and its constants live in `backend/recommendations.py` and `backend/model/spread_pricing.py`.
-Published picks, forecasts, and settlements stay frozen under the policy they were recorded with, and a new policy never rewrites them.
+Published picks, forecasts, and settlements stay frozen under the policy they were recorded with.
 
 ## Data
 
@@ -117,7 +117,8 @@ Rules that must hold:
 
 - `DATABASE_URL` is the live database, and `backend/db.py` refuses every write unless `MOMENTUMCFB_DB_WRITES=1`, including on GitHub Actions.
 - Publication reads only a completed, hash-verified forecast run, and readiness checks must pass before anything is written.
-- Serving code reads only outcome-free anchors and play state; final scores are available only to evaluation code.
+- Serving code reads only outcome-free anchors and play state.
+  Final scores are visible only to evaluation code.
 - Production schema changes require separate approval.
 
 ## Database ownership and recovery
