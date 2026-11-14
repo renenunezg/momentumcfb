@@ -624,12 +624,16 @@ def _discover_target_events(
             commence_by_event_id[event_id] = event.get("commence_time")
     required = tuple(dict.fromkeys(required_game_ids or ()))
     missing = [game_id for game_id in required if game_id not in event_id_by_game]
-    if missing:
+    if missing and metered:
         raise LivePollSkipped(
             "free event discovery is missing target games: "
             + ", ".join(str(game_id) for game_id in missing),
             discovery.requests_remaining,
         )
+    # The unmetered source lists only priced or started games, so a target
+    # that is not priced yet (or was pulled) is left out of this poll rather
+    # than blocking the closing snapshot of every other target.
+    required = tuple(game_id for game_id in required if game_id in event_id_by_game)
     relevant_event_ids = (
         [event_id_by_game[game_id] for game_id in required]
         if required
@@ -665,8 +669,8 @@ def _fetch_target_odds(
 
     A required event that is missing after kickoff is tolerated (the book has
     pulled it); any other gap is a partial paid poll or a skip. The unmetered
-    fallback never prices a started game, so there every started event may be
-    missing.
+    fallback prices only what its one read shows, so there every missing
+    event is tolerated.
     """
     odds = client.get_ncaaf_odds(
         *window, markets=markets, event_ids=tuple(relevant_event_ids)
@@ -701,7 +705,7 @@ def _fetch_target_odds(
             <= pd.Timestamp(now)
             for event_id in missing
         )
-        if (metered and not required) or not missing_have_started:
+        if metered and (not required or not missing_have_started):
             if odds.request_cost:
                 raise PartialPaidPollError(reason, odds)
             raise LivePollSkipped(reason, odds.requests_remaining)

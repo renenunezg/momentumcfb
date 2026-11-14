@@ -1292,6 +1292,12 @@ def run_kickoff_window(
         lookback_hours,
         (last_poll_at - target.first_kickoff).total_seconds() / 3600,
     )
+    # Likewise the first poll must already see the last kickoff, or a window
+    # wider than the lookahead reports its late games as missing targets.
+    lookahead_hours = max(
+        lookahead_hours,
+        (target.last_kickoff - _utc(now())).total_seconds() / 3600,
+    )
     completed = run_live_polling(
         season,
         schedule,

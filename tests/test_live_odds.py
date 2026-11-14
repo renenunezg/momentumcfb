@@ -335,6 +335,57 @@ def test_live_capture_requires_the_requested_kickoff_target():
     assert [call[0] for call in client.calls] == ["events"]
 
 
+def test_unmetered_capture_polls_priced_targets_when_one_is_unpriced(monkeypatch):
+    # 2026-11-14: ESPN lists only priced games, and one unpriced target made
+    # every poll skip, so no game in the window got a closing snapshot.
+    commence = (NOW + timedelta(hours=3)).isoformat()
+    update = (NOW - timedelta(seconds=30)).isoformat()
+    event = _odds_event("ev-pre", "Montana", "Idaho", commence, update)
+    odds = OddsSnapshot(
+        events=[event],
+        fetched_at=NOW,
+        requests_remaining=None,
+        requests_used=None,
+        request_cost=None,
+        configured_bookmakers=("draftkings",),
+    )
+    scoreboard = ScoreboardSnapshot(
+        events=[
+            {
+                "id": "ev-pre",
+                "commence_time": commence,
+                "completed": False,
+                "home_team": "Montana",
+                "away_team": "Idaho",
+                "scores": None,
+                "last_update": None,
+            }
+        ],
+        fetched_at=NOW,
+        requests_remaining=None,
+        requests_used=None,
+        request_cost=None,
+    )
+    client = _QuotaAwareClient(_events_snapshot([event]), odds, scoreboard)
+    monkeypatch.setattr(live, "write_live_snapshot", lambda season, snapshot: None)
+
+    snapshot = live.capture_live_snapshot(
+        client,
+        2026,
+        _schedule(),
+        lookback_hours=8,
+        lookahead_hours=6,
+        days_from=None,
+        min_quota=50,
+        required_game_ids=(101, 102),
+        markets=live.CLOSING_MARKETS,
+        metered=False,
+    )
+
+    assert client.calls[1] == ("odds", live.CLOSING_MARKETS, ("ev-pre",))
+    assert set(snapshot.offers["game_id"]) == {102}
+
+
 def test_postkick_score_is_captured_when_books_pull_the_spread(monkeypatch):
     current = datetime.now(timezone.utc)
     commence = (current - timedelta(minutes=1)).isoformat()
