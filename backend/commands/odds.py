@@ -80,6 +80,8 @@ def handle_kickoff_run(args: Namespace) -> None:
     log.info("READY")
     for detail in result.target_details:
         log.info(f"OK: {detail}")
+    for warning in result.warnings:
+        log.info(f"WARNING: {warning}")
     log.info(
         f"OK: wrote {result.anchor_count} market anchors after "
         f"{result.polls_completed} verified polls"

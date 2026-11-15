@@ -954,6 +954,11 @@ def test_live_schedule_uses_the_freshest_stored_snapshot(tmp_path, monkeypatch):
     assert schedule["game_id"].tolist() == [3]
 
 
+def _window_problems(*args, **kwargs):
+    rejected, details = kickoff.validate_completed_window(*args, **kwargs)
+    return [problem for game in rejected.values() for problem in game], details
+
+
 def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     monkeypatch,
     tmp_path,
@@ -1039,7 +1044,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
         }
     )
 
-    problems, details = kickoff.validate_completed_window(target, frames, anchors)
+    problems, details = _window_problems(target, frames, anchors)
     assert problems == []
     assert "ignored 1 live offers" in details[0]
 
@@ -1047,7 +1052,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
         **frames,
         "offers": frames["offers"][frames["offers"]["market"].ne("totals")],
     }
-    problems, _ = kickoff.validate_completed_window(target, without_totals, anchors)
+    problems, _ = _window_problems(target, without_totals, anchors)
     assert any("0 paired providers updated" in problem for problem in problems)
 
     postkick_provider = {**frames, "offers": frames["offers"].copy()}
@@ -1056,7 +1061,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
         & postkick_provider["offers"]["provider_key"].eq("b"),
         "provider_last_update",
     ] = live_at
-    problems, _ = kickoff.validate_completed_window(target, postkick_provider, anchors)
+    problems, _ = _window_problems(target, postkick_provider, anchors)
     assert any("total provider update at or after" in problem for problem in problems)
 
     split_pair = {**frames, "offers": frames["offers"].copy()}
@@ -1066,11 +1071,11 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
         & split_pair["offers"]["selection"].eq("under"),
         "provider_last_update",
     ] = live_at
-    problems, _ = kickoff.validate_completed_window(target, split_pair, anchors)
+    problems, _ = _window_problems(target, split_pair, anchors)
     assert any("total provider update at or after" in problem for problem in problems)
 
     leaked = anchors.assign(closing_snapshot_id="live", closing_fetched_at=live_at)
-    problems, _ = kickoff.validate_completed_window(target, frames, leaked)
+    problems, _ = _window_problems(target, frames, leaked)
     assert any("post-kickoff snapshot" in problem for problem in problems)
     assert any("closing snapshot has 0 providers" in problem for problem in problems)
 
@@ -1080,13 +1085,51 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     static_book["offers"].loc[
         static_book["offers"]["provider_key"].eq("a"), "provider_last_update"
     ] = starts_at - pd.Timedelta(minutes=10)
-    problems, _ = kickoff.validate_completed_window(target, static_book, anchors)
+    problems, _ = _window_problems(target, static_book, anchors)
     assert any("1 providers updated within 300s" in problem for problem in problems)
     assert any("1 paired providers updated" in problem for problem in problems)
-    problems, _ = kickoff.validate_completed_window(
+    problems, _ = _window_problems(
         target, static_book, anchors, min_providers=1
     )
     assert problems == []
+
+    # A target whose close cannot be proven is rejected alone: ESPN pulled
+    # one line 18 minutes before its delayed kickoff, and the other target's
+    # fresh close still stands.
+    pair_target = kickoff.KickoffTarget(
+        game_ids=(101, 102),
+        first_kickoff=starts_at,
+        last_kickoff=starts_at,
+        labels=("North Carolina at TCU (101)", "Duke at Wake Forest (102)"),
+    )
+    pair_schedule = pd.DataFrame(
+        {
+            "game_id": [101, 102],
+            "start_date": [starts_at, starts_at],
+            "home_team": ["TCU", "Wake Forest"],
+            "away_team": ["North Carolina", "Duke"],
+        }
+    )
+    pulled = frames["offers"].assign(
+        game_id=102, provider_last_update=starts_at - pd.Timedelta(minutes=18)
+    )
+    pair = {
+        "events": pd.concat(
+            [frames["events"], frames["events"].assign(game_id=102)],
+            ignore_index=True,
+        ),
+        "offers": pd.concat([frames["offers"], pulled], ignore_index=True),
+    }
+    rejected, details = kickoff.validate_completed_window(
+        pair_target,
+        pair,
+        pd.concat([anchors, anchors.assign(game_id=102)], ignore_index=True),
+        schedule=pair_schedule,
+    )
+    assert list(rejected) == [102]
+    assert any("0 providers updated within 300s" in p for p in rejected[102])
+    assert len(details) == 1
+    assert details[0].startswith("North Carolina at TCU (101)")
 
     # The provider's kickoff, not the frozen schedule, bounds the close: when
     # commence_time moves later, a snapshot after the scheduled kickoff is
@@ -1120,7 +1163,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
         closing_fetched_at=late_close,
         latest_provider_update=late_close - pd.Timedelta(seconds=30),
     )
-    problems, details = kickoff.validate_completed_window(target, drifted, late_anchor)
+    problems, details = _window_problems(target, drifted, late_anchor)
     assert problems == []
     assert any("+300s from the frozen schedule" in detail for detail in details)
     assert any(
@@ -1134,7 +1177,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
             )
         ),
     }
-    problems, _ = kickoff.validate_completed_window(target, stale_totals, late_anchor)
+    problems, _ = _window_problems(target, stale_totals, late_anchor)
     assert any("0 paired providers updated" in problem for problem in problems)
 
     # Fresh-runner acceptance: use one frozen weekly artifact even with a
@@ -1214,7 +1257,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     built = market.build_live_market_anchors(2026, schedule=frozen["schedule_coverage"])
     assert built["model_week"].tolist() == [2]
     assert built["closing_snapshot_id"].tolist() == ["close"]
-    problems, _ = kickoff.validate_completed_window(
+    problems, _ = _window_problems(
         actual_target, frames, built, schedule=frozen["schedule_coverage"]
     )
     assert problems == []
@@ -1537,7 +1580,7 @@ def test_kickoff_window_follows_reported_game_state_past_the_scheduled_start():
     )
     frames = {"events": events, "offers": offers}
 
-    problems, details = kickoff.validate_completed_window(
+    problems, details = _window_problems(
         target, frames, anchors, min_providers=1, schedule=schedule
     )
     assert problems == []
@@ -1546,7 +1589,7 @@ def test_kickoff_window_follows_reported_game_state_past_the_scheduled_start():
     # A feed that only reports a commence time gives no such proof, so a
     # snapshot read after that time is still rejected.
     timed = {**frames, "events": events.assign(status_source="scores")}
-    problems, _ = kickoff.validate_completed_window(
+    problems, _ = _window_problems(
         target, timed, anchors, min_providers=1, schedule=schedule
     )
     assert any("post-kickoff snapshot" in problem for problem in problems)

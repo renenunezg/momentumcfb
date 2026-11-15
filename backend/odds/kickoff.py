@@ -90,6 +90,7 @@ class KickoffRunResult:
     anchor_count: int
     target_details: tuple[str, ...]
     polls_completed: int = 0
+    warnings: tuple[str, ...] = ()
 
 
 def _utc(value=None) -> pd.Timestamp:
@@ -981,13 +982,15 @@ def validate_completed_window(
     max_offer_staleness_seconds: float = 300.0,
     min_providers: int = 2,
     schedule: pd.DataFrame | None = None,
-) -> tuple[list[str], list[str]]:
+) -> tuple[dict[int, list[str]], list[str]]:
     """Prove each target froze a fresh pregame line after a live phase poll.
 
-    A frozen forecast schedule must be passed on fresh runners, which restore
-    only the weekly artifact and hold no stored Division I schedule.
+    Returns the problems of each target that failed, keyed by game id, and
+    the details of those that passed. A frozen forecast schedule must be
+    passed on fresh runners, which restore only the weekly artifact and hold
+    no stored Division I schedule.
     """
-    problems: list[str] = []
+    rejected: dict[int, list[str]] = {}
     details: list[str] = []
     events = frames["events"].copy()
     offers = frames["offers"].copy()
@@ -1006,7 +1009,7 @@ def validate_completed_window(
         scheduled = scheduled_kickoffs.get(game_id)
         kickoff = kickoffs.get(game_id)
         if kickoff is None or pd.isna(kickoff):
-            problems.append(f"{label} has no kickoff timestamp")
+            rejected[game_id] = [f"{label} has no kickoff timestamp"]
             continue
         if scheduled is not None and pd.notna(scheduled) and kickoff != scheduled:
             drift = (kickoff - scheduled).total_seconds()
@@ -1024,10 +1027,11 @@ def validate_completed_window(
             max_offer_staleness_seconds=max_offer_staleness_seconds,
             min_providers=min_providers,
         )
-        problems.extend(game_problems)
+        if game_problems:
+            rejected[game_id] = game_problems
         if detail:
             details.append(detail)
-    return problems, details
+    return rejected, details
 
 
 def _scheduled_kickoffs(
@@ -1124,8 +1128,14 @@ def _freeze_market_anchors(
     forecast_directory: str | None,
     max_offer_staleness_seconds: float,
     min_providers: int,
-) -> tuple[pd.DataFrame, list[str]]:
-    """Replay the stored window, prove every target closed pregame, and write."""
+) -> tuple[pd.DataFrame, list[str], list[str]]:
+    """Replay the stored window, prove each target closed pregame, and write
+    the anchors of the targets that did.
+
+    A target whose closing line cannot be proven (ESPN can pull a line minutes
+    before a delayed kickoff) is left out with a warning, so it keeps the
+    labelled CFBD fallback instead of costing every other game its close.
+    """
     replay_problems, frames = verify_live_snapshots(season)
     if replay_problems:
         raise ValueError("; ".join(replay_problems))
@@ -1134,7 +1144,7 @@ def _freeze_market_anchors(
         schedule=schedule if forecast_directory else None,
     )
     built = built[built["game_id"].isin(target.game_ids)].reset_index(drop=True)
-    validation_problems, target_details = validate_completed_window(
+    rejected, target_details = validate_completed_window(
         target,
         frames,
         built,
@@ -1142,12 +1152,13 @@ def _freeze_market_anchors(
         min_providers=min_providers,
         schedule=schedule,
     )
-    if validation_problems:
-        raise ValueError(
-            "; ".join(validation_problems) + "; market anchors were not changed"
-        )
-    _write_market_anchors(season, built)
-    return built, target_details
+    problems = [problem for game in rejected.values() for problem in game]
+    proven = built[~built["game_id"].isin(rejected)].reset_index(drop=True)
+    if proven.empty:
+        raise ValueError("; ".join(problems) + "; market anchors were not changed")
+    _write_market_anchors(season, proven)
+    warnings = [f"{problem}; left out of the closing lines" for problem in problems]
+    return proven, target_details, warnings
 
 
 def capture_closing_lines(
@@ -1322,7 +1333,7 @@ def run_kickoff_window(
             f"{completed} polls; market anchors were not changed"
         )
 
-    built, target_details = _freeze_market_anchors(
+    built, target_details, warnings = _freeze_market_anchors(
         season,
         target,
         schedule,
@@ -1335,4 +1346,5 @@ def run_kickoff_window(
         anchor_count=len(built),
         target_details=tuple(target_details),
         polls_completed=completed,
+        warnings=tuple(warnings),
     )
