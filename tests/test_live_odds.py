@@ -1088,9 +1088,7 @@ def test_kickoff_window_requires_pregame_anchor_and_postkick_provider_state(
     problems, _ = _window_problems(target, static_book, anchors)
     assert any("1 providers updated within 300s" in problem for problem in problems)
     assert any("1 paired providers updated" in problem for problem in problems)
-    problems, _ = _window_problems(
-        target, static_book, anchors, min_providers=1
-    )
+    problems, _ = _window_problems(target, static_book, anchors, min_providers=1)
     assert problems == []
 
     # A target whose close cannot be proven is rejected alone: ESPN pulled
