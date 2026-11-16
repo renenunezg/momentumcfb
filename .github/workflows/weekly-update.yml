@@ -47,9 +47,9 @@ on:
         required: false
         type: string
       max_calls:
-        description: Shared CFBD call budget for this run (approval required above 100)
+        description: Shared CFBD call budget for this run (approval required above 150)
         required: false
-        default: "100"
+        default: "150"
         type: string
 
 permissions:
@@ -82,7 +82,7 @@ jobs:
 
       OPENING_FORECAST_BUNDLE_URL: ${{ inputs.opening_forecast_bundle_url || vars.OPENING_FORECAST_BUNDLE_URL }}
       OPENING_FORECAST_BUNDLE_SHA256: ${{ inputs.opening_forecast_bundle_sha256 || vars.OPENING_FORECAST_BUNDLE_SHA256 }}
-      CFBD_MAX_CALLS: ${{ inputs.max_calls || '100' }}
+      CFBD_MAX_CALLS: ${{ inputs.max_calls || '150' }}
 
     steps:
       - name: Check out repository
