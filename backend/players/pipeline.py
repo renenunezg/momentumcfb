@@ -135,15 +135,24 @@ def grade_rows(
     )
 
 
-def war_rows(
-    snapshot: pd.DataFrame, values: pd.DataFrame, war_frame: pd.DataFrame
-) -> pd.DataFrame:
-    """One ``trait = "war"`` row per qualified FBS player-week with a v4 value.
+# Efficiency is credit per play only where a play is a snap the player was on:
+# a defender's credited plays are disruption events, so his rate is not one.
+EFFICIENCY_GROUPS = frozenset({"QB", "RB", "WR", "TE"})
+# Form compares a player's last few games with his whole season, so it needs at
+# least one earlier game to compare against.
+FORM_GAMES = 3
 
-    A snapshot week reads the latest v4 week at or before it (a week without games
-    has no v4 row of its own). The row takes the player's v4 position group and
-    games, ``value`` is his wins above replacement, ``points_above_replacement`` his
-    v4 points, and ``percentile`` ranks wins among the week's rows at the group.
+
+def _value_rows(
+    snapshot: pd.DataFrame, values: pd.DataFrame, measured: pd.DataFrame, trait: str
+) -> pd.DataFrame:
+    """One ``trait`` row per qualified FBS player-week with a measured ``value``.
+
+    ``measured`` is keyed by ``athlete_id, week`` in v4 weeks and may carry
+    ``points_above_replacement``. A snapshot week reads the latest v4 week at or
+    before it (a week without games has no v4 row of its own). The row takes the
+    player's v4 position group and games, and ``percentile`` ranks ``value`` among
+    the week's rows at the group.
     """
     flags = (
         snapshot.assign(pool=snapshot["qualified"].eq(True) & snapshot["fbs"].eq(True))
@@ -152,7 +161,7 @@ def war_rows(
     )
     pool = flags[flags].reset_index()[["week", "athlete_id"]]
     v4_weeks = np.array(sorted(values["week"].astype(int).unique()))
-    if pool.empty or not len(v4_weeks):
+    if pool.empty or not len(v4_weeks) or measured.empty:
         return pd.DataFrame(
             columns=[*TRAIT_SNAPSHOT_COLUMNS, "points_above_replacement"]
         )
@@ -160,28 +169,85 @@ def war_rows(
         np.searchsorted(v4_weeks, pool["week"].astype(int).to_numpy(), side="right") - 1
     )
     pool = pool[position >= 0].assign(value_week=v4_weeks[position[position >= 0]])
-    measured = (
+    joined = (
         values[["week", "athlete_id", "position_group", "games"]]
         .astype({"athlete_id": str})
-        .merge(war_frame.astype({"athlete_id": str}), on=["athlete_id", "week"])
+        .merge(measured.astype({"athlete_id": str}), on=["athlete_id", "week"])
     )
     rows = pool.merge(
-        measured.rename(columns={"week": "value_week"}), on=["athlete_id", "value_week"]
-    ).dropna(subset=["wins_above_replacement"])
+        joined.rename(columns={"week": "value_week"}), on=["athlete_id", "value_week"]
+    ).dropna(subset=["value"])
     identity = snapshot.drop_duplicates(["week", "athlete_id"])[
         ["week", "athlete_id", "season", "athlete_name", "team", "team_id"]
     ]
     rows = rows.merge(identity, on=["week", "athlete_id"])
-    by_group = rows.groupby(["week", "position_group"])["wins_above_replacement"]
+    by_group = rows.groupby(["week", "position_group"])["value"]
     rank = by_group.rank(method="average")
     n = by_group.transform("size")
     return rows.assign(
-        trait="war",
-        value=rows["wins_above_replacement"],
+        trait=trait,
         percentile=(100 * (rank - 1) / (n - 1)).where(n.gt(1), 100.0),
         kind="measured",
         qualified=True,
     )
+
+
+def war_rows(
+    snapshot: pd.DataFrame, values: pd.DataFrame, war_frame: pd.DataFrame
+) -> pd.DataFrame:
+    """``trait = "war"`` rows: ``value`` is wins above replacement and
+    ``points_above_replacement`` the v4 points behind them."""
+    measured = war_frame[["athlete_id", "week"]].assign(
+        value=war_frame["wins_above_replacement"],
+        points_above_replacement=war_frame["points_above_replacement"],
+    )
+    return _value_rows(snapshot, values, measured, "war")
+
+
+def efficiency_rows(snapshot: pd.DataFrame, values: pd.DataFrame) -> pd.DataFrame:
+    """``trait = "efficiency"`` rows for ball carriers and receivers: v4 adjusted EPA
+    per credited play through the week, the per-play view of what WAR counts in total."""
+    offense = values[values["position_group"].isin(EFFICIENCY_GROUPS)]
+    measured = offense[["athlete_id", "week"]].assign(value=offense["adjusted_rate"])
+    return _value_rows(snapshot, values, measured, "efficiency")
+
+
+def form_rows(
+    snapshot: pd.DataFrame, values: pd.DataFrame, credited: pd.DataFrame
+) -> pd.DataFrame:
+    """``trait = "form"`` rows: adjusted EPA per game over the player's last
+    ``FORM_GAMES`` credited games less his per-game mean over every game through the
+    week. Positive is a hot stretch. A player with no earlier game has no row."""
+    games = credited.astype({"athlete_id": str}).sort_values(
+        ["athlete_id", "model_week"], kind="stable"
+    )
+    parts = []
+    for week in sorted(values["week"].astype(int).unique()):
+        through = games[games["model_week"].le(week)].groupby("athlete_id")
+        recent = through.tail(FORM_GAMES).groupby("athlete_id")["adjusted_epa"].mean()
+        frame = pd.DataFrame(
+            {
+                "recent": recent,
+                "season": through["adjusted_epa"].mean(),
+                "games": through.size(),
+            }
+        )
+        frame = frame[frame["games"].gt(FORM_GAMES)]
+        parts.append(
+            pd.DataFrame(
+                {
+                    "athlete_id": frame.index,
+                    "week": week,
+                    "value": (frame["recent"] - frame["season"]).to_numpy(),
+                }
+            )
+        )
+    measured = (
+        pd.concat(parts, ignore_index=True)
+        if parts
+        else pd.DataFrame(columns=["athlete_id", "week", "value"])
+    )
+    return _value_rows(snapshot, values, measured, "form")
 
 
 def score_snapshot(
@@ -193,16 +259,26 @@ def score_snapshot(
     fbs_schools: set[str],
     talent: pd.Series,
     prior: pd.DataFrame | None,
+    credited: pd.DataFrame,
 ) -> pd.DataFrame:
     """The scored artifact for one season's weekly trait snapshots (``POSITION_TRAIT_COLUMNS``).
 
     ``snapshot`` carries ``fbs`` (from ``fbs_schools``); ``values`` are the season's v4
-    values, which also give WAR; ``talent`` is the season's team talent and ``prior``
-    last season's final grades (``backtest.prior_season_grades``).
+    values, which also give WAR and efficiency; ``talent`` is the season's team talent,
+    ``prior`` last season's final grades (``backtest.prior_season_grades``) and
+    ``credited`` the per-game credit (``backtest.credited_games``) behind form.
     """
     snapshot = grade.with_derived_traits(snapshot, values, talent)
     scored = grade_rows(snapshot, model, prior)
-    measured = war_rows(snapshot, values, war.wins_above_replacement(values))
+    parts = [
+        war_rows(snapshot, values, war.wins_above_replacement(values)),
+        efficiency_rows(snapshot, values),
+        form_rows(snapshot, values, credited),
+    ]
+    # An empty part (no player with four games yet) is left out of the concat.
+    measured = pd.concat(
+        [part for part in parts if not part.empty] or parts[:1], ignore_index=True
+    )
     weighted = model.weights[model.weights["weight"].ne(0)]
     weighted_keys = set(zip(weighted["position_group"], weighted["trait"]))
     traits = snapshot[TRAIT_SNAPSHOT_COLUMNS].assign(uncertainty=np.nan)
@@ -266,6 +342,7 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         fbs_schools,
         backtest.team_talent(season),
         backtest.prior_season_grades(season, model),
+        built["credited"],
     )
     store.write_processed(out, *position_traits_artifact(season))
     published = published_trait_rows(out)

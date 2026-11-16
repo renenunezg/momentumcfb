@@ -75,6 +75,7 @@ VALUE_COLUMNS = [
     "adjusted_per_game",
     "replacement_per_game",
     "value_above_replacement",  # the draft check and wins above replacement
+    "adjusted_rate",  # efficiency
 ]
 CREDITED_GAME_COLUMNS = ["athlete_id", "game_id", "model_week", "adjusted_epa"]
 IDENTITY_COLUMNS = ["athlete_id", "athlete_name", "team"]
@@ -877,6 +878,7 @@ def score_cached_season(season: int) -> pd.DataFrame:
         set(teams.loc[teams["classification"].eq("fbs"), "school"]),
         team_talent(season),
         prior_season_grades(season, model),
+        store.read_processed(*season_artifact("credited", season)),
     )
     store.write_processed(out, *traits_artifact(f"scored_{season}"))
     log.info(
