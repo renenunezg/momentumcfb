@@ -18,7 +18,9 @@ from dataclasses import dataclass
 # v3 (2026-11-09) adds the program talent trait (``team.talent``) at QB, RB and DB,
 # leaves DL trait z-scores uncapped, and pulls the early-season composite toward
 # last season's final grade at the groups the model carries prior terms for.
-MODEL_VERSION = "cfb_position_traits_v3"
+# v4 (2026-11-16) rates quarterback ball security by the turnovers he risked
+# (``qb.ball_security`` as expected turnovers, new ``qb.sack_ball_security``).
+MODEL_VERSION = "cfb_position_traits_v4"
 AGGREGATES = frozenset({"rate", "quantile20", "share_of_games", "latest"})
 
 
@@ -77,4 +79,10 @@ DERIVED_TRAITS[TALENT_TRAIT] = TraitSpec(
 
 # Importing a position module registers its traits, so the registry is complete
 # whenever the package is imported.
-from backend.players.traits import defense, line, offense, punting  # noqa: E402, F401
+from backend.players.traits import (  # noqa: E402, F401
+    defense,
+    line,
+    offense,
+    punting,
+    turnovers,
+)

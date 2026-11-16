@@ -58,6 +58,7 @@ from backend.players.traits.transfers import (
     match_transfers,
     portability,
 )
+from backend.players.traits.turnovers import turnover_traits
 from backend.players.value import MIN_QUALIFIED_PLAYERS
 
 log = logging.getLogger(__name__)
@@ -291,6 +292,7 @@ def build_season_traits(
             defense_traits(ctx),
             line_traits(ctx, tables),
             punting_traits(ctx),
+            turnover_traits(ctx),
         ],
         ignore_index=True,
     ).astype({"athlete_id": str})

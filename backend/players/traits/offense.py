@@ -72,7 +72,6 @@ QB_TRAITS = {
     for spec in (
         TraitSpec("qb.drive_engine", ("QB",), "counted"),
         TraitSpec("qb.explosive", ("QB",), "counted"),
-        TraitSpec("qb.ball_security", ("QB",), "counted"),
         TraitSpec("qb.floor", ("QB",), "counted", aggregate="quantile20"),
         TraitSpec("qb.legs", ("QB",), "counted"),
         TraitSpec("qb.pressure_handling", ("QB",), "inferred"),
@@ -294,29 +293,6 @@ def _qb_explosive(qb_dropbacks: pd.DataFrame, games: pd.DataFrame) -> pd.DataFra
     return trait_rows(opponent_adjusted(events, games), QB_TRAITS["qb.explosive"])
 
 
-def _qb_ball_security(
-    qb_rows: pd.DataFrame, qb_dropbacks: pd.DataFrame, games: pd.DataFrame
-) -> pd.DataFrame:
-    """Offense-view WPA of the passer's interceptions and fumbles per dropback.
-
-    Turnovers lose win probability, so the sum is usually negative and a
-    clean game scores zero: higher is better. FCS games carry no stored win
-    probability and their missing WPA counts as zero.
-    """
-    interceptions = qb_dropbacks[qb_dropbacks["is_interception"]]
-    fumbles = qb_rows[qb_rows["role"].eq("fumbler")]
-    turnovers = pd.concat([interceptions, fumbles], ignore_index=True)
-    cost = per_game(
-        turnovers, turnovers["play_wpa"].fillna(0.0) * turnovers["weight"], 0.0
-    )
-    exposure = per_game(qb_dropbacks, 0.0, qb_dropbacks["weight"])
-    events = exposure.drop(columns="numerator").merge(
-        cost.drop(columns="denominator"), on=GAME_KEYS, how="left"
-    )
-    events["numerator"] = events["numerator"].fillna(0.0)
-    return trait_rows(opponent_adjusted(events, games), QB_TRAITS["qb.ball_security"])
-
-
 def _qb_floor(qb_dropbacks: pd.DataFrame) -> pd.DataFrame:
     games = qb_dropbacks.groupby(GAME_KEYS, as_index=False).agg(
         epa=("adjusted_epa", "sum"), weight=("weight", "sum"), count=("play_id", "size")
@@ -439,7 +415,9 @@ def qb_traits(
     *,
     poor_coverage: bool = False,
 ) -> pd.DataFrame:
-    """The seven quarterback traits per player and game, in the trait frame contract.
+    """Six of the quarterback traits per player and game, in the trait frame contract.
+
+    The two ball security traits come from ``turnovers.turnover_traits``.
 
     ``poor_coverage`` (decided per season by the caller from ``target_coverage``
     against ``POOR_TARGET_COVERAGE``) makes receiver independence use receptions
@@ -454,7 +432,6 @@ def qb_traits(
     frames = [
         _qb_drive_engine(qb_rows, tables, ctx.games),
         _qb_explosive(qb_dropbacks, ctx.games),
-        _qb_ball_security(qb_rows, qb_dropbacks, ctx.games),
         _qb_floor(qb_dropbacks),
         _qb_legs(qb_rows, tables, ctx.games),
         _qb_pressure_handling(all_dropbacks, qbs, ctx.games),
