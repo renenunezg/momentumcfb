@@ -26,6 +26,7 @@ from scipy.stats import norm
 from backend.config import PROCESSED_DIR, RAW_DIR, UNRATED_TALENT_TEAMS
 from backend.etl import store
 from backend.features.possessions import classify_plays
+from backend.model.weekly import load_weekly_games
 from backend.players import pipeline
 from backend.players.ingest import read_season_source, read_weekly
 from backend.players.traits import (
@@ -71,6 +72,7 @@ VALUE_COLUMNS = [
     "athlete_id",
     "position_group",
     "games",
+    "plays",  # spread value's expected starter
     "shrunk_per_game",
     "adjusted_per_game",
     "replacement_per_game",
@@ -879,6 +881,7 @@ def score_cached_season(season: int) -> pd.DataFrame:
         team_talent(season),
         prior_season_grades(season, model),
         store.read_processed(*season_artifact("credited", season)),
+        load_weekly_games(season),
     )
     store.write_processed(out, *traits_artifact(f"scored_{season}"))
     log.info(

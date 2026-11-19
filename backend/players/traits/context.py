@@ -67,6 +67,19 @@ class SeasonContext:
     )
 
 
+def completed_team_games(games: pd.DataFrame) -> pd.DataFrame:
+    """``game_id, model_week, team``: one row per team in each completed game of
+    the schedule (``game_id, model_week, home_team, away_team, completed``)."""
+    completed = games[games["completed"].fillna(False).astype(bool)]
+    return pd.concat(
+        [
+            completed[["game_id", "model_week", side]].rename(columns={side: "team"})
+            for side in ("home_team", "away_team")
+        ],
+        ignore_index=True,
+    )
+
+
 def player_presence(
     box: pd.DataFrame, credit: pd.DataFrame, games: pd.DataFrame
 ) -> pd.DataFrame:
@@ -87,14 +100,7 @@ def player_presence(
         ignore_index=True,
     ).drop_duplicates()
 
-    completed = games[games["completed"].fillna(False).astype(bool)]
-    team_games = pd.concat(
-        [
-            completed[["game_id", "model_week", side]].rename(columns={side: "team"})
-            for side in ("home_team", "away_team")
-        ],
-        ignore_index=True,
-    )
+    team_games = completed_team_games(games)
     pairs = seen[["athlete_id", "team"]].drop_duplicates()
     out = pairs.merge(team_games, on="team", how="inner")
     out = out.merge(

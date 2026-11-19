@@ -438,8 +438,9 @@ def publish_backtest() -> int:
     """Replace cfb.backtest_predictions with the core model's walk-forward.
 
     The rows are ``joint_scoring_v13``; live graded rows are ``joint_scoring_v14``
-    or ``joint_scoring_v15``, the same core fit after the frozen final-mean
-    calibration (v15 adds the travel term). See
+    to ``joint_scoring_v16``, the same core fit after the frozen final-mean
+    calibration (v15 adds the travel term, v16 sizes the quarterback-out
+    adjustment by the starter's PSR). See
     ``backend.model.walk_forward_backtest``.
     """
     from backend.db import engine
@@ -1213,6 +1214,23 @@ def fetch_qb_availability(season):
             text(
                 f"SELECT season, week, team, player, status, source, reported_at "
                 f"FROM {CFB_SCHEMA}.qb_availability WHERE season = :s"
+            ),
+            conn,
+            params={"s": season},
+        )
+
+
+def fetch_qb_spread_values(season):
+    """The published quarterback PSR rows (``spread_value``) for a season, which
+    size a ruled-out starter's adjustment; see backend.model.availability."""
+    from backend.db import engine
+
+    with engine.connect() as conn:
+        return pd.read_sql_query(
+            text(
+                f"SELECT team, athlete_name, value, as_of "
+                f"FROM {CFB_SCHEMA}.position_traits WHERE season = :s "
+                f"AND trait = 'spread_value' AND position_group = 'QB'"
             ),
             conn,
             params={"s": season},

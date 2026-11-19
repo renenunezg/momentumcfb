@@ -12,7 +12,11 @@ from backend.features.scoring import (
     load_scoring_team_games,
 )
 from backend.features.weather import weather_context
-from backend.model.availability import apply_qb_availability, pregame_qb_outs
+from backend.model.availability import (
+    apply_qb_availability,
+    pregame_qb_outs,
+    starter_spread_values,
+)
 from backend.model.forecast_calibration import apply_forecast_calibration
 from backend.model.joint_scoring import fit_joint_scoring
 from backend.model.market_blend import (
@@ -318,11 +322,14 @@ def run_weekly_forecast(
     require_market: bool = False,
     as_of: datetime | None = None,
     qb_availability: pd.DataFrame | None = None,
+    qb_spread_values: pd.DataFrame | None = None,
 ) -> WeeklyForecastResult:
     """Fit and persist one leakage-safe in-season weekly forecast.
 
     ``qb_availability`` carries explicit pregame quarterback reports; only
     rows reported before ``as_of`` for the forecast week adjust projections.
+    ``qb_spread_values`` are the published quarterback PSR rows that size each
+    ruled-out starter's adjustment (``backend.model.availability``).
     """
     created_at = as_of or datetime.now(timezone.utc)
     if created_at.tzinfo is None or created_at.utcoffset() is None:
@@ -371,10 +378,20 @@ def run_weekly_forecast(
         created_at,
     )
     qb_outs = pregame_qb_outs(qb_availability, season, forecast_week, created_at)
+    starter_psr = starter_spread_values(
+        qb_availability, qb_spread_values, season, forecast_week, created_at
+    )
+    for team in sorted(qb_outs):
+        log.info(
+            "quarterback out %s: starter PSR %s",
+            team,
+            f"{starter_psr[team]:.2f}" if team in starter_psr else "unpriced",
+        )
     projections = apply_qb_availability(
         projections,
         qb_outs,
         set(target.loc[target["season_type"].eq("postseason"), "game_id"]),
+        starter_psr,
     )
 
     unit_games = store.read_processed("unit_games", f"{season}.parquet")

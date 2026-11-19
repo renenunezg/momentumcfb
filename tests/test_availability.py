@@ -1,10 +1,18 @@
 import pandas as pd
+import pytest
 
+from backend.model import availability
 from backend.model.availability import (
-    QB_OUT_POINTS,
-    QB_OUT_POSTSEASON_POINTS,
+    UNPRICED_STARTER_POINTS,
     apply_qb_availability,
     pregame_qb_outs,
+    starter_spread_values,
+)
+
+# Auburn's starter is unpriced below and plays a bowl: the average change plus
+# the bowl intercept's excess, summed in the order the adjustment sums them.
+QB_OUT_POSTSEASON_POINTS = UNPRICED_STARTER_POINTS + (
+    availability.QB_OUT_POSTSEASON_POINTS - availability.QB_OUT_POINTS
 )
 
 
@@ -15,6 +23,7 @@ def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
                 season=2026,
                 week=3,
                 team="Utah",
+                player="Cam Rising",
                 status="out",
                 reported_at="2026-09-09T12:00:00Z",
             ),
@@ -22,6 +31,7 @@ def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
                 season=2026,
                 week=3,
                 team="Auburn",
+                player="Payton Thorne",
                 status="doubtful",
                 reported_at="2026-09-12T12:00:00Z",
             ),
@@ -29,6 +39,7 @@ def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
                 season=2026,
                 week=3,
                 team="Ohio",
+                player="Parker Navarro",
                 status="questionable",
                 reported_at="2026-09-09T12:00:00Z",
             ),
@@ -36,6 +47,7 @@ def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
                 season=2026,
                 week=4,
                 team="Georgia",
+                player="Gunner Stockton",
                 status="out",
                 reported_at="2026-09-09T12:00:00Z",
             ),
@@ -43,6 +55,25 @@ def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
     )
     forecast_cutoff = pd.Timestamp("2026-09-10T18:00:00Z")
     assert pregame_qb_outs(reports, 2026, 3, forecast_cutoff) == {"Utah"}
+    # Utah's starter is priced by name from the PSR published before the cutoff,
+    # and the line moves by exactly that PSR; a later publish is ignored.
+    published_psr = pd.DataFrame(
+        dict(
+            team=["Utah", "Utah", "Auburn"],
+            athlete_name=["Cam Rising", "Cam Rising", "Payton Thorne"],
+            value=[3.0, 9.0, 2.0],
+            as_of=[
+                "2026-09-08T12:00:00Z",
+                "2026-09-11T12:00:00Z",
+                "2026-09-11T12:00:00Z",
+            ],
+        )
+    )
+    starter_psr = starter_spread_values(
+        reports, published_psr, 2026, 3, forecast_cutoff
+    )
+    assert starter_psr == {"Utah": 3.0}
+    QB_OUT_POINTS = 3.0
     projections = pd.DataFrame(
         [
             dict(
@@ -67,7 +98,9 @@ def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
             ),
         ]
     )
-    forecast = apply_qb_availability(projections, {"Utah"}, postseason_game_ids={2})
+    forecast = apply_qb_availability(
+        projections, {"Utah"}, postseason_game_ids={2}, starter_psr=starter_psr
+    )
     utah = forecast.iloc[0]
     assert utah.home_qb_out and not utah.away_qb_out
     assert utah.expected_home_points == 30 - QB_OUT_POINTS
@@ -105,14 +138,12 @@ def test_only_pregame_reports_adjust_and_a_re_decision_never_double_counts():
     assert game.pure_home_margin == -7 + QB_OUT_POSTSEASON_POINTS
     assert game.market_informed_home_margin == -4 + 0.5 * QB_OUT_POSTSEASON_POINTS
     assert game.qb_availability_points == QB_OUT_POSTSEASON_POINTS
-    assert game.market_informed_total == 47.0
-    assert (
-        game.market_informed_home_points + game.market_informed_away_points
-        == game.market_informed_total
+    assert game.market_informed_total == 49.0 - 0.5 * QB_OUT_POSTSEASON_POINTS
+    assert game.market_informed_home_points + game.market_informed_away_points == (
+        pytest.approx(game.market_informed_total)
     )
-    assert (
-        game.market_informed_home_points - game.market_informed_away_points
-        == game.market_informed_home_margin
+    assert game.market_informed_home_points - game.market_informed_away_points == (
+        pytest.approx(game.market_informed_home_margin)
     )
     assert published.iloc[1].market_informed_total == 49.0
 

@@ -80,6 +80,7 @@ def handle_weekly_update(args: Namespace) -> None:
         ensure_recommendation_schema,
         fetch_published_projections,
         fetch_qb_availability,
+        fetch_qb_spread_values,
         publish,
         weekly_forecast_is_published,
     )
@@ -114,6 +115,7 @@ def handle_weekly_update(args: Namespace) -> None:
                 log.info(f"kickoff capture reconciled for {dispatch_at}")
         return
     qb_availability = fetch_qb_availability(args.season)
+    qb_spread_values = fetch_qb_spread_values(args.season)
     try:
         try:
             result = run_weekly_forecast(
@@ -123,6 +125,7 @@ def handle_weekly_update(args: Namespace) -> None:
                 require_market=True,
                 as_of=as_of,
                 qb_availability=qb_availability,
+                qb_spread_values=qb_spread_values,
             )
         except OddsAPIError as exc:
             if "OUT_OF_USAGE_CREDITS" not in str(exc):
@@ -138,6 +141,7 @@ def handle_weekly_update(args: Namespace) -> None:
                 require_market=False,
                 as_of=as_of,
                 qb_availability=qb_availability,
+                qb_spread_values=qb_spread_values,
             )
     except WeeklyForecastNotReady as exc:
         log.info(f"weekly update not ready: {exc}")

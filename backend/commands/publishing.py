@@ -36,7 +36,11 @@ def handle_refresh_picks(args: Namespace) -> None:
 
     from backend.db import engine
     from backend.etl import store
-    from backend.model.availability import apply_qb_availability, pregame_qb_outs
+    from backend.model.availability import (
+        apply_qb_availability,
+        pregame_qb_outs,
+        starter_spread_values,
+    )
     from backend.model.weekly import odds_frames
     from backend.odds.client import pregame_odds_client
     from backend.publish import (
@@ -44,6 +48,7 @@ def handle_refresh_picks(args: Namespace) -> None:
         _publish_recommendations,
         ensure_recommendation_schema,
         fetch_qb_availability,
+        fetch_qb_spread_values,
     )
     from backend.recommendations import build_recommendations
 
@@ -68,10 +73,18 @@ def handle_refresh_picks(args: Namespace) -> None:
     games = store.read_games(args.season)
     published = projections.copy()
     availability = fetch_qb_availability(args.season)
+    starter_psr = starter_spread_values(
+        availability,
+        fetch_qb_spread_values(args.season),
+        args.season,
+        args.week,
+        decided_at,
+    )
     projections = apply_qb_availability(
         projections,
         pregame_qb_outs(availability, args.season, args.week, decided_at),
         set(games.loc[games["season_type"].eq("postseason"), "id"]),
+        starter_psr,
     )
     # Persist both views with each fresh decision, including the exact reports
     # that were eligible at its cutoff. Existing recommended picks stay frozen.
@@ -112,6 +125,9 @@ def handle_refresh_picks(args: Namespace) -> None:
             orient="records", date_format="iso"
         )
     )
+    # The PSR that sized each report (null: priced as an unpriced starter), so
+    # the decision replays after the published traits move on.
+    reports = reports.assign(starter_psr=reports["team"].map(starter_psr))
     report_rows = json.loads(reports.to_json(orient="records", date_format="iso"))
     projections["decision_forecast"] = [
         {

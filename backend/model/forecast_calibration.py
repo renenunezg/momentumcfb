@@ -2,6 +2,8 @@
 
 Apply after the joint/SRS score fit and before availability or market layers.
 joint_scoring_v15 adds the frozen visitor travel term (backend/model/travel.py).
+joint_scoring_v16 sizes the quarterback-out adjustment by the ruled-out
+starter's PSR (backend/model/availability.py).
 The total offset was fitted on 2020-2021 and selected on 2022.
 Process coefficients use only 2020-2022; both were checked on 2023-2025.
 Distribution scales and underlying team ratings are unchanged.
@@ -16,7 +18,7 @@ from backend.model.joint_scoring import MODEL_VERSION as CORE_MODEL_VERSION
 from backend.model.process import process_margin_adjustments
 from backend.model.travel import travel_margin_adjustments
 
-MODEL_VERSION = "joint_scoring_v15"
+MODEL_VERSION = "joint_scoring_v16"
 MEDIAN_TOTAL_OFFSET = -0.8326407989096936
 
 

@@ -443,7 +443,7 @@ def test_joint_model_is_leak_free_and_reconciles_outputs(tmp_path, monkeypatch):
     calibrated = apply_forecast_calibration(
         expected, replay_games, team_games, process_prior, 3, cutoff.to_pydatetime()
     )
-    assert calibrated["model_version"].eq("joint_scoring_v15").all()
+    assert calibrated["model_version"].eq("joint_scoring_v16").all()
     # Seattle to Columbus at Columbus is about 1,980 extra visitor miles; the
     # neutral site has no known venue and so no term.
     travel = calibrated.set_index("home_team")["travel_margin_adjustment"]

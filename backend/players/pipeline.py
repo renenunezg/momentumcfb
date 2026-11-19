@@ -11,11 +11,19 @@ import pandas as pd
 
 from backend.config import PROCESSED_DIR, RAW_DIR
 from backend.etl import store
+from backend.model.joint_scoring import DEFAULT_CONFIG
 from backend.players import artifacts, heisman, nil, qbr, season_stats, value
 from backend.players.credit import DEFENSE_ROLES, OFFENSE_SHARES
 from backend.players.ingest import players_dir, read_season_source, read_weekly
-from backend.players.traits import MODEL_VERSION, backtest, expectations, grade, war
-from backend.players.traits.context import load_season_context
+from backend.players.traits import (
+    MODEL_VERSION,
+    backtest,
+    expectations,
+    grade,
+    spread,
+    war,
+)
+from backend.players.traits.context import completed_team_games, load_season_context
 from backend.players.traits.snapshots import TRAIT_SNAPSHOT_COLUMNS
 
 log = logging.getLogger(__name__)
@@ -250,6 +258,27 @@ def form_rows(
     return _value_rows(snapshot, values, measured, "form")
 
 
+def spread_rows(
+    snapshot: pd.DataFrame,
+    values: pd.DataFrame,
+    credited: pd.DataFrame,
+    games: pd.DataFrame,
+) -> pd.DataFrame:
+    """``trait = "spread_value"`` rows (``spread``): for each team's expected
+    starting quarterback, the points its margin loses if he is ruled out, the
+    move the forecast makes (``availability.qb_out_points``). No other player
+    carries one (see ``spread``)."""
+    teams = snapshot.drop_duplicates("athlete_id")[["athlete_id", "team"]]
+    played = credited.astype({"athlete_id": str}).merge(teams, on="athlete_id")
+    measured = spread.spread_values(
+        values.astype({"athlete_id": str}).merge(teams, on="athlete_id"),
+        played[["athlete_id", "team", "game_id"]],
+        completed_team_games(games),
+        DEFAULT_CONFIG.rating_half_life_weeks,
+    )
+    return _value_rows(snapshot, values, measured, "spread_value")
+
+
 def score_snapshot(
     snapshot: pd.DataFrame,
     model: grade.GradeModel,
@@ -260,13 +289,15 @@ def score_snapshot(
     talent: pd.Series,
     prior: pd.DataFrame | None,
     credited: pd.DataFrame,
+    games: pd.DataFrame,
 ) -> pd.DataFrame:
     """The scored artifact for one season's weekly trait snapshots (``POSITION_TRAIT_COLUMNS``).
 
     ``snapshot`` carries ``fbs`` (from ``fbs_schools``); ``values`` are the season's v4
     values, which also give WAR and efficiency; ``talent`` is the season's team talent,
     ``prior`` last season's final grades (``backtest.prior_season_grades``) and
-    ``credited`` the per-game credit (``backtest.credited_games``) behind form.
+    ``credited`` the per-game credit (``backtest.credited_games``) behind form and
+    spread value, and ``games`` the season's schedule (``load_weekly_games``).
     """
     snapshot = grade.with_derived_traits(snapshot, values, talent)
     scored = grade_rows(snapshot, model, prior)
@@ -274,6 +305,7 @@ def score_snapshot(
         war_rows(snapshot, values, war.wins_above_replacement(values)),
         efficiency_rows(snapshot, values),
         form_rows(snapshot, values, credited),
+        spread_rows(snapshot, values, credited, games),
     ]
     # An empty part (no player with four games yet) is left out of the concat.
     measured = pd.concat(
@@ -343,6 +375,7 @@ def run_position_traits(season: int, as_of: datetime) -> pd.DataFrame:
         backtest.team_talent(season),
         backtest.prior_season_grades(season, model),
         built["credited"],
+        ctx.games,
     )
     store.write_processed(out, *position_traits_artifact(season))
     published = published_trait_rows(out)
