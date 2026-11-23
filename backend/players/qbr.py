@@ -6,6 +6,7 @@ are CFBD athlete ids. The snapshot is taken on the weekly run, after the week's
 games, so it covers the same games as the stat lines.
 """
 
+import logging
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -13,6 +14,8 @@ import requests
 
 from backend.etl.ingest import write_parquet
 from backend.players.ingest import players_dir
+
+log = logging.getLogger(__name__)
 
 ESPN_QBR_URL = (
     "https://site.web.api.espn.com/apis/fitt/v3/sports/football/college-football/qbr"
@@ -44,6 +47,7 @@ def parse_season_qbr(payload: dict, season: int) -> pd.DataFrame:
         if category["name"] == "general"
     )
     column = names.index(TOTAL_QBR)
+    plays = names.index("actionPlays")
     rows = []
     for entry in payload["athletes"]:
         general = next(c for c in entry["categories"] if c["name"] == "general")
@@ -51,12 +55,18 @@ def parse_season_qbr(payload: dict, season: int) -> pd.DataFrame:
             {
                 "athlete_id": str(entry["athlete"]["id"]),
                 "total_qbr": float(general["totals"][column]),
+                "plays": float(general["totals"][plays]),
             }
         )
-    out = pd.DataFrame(rows, columns=QBR_COLUMNS[:2])
-    if out["athlete_id"].duplicated().any():
-        raise ValueError("ESPN QBR lists a passer twice")
-    return out
+    out = pd.DataFrame(rows, columns=[*QBR_COLUMNS[:2], "plays"])
+    # ESPN sometimes lists a passer twice, once with a stale season-to-date
+    # line (2026 week 12: Bryce Underwood at 227 and 269 plays). Plays only
+    # grow through a season, so the entry with the most plays is current.
+    repeated = out.loc[out["athlete_id"].duplicated(), "athlete_id"].unique()
+    if len(repeated):
+        log.warning(f"ESPN QBR lists {list(repeated)} twice; keeping the most plays")
+    out = out.sort_values("plays").drop_duplicates("athlete_id", keep="last")
+    return out[QBR_COLUMNS[:2]].sort_index().reset_index(drop=True)
 
 
 def ingest_season_qbr(season: int) -> pd.DataFrame:
