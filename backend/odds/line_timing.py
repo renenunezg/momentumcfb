@@ -46,8 +46,20 @@ _QUOTES = (
 )
 
 
+_SMALLINT_MAX = 32767
+
+
 def _half(point: float | None) -> int | None:
     return None if point is None else int(round(point * 2))
+
+
+def _stored(value: int | None) -> int | None:
+    """The value as stored; a price beyond smallint range, such as a -50000
+    moneyline on a five-touchdown favorite, carries no usable price and is null."""
+    if value is not None and abs(value) > _SMALLINT_MAX:
+        log.info("Line timing drops out-of-range value %s", value)
+        return None
+    return value
 
 
 def _checkpoint(odds: dict, when: str) -> list[int | None] | None:
@@ -55,7 +67,7 @@ def _checkpoint(odds: dict, when: str) -> list[int | None] | None:
     values: list[int | None] = []
     for market, side, is_point in _QUOTES:
         quote = ((odds.get(market) or {}).get(side) or {}).get(when) or {}
-        values.append(_half(_point(quote)) if is_point else _price(quote))
+        values.append(_stored(_half(_point(quote)) if is_point else _price(quote)))
     return values if any(value is not None for value in values) else None
 
 
@@ -113,7 +125,7 @@ def record_decision_lines(
 
 def _closing_values(row) -> list[int | None]:
     def price(value):
-        return None if value is None or pd.isna(value) else int(round(value))
+        return None if value is None or pd.isna(value) else _stored(int(round(value)))
 
     def point(value):
         return None if value is None or pd.isna(value) else _half(float(value))
