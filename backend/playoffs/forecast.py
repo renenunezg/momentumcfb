@@ -93,17 +93,21 @@ def prepare_schedule(schedule, cutoff):
     ].copy()
     # Selection Sunday precedes Army-Navy; that result must not affect selection.
     schedule = schedule[schedule.start_date.lt("2026-12-07")].copy()
+    # Title games are simulated from the standings; CFBD lists a conference
+    # championship as a regular game once both participants clinch.
+    title_game = schedule.notes.fillna("").str.contains(r"Championship( Game)?$")
+    schedule = schedule[~title_game].copy()
     additions = []
     for g in c.e.current_games():
         if not str(g["id"]).startswith("flex-"):
             continue
         hi, ai = int(g["hid"]), int(g["aid"])
-        exists = (
-            schedule.home_team_id.eq(hi)
-            & schedule.away_team_id.eq(ai)
-            & schedule.start_date.ge("2026-11-27")
-        )
-        if exists.any():
+        # Once CFBD schedules the real flex games the provisional pairing is
+        # obsolete, whoever the opponents turned out to be.
+        scheduled = (
+            schedule.home_team_id.isin([hi, ai]) | schedule.away_team_id.isin([hi, ai])
+        ) & schedule.start_date.ge("2026-11-27")
+        if scheduled.any():
             continue
         additions.append(
             dict(
@@ -454,7 +458,9 @@ def build(args):
             "AP ranks are display context, not an extra fitted selection weight.",
             "Weekly team strength is frozen; completed results update the playoff path.",
             "Conference computer-ranking tiebreaks use a resume proxy.",
-            "Four Pac-12 flex opponents are provisional; games do not count in conference standings.",
+            f"{len(additions)} Pac-12 flex games are provisional; flex games do not count in conference standings."
+            if additions
+            else "Pac-12 flex games do not count in conference standings.",
             "Army-Navy is after selection and is excluded from qualification resumes.",
             "Reproduces the archived weekly model; published game forecasts remain unchanged.",
             "Sampling precision is not a confidence interval for real-world model accuracy.",
